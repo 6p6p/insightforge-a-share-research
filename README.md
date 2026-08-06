@@ -186,6 +186,32 @@ backend 重启协调（当前单实例方案）：遗留的 `pending/running` ru
 
 模拟工作流**不会改变 ResearchTask 状态**（保持 pending），也不会产生资料、证据或报告记录。
 
+## 公司身份与来源策略（阶段 2A 基础）
+
+当前新增公司标准身份（CompanyIdentity）与 Source Registry 基础。**尚未自动同步 A 股公司目录、未抓取公告、未实现宏观数据 API、未实现大模型联网搜索**。
+
+登记默认来源 Provider（幂等，可重复执行）：
+
+```bash
+conda run -n insightforge python -m app.cli.seed_source_registry
+```
+
+解析公司查询（精确匹配；多交易所代码返回 ambiguous）：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/companies/resolve \
+  -H "Content-Type: application/json" -d '{"query":"SSE:600519"}'
+```
+
+查询来源 Provider：
+
+```bash
+curl "http://127.0.0.1:8001/api/v1/source-providers"
+curl "http://127.0.0.1:8001/api/v1/source-providers?capability=regulation"
+```
+
+来源权威等级（authority_tier）与获取方式（acquisition_method）分离；大模型联网搜索只作为发现方式，不作为事实来源。
+
 ## 完整系统（Docker Compose）
 
 ```bash

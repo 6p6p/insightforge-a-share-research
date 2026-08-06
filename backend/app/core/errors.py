@@ -53,3 +53,33 @@ class InvalidLastEventId(DomainError):
     code = "invalid_last_event_id"
     http_status = 400
     message = "Last-Event-ID 必须是大于等于 0 的整数"
+
+
+class InvalidCompanyQuery(DomainError):
+    code = "invalid_company_query"
+    http_status = 400
+    message = "公司查询格式非法"
+
+
+class CompanyIdentityNotFound(DomainError):
+    code = "company_identity_not_found"
+    http_status = 404
+    message = "未找到匹配的公司身份"
+
+
+class CompanyIdentityAmbiguous(DomainError):
+    code = "company_identity_ambiguous"
+    http_status = 409
+    message = "公司查询存在多个匹配"
+
+
+class SourceProviderNotFound(DomainError):
+    code = "source_provider_not_found"
+    http_status = 404
+    message = "来源 Provider 不存在"
+
+
+class SourceUrlNotAllowed(DomainError):
+    code = "source_url_not_allowed"
+    http_status = 400
+    message = "来源 URL 不在允许域名范围内"
