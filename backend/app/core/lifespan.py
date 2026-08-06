@@ -35,5 +35,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await resources.database.dispose()
+        # ChromaManager has no public async close interface (chromadb-client
+        # 1.5.9); its resources are released on process shutdown.
         application.state.resources = None
         logger.info("application_shutdown")

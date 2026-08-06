@@ -1,0 +1,37 @@
+name: backend-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install backend
+        run: python -m pip install -e "./backend[dev]"
+
+      - name: Ruff check
+        run: ruff check backend
+
+      - name: Ruff format check
+        run: ruff format --check backend
+
+      - name: Unit tests
+        run: python -m pytest -c backend/pyproject.toml backend/tests -m "not integration" -v
+
+      - name: Dependency consistency
+        run: python -m pip check
+
+      - name: Build backend image
+        run: docker build -f docker/backend.Dockerfile -t insightforge-backend:ci .

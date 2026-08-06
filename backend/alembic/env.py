@@ -14,6 +14,7 @@ from alembic import context
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings  # noqa: E402
+from app.core.runtime import configure_asyncio_runtime  # noqa: E402
 from app.db.base import Base  # noqa: E402
 
 config = context.config
@@ -59,9 +60,7 @@ async def run_async_migrations() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    if sys.platform == "win32":
-        # psycopg async requires a selector event loop on Windows
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    configure_asyncio_runtime()
     asyncio.run(run_async_migrations())
 
 

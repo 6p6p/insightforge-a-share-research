@@ -7,7 +7,12 @@ from chromadb.api.async_api import AsyncClientAPI
 
 
 class ChromaManager:
-    """Lazily initialised async Chroma HTTP client, safe for concurrent access."""
+    """Lazily initialised async Chroma HTTP client, safe for concurrent access.
+
+    Note: chromadb-client 1.5.9's async client (AsyncClientAPI / AsyncClient)
+    exposes no public async close()/aclose() interface. We therefore do not
+    call private internals and rely on process shutdown for resource release.
+    """
 
     def __init__(
         self,

@@ -56,7 +56,7 @@ conda run -n insightforge python -m pip install -e "./backend[dev]"
 3. 复制本地配置（如果不存在 `.env`）：
 
 ```bash
-copy .env.example .env
+cp .env.example .env   # Windows cmd 下使用：copy .env.example .env
 ```
 
 4. 启动 Docker 依赖，执行迁移：
@@ -108,3 +108,7 @@ conda run -n insightforge python -m pytest -c backend/pyproject.toml backend/tes
 # 集成测试（需 PostgreSQL 与 Chroma 已启动）
 conda run -n insightforge python -m pytest -c backend/pyproject.toml backend/tests/integration -m integration -v
 ```
+
+## 阶段 0 验收
+
+阶段 0 的工程基座验收记录见 [docs/stage-0-acceptance.md](docs/stage-0-acceptance.md)。

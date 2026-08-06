@@ -5,21 +5,17 @@ Run explicitly with:
         -c backend/pyproject.toml backend/tests/integration -m integration -v
 """
 
-import asyncio
-import sys
-
 import pytest
 import pytest_asyncio
 
 from app.core.config import get_settings
+from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.vectorstore.client import ChromaManager
 
 pytestmark = pytest.mark.integration
 
-# psycopg async requires a selector event loop on Windows
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+configure_asyncio_runtime()
 
 
 @pytest_asyncio.fixture

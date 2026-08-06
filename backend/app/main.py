@@ -1,8 +1,5 @@
 """FastAPI application factory."""
 
-import asyncio
-import sys
-
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
@@ -10,10 +7,9 @@ from app.core.config import Settings, get_package_version, get_settings
 from app.core.lifespan import lifespan
 from app.core.logging import configure_logging
 from app.core.middleware import request_tracing_middleware
+from app.core.runtime import configure_asyncio_runtime
 
-# psycopg async requires a selector event loop on Windows
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+configure_asyncio_runtime()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
