@@ -117,6 +117,24 @@ curl "http://127.0.0.1:8001/api/v1/tasks?status=pending&limit=20&offset=0"
 
 以上示例仅用于演示接口，不构成任何投资建议。
 
+## LangGraph 模拟工作流（阶段 1B 基础）
+
+已建立 LangGraph 确定性模拟工作流与 PostgreSQL Checkpoint 基础。**它不是实际公司研究**——不采集资料、不生成研报、不接入 LLM，仅验证工作流编排与状态持久化。
+
+初始化 LangGraph Checkpoint 表（vendor 表，由 langgraph-checkpoint-postgres 管理，不属于 Alembic）：
+
+```bash
+conda run -n insightforge python -m app.cli.setup_checkpointer
+```
+
+对已有研究任务执行一次模拟工作流：
+
+```bash
+conda run -n insightforge python -m app.cli.simulate_workflow --task-id 替换为task_id
+```
+
+模拟工作流**不会改变 ResearchTask 状态**（保持 pending），也不会产生资料、证据或报告记录。
+
 ## 完整系统（Docker Compose）
 
 ```bash

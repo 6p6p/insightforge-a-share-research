@@ -23,3 +23,21 @@ class InvalidIdempotencyKey(DomainError):
     code = "invalid_idempotency_key"
     http_status = 400
     message = "Idempotency-Key 格式非法"
+
+
+class WorkflowRunNotFound(DomainError):
+    code = "workflow_run_not_found"
+    http_status = 404
+    message = "工作流运行不存在"
+
+
+class ActiveWorkflowRunExists(DomainError):
+    code = "active_workflow_run_exists"
+    http_status = 409
+    message = "该任务已存在进行中的工作流运行"
+
+
+class WorkflowRunAlreadyFinished(DomainError):
+    code = "workflow_run_already_finished"
+    http_status = 409
+    message = "工作流运行已结束，不能重复执行"

@@ -34,3 +34,11 @@ class ResearchModule(StrEnum):
     EVENTS = "events"
     MACRO = "macro"
     RISK = "risk"
+
+
+class WorkflowRunStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
