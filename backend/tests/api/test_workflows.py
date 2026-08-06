@@ -10,7 +10,7 @@ from app.api.dependencies import (
     get_workflow_execution_manager,
     get_workflow_service,
 )
-from app.core.errors import WorkflowRunNotFound
+from app.core.errors import WorkflowRunAlreadyFinished, WorkflowRunNotFound
 from app.db.dependencies import get_database
 from app.domain.tasks import WorkflowEventType
 from app.main import create_app
@@ -59,6 +59,10 @@ class FakeExecutionManager:
         self.start_error: Exception | None = None
         self.start_result: WorkflowRunResponse | None = None
         self.started_task_ids: list[UUID] = []
+        self.resume_result: WorkflowRunResponse | None = None
+        self.cancel_result: WorkflowRunResponse | None = None
+        self.cancel_error: Exception | None = None
+        self.retry_result: WorkflowRunResponse | None = None
 
     async def start_simulation(self, task_id: UUID) -> WorkflowRunResponse:
         self.started_task_ids.append(task_id)
@@ -67,6 +71,23 @@ class FakeExecutionManager:
         if self.start_result is not None:
             return self.start_result
         return _run_response(task_id=task_id)
+
+    async def resume_simulation(self, run_id: UUID, action_type) -> WorkflowRunResponse:
+        if self.resume_result is not None:
+            return self.resume_result
+        return _run_response(run_id=run_id, status="running")
+
+    async def cancel_run(self, run_id: UUID) -> WorkflowRunResponse:
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        if self.cancel_result is not None:
+            return self.cancel_result
+        return _run_response(run_id=run_id, status="cancelled")
+
+    async def retry_run(self, run_id: UUID) -> WorkflowRunResponse:
+        if self.retry_result is not None:
+            return self.retry_result
+        return _run_response(status="pending")
 
     async def get_run(self, run_id: UUID) -> WorkflowRunResponse:
         return _run_response(run_id=run_id)
@@ -204,9 +225,7 @@ def test_sse_streams_events_and_headers(client, fake_workflow_service) -> None:
 def test_sse_mid_stream_replay_returns_only_newer_events(client, fake_workflow_service) -> None:
     run = _run_response()
     fake_workflow_service.run = run
-    fake_workflow_service.events = [
-        _event_response(event_id=i) for i in range(1, 7)
-    ]
+    fake_workflow_service.events = [_event_response(event_id=i) for i in range(1, 7)]
     fake_workflow_service.terminal = True
 
     response = client.get(
@@ -228,3 +247,55 @@ def test_openapi_contains_workflow_endpoints(client) -> None:
     assert "/api/v1/tasks/{task_id}/runs" in schema["paths"]
     assert "/api/v1/workflow-runs/{run_id}" in schema["paths"]
     assert "/api/v1/workflow-runs/{run_id}/events" in schema["paths"]
+    assert "/api/v1/workflow-runs/{run_id}/actions" in schema["paths"]
+
+
+def test_approve_plan_returns_202(client, fake_execution_manager) -> None:
+    run = _run_response(status="running")
+    fake_execution_manager.resume_result = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "approve_plan"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run"]["status"] == "running"
+
+
+def test_cancel_returns_202(client, fake_execution_manager) -> None:
+    run = _run_response(status="cancelled")
+    fake_execution_manager.cancel_result = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "cancel"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run"]["status"] == "cancelled"
+
+
+def test_retry_returns_new_run(client, fake_execution_manager) -> None:
+    new_run = _run_response(status="pending")
+    fake_execution_manager.retry_result = new_run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{uuid4()}/actions",
+        json={"action_type": "retry"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run"]["run_id"] == str(new_run.run_id)
+
+
+def test_action_terminal_rejected_returns_409(client, fake_execution_manager) -> None:
+    fake_execution_manager.cancel_error = WorkflowRunAlreadyFinished()
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{uuid4()}/actions",
+        json={"action_type": "cancel"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workflow_run_already_finished"

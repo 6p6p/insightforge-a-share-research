@@ -151,11 +151,38 @@ curl http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id
 curl -N http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/events
 ```
 
-断线重连增量回放（可选 `Last-Event-ID` 请求头，值为上次收到的 `event_id`）：
+断线重连增量回放（可选 `Last-Event-ID` 请求头，值为上次收到的 `event_id`；注意 `event_id` 单调但可能有间隙，只用作游标）：
 
 ```bash
 curl -N -H "Last-Event-ID: 3" http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/events
 ```
+
+### 人工审批、取消与重试
+
+当任务设置了 `require_plan_approval=true`（数据库默认 true）时，工作流在计划生成后进入 `waiting_human` 等待人工确认（`waiting_human` 不是终态）。
+
+审批计划：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/actions \
+  -H "Content-Type: application/json" -d '{"action_type":"approve_plan"}'
+```
+
+取消（允许 pending/running/waiting_human）：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/actions \
+  -H "Content-Type: application/json" -d '{"action_type":"cancel"}'
+```
+
+重试（仅 failed/cancelled，创建新的 run/thread）：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/actions \
+  -H "Content-Type: application/json" -d '{"action_type":"retry"}'
+```
+
+backend 重启协调（当前单实例方案）：遗留的 `pending/running` run 在启动时被标记为 `failed`（error_code=worker_restarted）；`waiting_human` run 可用同一 run_id/thread_id 继续审批恢复。
 
 模拟工作流**不会改变 ResearchTask 状态**（保持 pending），也不会产生资料、证据或报告记录。
 

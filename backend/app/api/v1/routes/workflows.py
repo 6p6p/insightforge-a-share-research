@@ -5,7 +5,7 @@ import time
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
@@ -13,7 +13,12 @@ from app.api.dependencies import (
     get_workflow_service,
 )
 from app.core.errors import InvalidLastEventId
-from app.schemas.workflow import WorkflowRunResponse
+from app.domain.tasks import HumanActionType
+from app.schemas.workflow import (
+    WorkflowActionRequest,
+    WorkflowActionResponse,
+    WorkflowRunResponse,
+)
 from app.services.sse_service import format_sse_event
 from app.services.workflow_service import WorkflowService
 from app.workflows.execution_manager import WorkflowExecutionManager
@@ -56,6 +61,30 @@ async def get_run(
     service: Annotated[WorkflowService, Depends(get_workflow_service)],
 ) -> WorkflowRunResponse:
     return await service.get_run(run_id)
+
+
+@router.post(
+    "/workflow-runs/{run_id}/actions",
+    response_model=WorkflowActionResponse,
+)
+async def run_action(
+    run_id: UUID,
+    payload: WorkflowActionRequest,
+    response: Response,
+    manager: Annotated[WorkflowExecutionManager, Depends(get_workflow_execution_manager)],
+) -> WorkflowActionResponse:
+    """Submit a human action (approve_plan / cancel / retry) for a workflow run."""
+    if payload.action_type == "approve_plan":
+        run = await manager.resume_simulation(run_id, HumanActionType.APPROVE_PLAN)
+        response.status_code = 202
+        return WorkflowActionResponse(run=run)
+    if payload.action_type == "cancel":
+        run = await manager.cancel_run(run_id)
+        response.status_code = 202
+        return WorkflowActionResponse(run=run)
+    run = await manager.retry_run(run_id)
+    response.status_code = 202
+    return WorkflowActionResponse(run=run)
 
 
 @router.get("/workflow-runs/{run_id}/events")

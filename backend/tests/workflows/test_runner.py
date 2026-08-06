@@ -12,11 +12,14 @@ from app.core.errors import (
     WorkflowRunAlreadyFinished,
     WorkflowRunAlreadyStarted,
 )
+from app.db.models.human_action import HumanActionModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
+from app.domain.tasks import HumanActionType
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
+from app.workflows.graph import build_research_workflow
 from app.workflows.runner import WorkflowRunner
 
 pytestmark = pytest.mark.asyncio
@@ -59,12 +62,12 @@ class FakeSessionMaker:
 
 class FakeCheckpointManager:
     def __init__(self) -> None:
+        self._saver = InMemorySaver()
         self.checkpointers: list = []
 
     async def get_checkpointer(self):
-        saver = InMemorySaver()
-        self.checkpointers.append(saver)
-        return saver
+        self.checkpointers.append(self._saver)
+        return self._saver
 
 
 def _task(**overrides: object) -> ResearchTaskModel:
@@ -199,6 +202,7 @@ async def test_execute_success_event_sequence(monkeypatch) -> None:
         "node_completed",
         "node_completed",
         "node_completed",
+        "node_completed",
         "run_completed",
     ]
     assert task.status == "pending"
@@ -298,3 +302,98 @@ async def test_execute_finished_run_raises(monkeypatch) -> None:
 
     with pytest.raises(WorkflowRunAlreadyFinished):
         await runner.execute_simulation(run.run_id)
+
+
+async def test_execute_interrupt_marks_waiting_human(monkeypatch) -> None:
+    task = _task(require_plan_approval=True)
+    run = _run(task_id=task.task_id, status="pending")
+    sessionmaker = FakeSessionMaker()
+    runner = WorkflowRunner(sessionmaker, FakeCheckpointManager())
+
+    async def fake_claim(self, run_id, started_at):
+        run.status = "running"
+        return run
+
+    async def fake_get_task(self, task_id):
+        return task
+
+    async def fake_mark_waiting(self, run_id, pending_action):
+        run.status = "waiting_human"
+        run.pending_action = pending_action
+        return run
+
+    async def fake_get_run(self, run_id):
+        return run
+
+    monkeypatch.setattr(WorkflowRunRepository, "claim_pending", fake_claim)
+    monkeypatch.setattr(ResearchTaskRepository, "get_by_id", fake_get_task)
+    monkeypatch.setattr(WorkflowRunRepository, "mark_waiting_human", fake_mark_waiting)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
+
+    await runner.execute_simulation(run.run_id)
+
+    assert run.status == "waiting_human"
+    assert run.pending_action == "plan_approval"
+    assert "run_waiting_human" in _event_types(sessionmaker)
+    assert "run_completed" not in _event_types(sessionmaker)
+
+
+async def test_resume_completes_after_approval(monkeypatch) -> None:
+    task = _task(require_plan_approval=True)
+    run = _run(task_id=task.task_id, status="waiting_human", pending_action="plan_approval")
+    sessionmaker = FakeSessionMaker()
+    checkpoint = FakeCheckpointManager()
+    runner = WorkflowRunner(sessionmaker, checkpoint)
+
+    # 先在共享 saver 上产生 interrupt checkpoint
+    graph = build_research_workflow(await checkpoint.get_checkpointer())
+    config = {"configurable": {"thread_id": run.thread_id}}
+    initial = {
+        "task_id": str(task.task_id),
+        "run_id": str(run.run_id),
+        "company_query": task.company_query,
+        "modules": task.modules,
+        "questions": task.questions,
+        "current_stage": task.current_stage,
+        "progress": task.progress,
+        "require_plan_approval": True,
+    }
+    async for _ in graph.astream(initial, config, stream_mode="updates"):
+        pass
+    snapshot = await graph.aget_state(config)
+    assert any(t.interrupts for t in snapshot.tasks)
+
+    async def fake_claim_waiting(self, run_id, started_at):
+        run.status = "running"
+        run.pending_action = None
+        return run
+
+    async def fake_mark_completed(self, run_id, completed_at):
+        run.status = "completed"
+        run.completed_at = completed_at
+        return run
+
+    async def fake_get_run(self, run_id):
+        return run
+
+    monkeypatch.setattr(WorkflowRunRepository, "claim_waiting_human", fake_claim_waiting)
+    monkeypatch.setattr(WorkflowRunRepository, "mark_completed", fake_mark_completed)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
+
+    preparation = await runner.prepare_resume(run.run_id, HumanActionType.APPROVE_PLAN)
+    assert preparation.thread_id == run.thread_id
+    result = await runner.continue_resume(preparation)
+
+    assert result["simulation_complete"] is True
+    assert run.status == "completed"
+    types = _event_types(sessionmaker)
+    assert "run_resumed" in types
+    assert "run_completed" in types
+    actions = [
+        obj
+        for session in sessionmaker.sessions
+        for obj in session.added
+        if isinstance(obj, HumanActionModel)
+    ]
+    assert len(actions) == 1
+    assert actions[0].action_type == "approve_plan"

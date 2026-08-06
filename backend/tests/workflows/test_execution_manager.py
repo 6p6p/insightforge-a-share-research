@@ -6,30 +6,34 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from app.core.errors import WorkflowRunAlreadyFinished
+from app.db.models.workflow_run import WorkflowRunModel
+from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.schemas.workflow import WorkflowRunResponse
 from app.workflows.execution_manager import WorkflowExecutionManager
 
 pytestmark = pytest.mark.asyncio
 
 
-def _run_response(task_id: UUID) -> WorkflowRunResponse:
-    return WorkflowRunResponse.model_validate(
-        {
-            "run_id": uuid4(),
-            "task_id": task_id,
-            "thread_id": str(uuid4()),
-            "graph_name": "research_workflow_simulation",
-            "graph_version": "1b.1",
-            "status": "pending",
-            "started_at": None,
-            "completed_at": None,
-            "failed_at": None,
-            "error_code": None,
-            "error_message": None,
-            "created_at": datetime.now(UTC),
-            "updated_at": datetime.now(UTC),
-        }
-    )
+def _run_response(task_id: UUID, **overrides: object) -> WorkflowRunResponse:
+    defaults: dict = {
+        "run_id": uuid4(),
+        "task_id": task_id,
+        "thread_id": str(uuid4()),
+        "graph_name": "research_workflow_simulation",
+        "graph_version": "1d.1",
+        "status": "pending",
+        "started_at": None,
+        "completed_at": None,
+        "failed_at": None,
+        "error_code": None,
+        "error_message": None,
+        "pending_action": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+    defaults.update(overrides)
+    return WorkflowRunResponse.model_validate(defaults)
 
 
 class FakeRunner:
@@ -116,3 +120,106 @@ async def test_start_after_close_rejected() -> None:
     await manager.close()
     with pytest.raises(RuntimeError):
         await manager.start_simulation(uuid4())
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.added: list = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+    async def rollback(self) -> None:
+        pass
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
+
+    async def flush(self) -> None:
+        pass
+
+
+class _FakeSessionMaker:
+    def __init__(self) -> None:
+        self.sessions: list[_FakeSession] = []
+
+    def __call__(self) -> _FakeSession:
+        session = _FakeSession()
+        self.sessions.append(session)
+        return session
+
+
+async def test_cancel_running_task(monkeypatch) -> None:
+    runner = FakeRunner(execute_delay=10.0)
+    manager = WorkflowExecutionManager(runner, 0.5, _FakeSessionMaker())
+
+    async def fake_mark_cancelled(self, run_id, cancelled_at):
+        return _run_response(uuid4(), status="cancelled")
+
+    monkeypatch.setattr(WorkflowRunRepository, "mark_cancelled", fake_mark_cancelled)
+
+    run = await manager.start_simulation(uuid4())
+    cancelled = await manager.cancel_run(run.run_id)
+
+    assert cancelled.status.value == "cancelled"
+    assert run.run_id not in manager._tasks
+
+
+async def test_cancel_terminal_rejected(monkeypatch) -> None:
+    manager = WorkflowExecutionManager(FakeRunner(), 1, _FakeSessionMaker())
+
+    async def fake_mark_cancelled(self, run_id, cancelled_at):
+        return None
+
+    monkeypatch.setattr(WorkflowRunRepository, "mark_cancelled", fake_mark_cancelled)
+
+    with pytest.raises(WorkflowRunAlreadyFinished):
+        await manager.cancel_run(uuid4())
+
+
+async def test_retry_creates_new_run(monkeypatch) -> None:
+    runner = FakeRunner()
+    manager = WorkflowExecutionManager(runner, 1, _FakeSessionMaker())
+    original = WorkflowRunModel(
+        run_id=uuid4(),
+        task_id=uuid4(),
+        thread_id=str(uuid4()),
+        graph_name="g",
+        graph_version="v",
+        status="failed",
+    )
+
+    async def fake_get_by_id(self, run_id):
+        return original
+
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_by_id)
+
+    new_run = await manager.retry_run(original.run_id)
+
+    assert new_run.run_id != original.run_id
+
+
+async def test_retry_rejects_active(monkeypatch) -> None:
+    manager = WorkflowExecutionManager(FakeRunner(), 1, _FakeSessionMaker())
+    original = WorkflowRunModel(
+        run_id=uuid4(),
+        task_id=uuid4(),
+        thread_id=str(uuid4()),
+        graph_name="g",
+        graph_version="v",
+        status="running",
+    )
+
+    async def fake_get_by_id(self, run_id):
+        return original
+
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_by_id)
+
+    with pytest.raises(WorkflowRunAlreadyFinished):
+        await manager.retry_run(original.run_id)

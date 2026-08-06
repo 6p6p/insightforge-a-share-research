@@ -39,6 +39,7 @@ class ResearchModule(StrEnum):
 class WorkflowRunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    WAITING_HUMAN = "waiting_human"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -50,3 +51,35 @@ class WorkflowEventType(StrEnum):
     NODE_COMPLETED = "node_completed"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+    RUN_WAITING_HUMAN = "run_waiting_human"
+    RUN_RESUMED = "run_resumed"
+    RUN_CANCELLED = "run_cancelled"
+
+
+class HumanActionType(StrEnum):
+    APPROVE_PLAN = "approve_plan"
+
+
+ACTIVE_WORKFLOW_RUN_STATUSES = frozenset(
+    {
+        WorkflowRunStatus.PENDING,
+        WorkflowRunStatus.RUNNING,
+        WorkflowRunStatus.WAITING_HUMAN,
+    }
+)
+
+TERMINAL_WORKFLOW_RUN_STATUSES = frozenset(
+    {
+        WorkflowRunStatus.COMPLETED,
+        WorkflowRunStatus.FAILED,
+        WorkflowRunStatus.CANCELLED,
+    }
+)
+
+# reconcile 只处理不可能仍在本进程执行的 run
+ORPHANED_WORKFLOW_RUN_STATUSES = frozenset(
+    {
+        WorkflowRunStatus.PENDING,
+        WorkflowRunStatus.RUNNING,
+    }
+)

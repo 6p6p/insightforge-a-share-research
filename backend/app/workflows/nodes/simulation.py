@@ -1,5 +1,7 @@
 """Deterministic simulation nodes; no LLM, network or database access."""
 
+from langgraph.types import interrupt
+
 from app.workflows.state import InsightForgeState
 
 _BASE_QUESTIONS_BY_MODULE = {
@@ -47,7 +49,32 @@ def build_research_plan(state: InsightForgeState) -> dict:
     }
 
 
+def request_plan_approval(state: InsightForgeState) -> dict:
+    """Request human approval of the research plan unless explicitly disabled."""
+    if not state.get("require_plan_approval", False):
+        return {
+            "plan_approved": True,
+            "pending_human_action": None,
+        }
+    payload = interrupt(
+        {
+            "interrupt_key": "plan_approval",
+            "action_type": "approve_plan",
+            "message": "请确认研究计划",
+            "research_plan": state.get("research_plan"),
+        }
+    )
+    if not isinstance(payload, dict) or payload.get("action_type") != "approve_plan":
+        raise ValueError("invalid human action")
+    return {
+        "plan_approved": True,
+        "pending_human_action": None,
+    }
+
+
 def finish_simulation(state: InsightForgeState) -> dict:
+    if not state.get("plan_approved", False):
+        raise ValueError("research plan not approved")
     completed = list(state.get("completed_nodes") or [])
     if "finish_simulation" not in completed:
         completed.append("finish_simulation")

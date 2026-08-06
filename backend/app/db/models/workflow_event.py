@@ -21,7 +21,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 _EVENT_TYPE_CHECK = (
-    "event_type IN ('run_created','run_started','node_completed','run_completed','run_failed')"
+    "event_type IN ('run_created','run_started','node_completed','run_completed',"
+    "'run_failed','run_waiting_human','run_resumed','run_cancelled')"
 )
 
 

@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     chroma_timeout_seconds: int = 5
 
     workflow_shutdown_timeout_seconds: int = 10
+    workflow_reconcile_timeout_seconds: int = 5
 
     @field_validator("app_port", "chroma_port")
     @classmethod
@@ -67,6 +68,13 @@ class Settings(BaseSettings):
     def _validate_timeout(cls, value: int) -> int:
         if not 1 <= value <= _MAX_TIMEOUT_SECONDS:
             raise ValueError("timeout must be between 1 and 60 seconds")
+        return value
+
+    @field_validator("workflow_reconcile_timeout_seconds")
+    @classmethod
+    def _validate_reconcile_timeout(cls, value: int) -> int:
+        if not 1 <= value <= 30:
+            raise ValueError("workflow_reconcile_timeout_seconds must be between 1 and 30")
         return value
 
     @field_validator("log_level")

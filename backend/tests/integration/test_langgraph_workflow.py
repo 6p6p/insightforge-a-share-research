@@ -57,6 +57,7 @@ def _task(**overrides: object) -> ResearchTaskModel:
         "status": "pending",
         "current_stage": "created",
         "progress": 0,
+        "require_plan_approval": False,
     }
     defaults.update(overrides)
     return ResearchTaskModel(**defaults)

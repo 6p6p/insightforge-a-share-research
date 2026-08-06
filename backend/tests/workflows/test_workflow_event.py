@@ -16,6 +16,9 @@ def test_event_type_values_are_stable() -> None:
         "node_completed",
         "run_completed",
         "run_failed",
+        "run_waiting_human",
+        "run_resumed",
+        "run_cancelled",
     ]
 
 

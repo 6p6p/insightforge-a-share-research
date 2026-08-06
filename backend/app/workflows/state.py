@@ -16,3 +16,6 @@ class InsightForgeState(TypedDict, total=False):
     research_plan: dict[str, object]
     completed_nodes: Annotated[list[str], merge_unique_strings]
     simulation_complete: bool
+    require_plan_approval: bool
+    plan_approved: bool | None
+    pending_human_action: dict[str, object] | None

@@ -1,6 +1,7 @@
 """Pydantic contract for workflow run records."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,8 +23,18 @@ class WorkflowRunResponse(BaseModel):
     failed_at: datetime | None = None
     error_code: str | None = None
     error_message: str | None = Field(default=None, max_length=500)
+    pending_action: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class WorkflowActionRequest(BaseModel):
+    action_type: Literal["approve_plan", "cancel", "retry"]
+
+
+class WorkflowActionResponse(BaseModel):
+    run: WorkflowRunResponse
+    replayed: bool = False
 
 
 class WorkflowEventResponse(BaseModel):
