@@ -25,6 +25,7 @@ def test_ready_matches_structured_model(client) -> None:
     assert payload.checks.configuration == "ok"
     assert payload.checks.database == "ok"
     assert payload.checks.chroma == "ok"
+    assert payload.checks.checkpoint == "ok"
 
 
 def test_ready_environment_from_test_settings(client) -> None:
@@ -44,6 +45,14 @@ def test_ready_database_failure_returns_503(client, fake_database) -> None:
     assert body["checks"]["configuration"] == "ok"
     assert body["checks"]["database"] == "error"
     assert body["checks"]["chroma"] == "ok"
+    assert body["checks"]["checkpoint"] == "ok"
+
+
+def test_ready_checkpoint_failure_returns_503(client, fake_langgraph) -> None:
+    fake_langgraph.healthy = False
+    response = client.get("/api/v1/health/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["checkpoint"] == "error"
 
 
 def test_ready_chroma_failure_returns_503(client, fake_chroma) -> None:
@@ -62,6 +71,7 @@ def test_ready_both_failures_returns_503(client, fake_database, fake_chroma) -> 
     assert body["status"] == "not_ready"
     assert body["checks"]["database"] == "error"
     assert body["checks"]["chroma"] == "error"
+    assert body["checks"]["checkpoint"] == "ok"
 
 
 def test_ready_response_hides_exception_details(client, fake_database) -> None:

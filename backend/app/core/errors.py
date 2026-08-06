@@ -41,3 +41,15 @@ class WorkflowRunAlreadyFinished(DomainError):
     code = "workflow_run_already_finished"
     http_status = 409
     message = "工作流运行已结束，不能重复执行"
+
+
+class WorkflowRunAlreadyStarted(DomainError):
+    code = "workflow_run_already_started"
+    http_status = 409
+    message = "工作流运行已经开始执行"
+
+
+class InvalidLastEventId(DomainError):
+    code = "invalid_last_event_id"
+    http_status = 400
+    message = "Last-Event-ID 必须是大于等于 0 的整数"

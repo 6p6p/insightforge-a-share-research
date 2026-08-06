@@ -3,6 +3,7 @@
 from app.db.session import DatabaseManager
 from app.vectorstore.client import ChromaManager
 from app.workflows.checkpoint import LangGraphCheckpointManager
+from app.workflows.execution_manager import WorkflowExecutionManager
 
 
 class ApplicationResources:
@@ -11,7 +12,9 @@ class ApplicationResources:
         database: DatabaseManager,
         chroma: ChromaManager,
         langgraph: LangGraphCheckpointManager,
+        workflow_execution: WorkflowExecutionManager,
     ) -> None:
         self.database = database
         self.chroma = chroma
         self.langgraph = langgraph
+        self.workflow_execution = workflow_execution

@@ -15,6 +15,7 @@ class ReadyChecks(BaseModel):
     configuration: CheckStatus = "ok"
     database: CheckStatus = "ok"
     chroma: CheckStatus = "ok"
+    checkpoint: CheckStatus = "ok"
 
 
 class ReadyHealthResponse(BaseModel):

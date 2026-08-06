@@ -42,3 +42,11 @@ class WorkflowRunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class WorkflowEventType(StrEnum):
+    RUN_CREATED = "run_created"
+    RUN_STARTED = "run_started"
+    NODE_COMPLETED = "node_completed"
+    RUN_COMPLETED = "run_completed"
+    RUN_FAILED = "run_failed"

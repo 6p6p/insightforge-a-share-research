@@ -3,6 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_langgraph_checkpoint_manager
 from app.core.config import Settings
 from app.db.dependencies import get_database
 from app.main import create_app
@@ -31,6 +32,17 @@ class FakeChroma:
         self.heartbeat_calls += 1
         if not self.healthy:
             raise ConnectionError("chroma unavailable")
+
+
+class FakeLanggraph:
+    def __init__(self, healthy: bool = True) -> None:
+        self.healthy = healthy
+        self.ready_calls = 0
+
+    async def check_ready(self) -> None:
+        self.ready_calls += 1
+        if not self.healthy:
+            raise RuntimeError("checkpoint schema unavailable")
 
 
 @pytest.fixture(autouse=True)
@@ -62,10 +74,21 @@ def fake_chroma() -> FakeChroma:
 
 
 @pytest.fixture
-def app(test_settings: Settings, fake_database: FakeDatabase, fake_chroma: FakeChroma):
+def fake_langgraph() -> FakeLanggraph:
+    return FakeLanggraph()
+
+
+@pytest.fixture
+def app(
+    test_settings: Settings,
+    fake_database: FakeDatabase,
+    fake_chroma: FakeChroma,
+    fake_langgraph: FakeLanggraph,
+):
     application = create_app(test_settings)
     application.dependency_overrides[get_database] = lambda: fake_database
     application.dependency_overrides[get_chroma] = lambda: fake_chroma
+    application.dependency_overrides[get_langgraph_checkpoint_manager] = lambda: fake_langgraph
     return application
 
 

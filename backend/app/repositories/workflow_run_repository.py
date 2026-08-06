@@ -1,9 +1,9 @@
 """Data access for workflow runs."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.workflow_run import WorkflowRunModel
@@ -50,6 +50,28 @@ class WorkflowRunRepository:
             )
         )
         return result.scalars().first()
+
+    async def claim_pending(
+        self,
+        run_id: UUID,
+        started_at: datetime,
+    ) -> WorkflowRunModel | None:
+        """Atomically claim a pending run; returns None if missing or not pending."""
+        stmt = (
+            update(WorkflowRunModel)
+            .where(
+                WorkflowRunModel.run_id == run_id,
+                WorkflowRunModel.status == WorkflowRunStatus.PENDING.value,
+            )
+            .values(
+                status=WorkflowRunStatus.RUNNING.value,
+                started_at=started_at,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(WorkflowRunModel)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def mark_running(
         self,

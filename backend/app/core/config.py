@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     chroma_ssl: bool = False
     chroma_timeout_seconds: int = 5
 
+    workflow_shutdown_timeout_seconds: int = 10
+
     @field_validator("app_port", "chroma_port")
     @classmethod
     def _validate_port(cls, value: int) -> int:
@@ -56,7 +58,11 @@ class Settings(BaseSettings):
             raise ValueError("database_url must start with postgresql+psycopg://")
         return value
 
-    @field_validator("database_connect_timeout_seconds", "chroma_timeout_seconds")
+    @field_validator(
+        "database_connect_timeout_seconds",
+        "chroma_timeout_seconds",
+        "workflow_shutdown_timeout_seconds",
+    )
     @classmethod
     def _validate_timeout(cls, value: int) -> int:
         if not 1 <= value <= _MAX_TIMEOUT_SECONDS:

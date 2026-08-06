@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 
+from app.api.dependencies import get_langgraph_checkpoint_manager
 from app.core.config import get_package_version
 from app.core.logging import get_logger
 from app.db.dependencies import get_database
@@ -18,6 +19,7 @@ from app.schemas.health import (
 )
 from app.vectorstore.client import ChromaManager
 from app.vectorstore.dependencies import get_chroma
+from app.workflows.checkpoint import LangGraphCheckpointManager
 
 router = APIRouter(tags=["health"])
 logger = get_logger("app.health")
@@ -52,6 +54,7 @@ async def health_ready(
     response: Response,
     database: Annotated[DatabaseManager, Depends(get_database)],
     chroma: Annotated[ChromaManager, Depends(get_chroma)],
+    checkpoint: Annotated[LangGraphCheckpointManager, Depends(get_langgraph_checkpoint_manager)],
 ) -> ReadyHealthResponse:
     settings = request.app.state.settings
 
@@ -60,6 +63,7 @@ async def health_ready(
             _probe("configuration", _configuration_ok()),
             _probe("database", database.ping()),
             _probe("chroma", chroma.heartbeat()),
+            _probe("checkpoint", checkpoint.check_ready()),
         )
     )
 

@@ -117,9 +117,9 @@ curl "http://127.0.0.1:8001/api/v1/tasks?status=pending&limit=20&offset=0"
 
 以上示例仅用于演示接口，不构成任何投资建议。
 
-## LangGraph 模拟工作流（阶段 1B 基础）
+## LangGraph 模拟工作流（阶段 1B/1C 基础）
 
-已建立 LangGraph 确定性模拟工作流与 PostgreSQL Checkpoint 基础。**它不是实际公司研究**——不采集资料、不生成研报、不接入 LLM，仅验证工作流编排与状态持久化。
+已建立 LangGraph 确定性模拟工作流、PostgreSQL Checkpoint 与后台执行基础。**它不是实际公司研究**——不采集资料、不生成研报、不接入 LLM，仅验证工作流编排、状态持久化与事件推送。当前为**单进程开发实现**，不是分布式任务队列。
 
 初始化 LangGraph Checkpoint 表（vendor 表，由 langgraph-checkpoint-postgres 管理，不属于 Alembic）：
 
@@ -127,10 +127,34 @@ curl "http://127.0.0.1:8001/api/v1/tasks?status=pending&limit=20&offset=0"
 conda run -n insightforge python -m app.cli.setup_checkpointer
 ```
 
-对已有研究任务执行一次模拟工作流：
+对已有研究任务执行一次模拟工作流（CLI）：
 
 ```bash
 conda run -n insightforge python -m app.cli.simulate_workflow --task-id 替换为task_id
+```
+
+通过 HTTP 创建并后台启动模拟 WorkflowRun（返回 202 与 pending run）：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/tasks/替换为task_id/runs
+```
+
+查询 WorkflowRun：
+
+```bash
+curl http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id
+```
+
+订阅事件流（SSE）：
+
+```bash
+curl -N http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/events
+```
+
+断线重连增量回放（可选 `Last-Event-ID` 请求头，值为上次收到的 `event_id`）：
+
+```bash
+curl -N -H "Last-Event-ID: 3" http://127.0.0.1:8001/api/v1/workflow-runs/替换为run_id/events
 ```
 
 模拟工作流**不会改变 ResearchTask 状态**（保持 pending），也不会产生资料、证据或报告记录。

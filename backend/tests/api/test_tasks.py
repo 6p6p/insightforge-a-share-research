@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.api.dependencies import get_task_service
+from app.api.dependencies import get_langgraph_checkpoint_manager, get_task_service
 from app.core.errors import IdempotencyConflict, TaskNotFound
 from app.db.dependencies import get_database
 from app.domain.tasks import TaskStatus
@@ -94,10 +94,17 @@ def fake_task_service() -> FakeTaskService:
 
 
 @pytest.fixture
-def app(test_settings, fake_database, fake_chroma, fake_task_service):
+def app(
+    test_settings,
+    fake_database,
+    fake_chroma,
+    fake_langgraph,
+    fake_task_service,
+):
     application = create_app(test_settings)
     application.dependency_overrides[get_database] = lambda: fake_database
     application.dependency_overrides[get_chroma] = lambda: fake_chroma
+    application.dependency_overrides[get_langgraph_checkpoint_manager] = lambda: fake_langgraph
     application.dependency_overrides[get_task_service] = lambda: fake_task_service
     return application
 

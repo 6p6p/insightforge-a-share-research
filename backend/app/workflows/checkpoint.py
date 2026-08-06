@@ -5,6 +5,8 @@ import asyncio
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
+_HEALTH_CHECK_THREAD_ID = "insightforge-health-check"
+
 
 def _strict_serde() -> JsonPlusSerializer:
     """Strict MsgPack: allow only built-in JSON/MsgPack safe types."""
@@ -35,6 +37,14 @@ class LangGraphCheckpointManager:
 
     async def get_checkpointer(self) -> AsyncPostgresSaver:
         return await self._ensure()
+
+    async def check_ready(self) -> None:
+        """Read a fixed thread id; raises if the checkpoint schema is unavailable.
+
+        Read-only: does not create checkpoints and never calls setup().
+        """
+        checkpointer = await self._ensure()
+        await checkpointer.aget_tuple({"configurable": {"thread_id": _HEALTH_CHECK_THREAD_ID}})
 
     async def setup(self) -> None:
         """Create vendor checkpoint tables; safe to call repeatedly."""

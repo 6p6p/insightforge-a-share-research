@@ -10,8 +10,10 @@ from app.core.errors import (
     ActiveWorkflowRunExists,
     TaskNotFound,
     WorkflowRunAlreadyFinished,
+    WorkflowRunAlreadyStarted,
 )
 from app.db.models.research_task import ResearchTaskModel
+from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
@@ -24,6 +26,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.closed = False
         self.commits = 0
+        self.added: list = []
 
     async def __aenter__(self):
         return self
@@ -38,7 +41,7 @@ class FakeSession:
         pass
 
     def add(self, obj) -> None:
-        pass
+        self.added.append(obj)
 
     async def flush(self) -> None:
         pass
@@ -93,7 +96,16 @@ def _run(**overrides: object) -> WorkflowRunModel:
     return WorkflowRunModel(**defaults)
 
 
-async def test_create_run_fields_and_transaction(monkeypatch) -> None:
+def _event_types(sessionmaker: FakeSessionMaker) -> list[str]:
+    types: list[str] = []
+    for session in sessionmaker.sessions:
+        for obj in session.added:
+            if isinstance(obj, WorkflowEventModel):
+                types.append(obj.event_type)
+    return types
+
+
+async def test_create_run_creates_run_created_event(monkeypatch) -> None:
     task = _task()
     sessionmaker = FakeSessionMaker()
     runner = WorkflowRunner(sessionmaker, FakeCheckpointManager())
@@ -117,9 +129,7 @@ async def test_create_run_fields_and_transaction(monkeypatch) -> None:
 
     assert result.status.value == "pending"
     assert result.thread_id == str(result.run_id)
-    assert result.graph_name == "research_workflow_simulation"
-    assert result.graph_version == "1b.1"
-    assert sessionmaker.sessions[0].closed is True
+    assert _event_types(sessionmaker) == ["run_created"]
     assert sessionmaker.sessions[0].commits == 1
 
 
@@ -153,13 +163,15 @@ async def test_create_run_active_exists_raises(monkeypatch) -> None:
         await runner.create_simulation_run(task.task_id)
 
 
-async def test_execute_success_marks_completed(monkeypatch) -> None:
+async def test_execute_success_event_sequence(monkeypatch) -> None:
     task = _task()
     run = _run(task_id=task.task_id, status="pending")
     sessionmaker = FakeSessionMaker()
     runner = WorkflowRunner(sessionmaker, FakeCheckpointManager())
 
-    async def fake_get_run(self, run_id):
+    async def fake_claim(self, run_id, started_at):
+        run.status = "running"
+        run.started_at = started_at
         return run
 
     async def fake_get_task(self, task_id):
@@ -170,34 +182,61 @@ async def test_execute_success_marks_completed(monkeypatch) -> None:
         run.completed_at = completed_at
         return run
 
-    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
+    async def fake_get_run(self, run_id):
+        return run
+
+    monkeypatch.setattr(WorkflowRunRepository, "claim_pending", fake_claim)
     monkeypatch.setattr(ResearchTaskRepository, "get_by_id", fake_get_task)
     monkeypatch.setattr(WorkflowRunRepository, "mark_completed", fake_mark_completed)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
 
     result = await runner.execute_simulation(run.run_id)
 
     assert result["simulation_complete"] is True
     assert run.status == "completed"
-    # 短事务读 + 短事务标记 = 2 个 session；graph 执行期间不持有 session
-    assert len(sessionmaker.sessions) == 2
-    assert all(session.closed for session in sessionmaker.sessions)
+    assert _event_types(sessionmaker) == [
+        "run_started",
+        "node_completed",
+        "node_completed",
+        "node_completed",
+        "run_completed",
+    ]
     assert task.status == "pending"
     assert task.current_stage == "created"
     assert task.progress == 0
+    # 事件 payload 不包含完整 research_plan
+    for session in sessionmaker.sessions:
+        for obj in session.added:
+            if isinstance(obj, WorkflowEventModel):
+                assert "research_plan" not in obj.payload
+    # run_completed 使用最终 current_stage（planning），而非伪造 exporting
+    completed_events = [
+        obj
+        for session in sessionmaker.sessions
+        for obj in session.added
+        if isinstance(obj, WorkflowEventModel) and obj.event_type == "run_completed"
+    ]
+    assert completed_events
+    assert completed_events[0].stage == "planning"
 
 
-async def test_execute_failure_marks_failed_and_raises(monkeypatch) -> None:
+async def test_execute_failure_marks_failed(monkeypatch) -> None:
     task = _task()
     run = _run(task_id=task.task_id, status="pending")
     sessionmaker = FakeSessionMaker()
 
     class _FailingGraph:
-        async def ainvoke(self, state, config):
+        async def astream(self, state, config, **kwargs):
             raise ValueError("simulated graph failure")
+            yield
+
+        async def aget_state(self, config):
+            return None
 
     runner = WorkflowRunner(sessionmaker, FakeCheckpointManager())
 
-    async def fake_get_run(self, run_id):
+    async def fake_claim(self, run_id, started_at):
+        run.status = "running"
         return run
 
     async def fake_get_task(self, task_id):
@@ -210,7 +249,7 @@ async def test_execute_failure_marks_failed_and_raises(monkeypatch) -> None:
         run.error_message = error_message
         return run
 
-    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
+    monkeypatch.setattr(WorkflowRunRepository, "claim_pending", fake_claim)
     monkeypatch.setattr(ResearchTaskRepository, "get_by_id", fake_get_task)
     monkeypatch.setattr(WorkflowRunRepository, "mark_failed", fake_mark_failed)
     monkeypatch.setattr(
@@ -222,17 +261,39 @@ async def test_execute_failure_marks_failed_and_raises(monkeypatch) -> None:
         await runner.execute_simulation(run.run_id)
 
     assert run.status == "failed"
-    assert run.error_code == "graph_execution_failed"
+    assert run.error_code == "workflow_execution_failed"
     assert run.error_message == "ValueError"
+    assert _event_types(sessionmaker)[-1] == "run_failed"
+
+
+async def test_execute_running_run_raises(monkeypatch) -> None:
+    run = _run(status="running")
+    runner = WorkflowRunner(FakeSessionMaker(), FakeCheckpointManager())
+
+    async def fake_claim(self, run_id, started_at):
+        return None
+
+    async def fake_get_run(self, run_id):
+        return run
+
+    monkeypatch.setattr(WorkflowRunRepository, "claim_pending", fake_claim)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
+
+    with pytest.raises(WorkflowRunAlreadyStarted):
+        await runner.execute_simulation(run.run_id)
 
 
 async def test_execute_finished_run_raises(monkeypatch) -> None:
     run = _run(status="completed")
     runner = WorkflowRunner(FakeSessionMaker(), FakeCheckpointManager())
 
+    async def fake_claim(self, run_id, started_at):
+        return None
+
     async def fake_get_run(self, run_id):
         return run
 
+    monkeypatch.setattr(WorkflowRunRepository, "claim_pending", fake_claim)
     monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_get_run)
 
     with pytest.raises(WorkflowRunAlreadyFinished):
