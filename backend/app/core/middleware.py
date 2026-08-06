@@ -10,9 +10,22 @@ from app.core.logging import get_logger
 
 logger = get_logger("app.middleware")
 
+_MAX_REQUEST_ID_LENGTH = 128
+
+
+def _normalize_request_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) > _MAX_REQUEST_ID_LENGTH:
+        return None
+    for char in value:
+        if not 32 <= ord(char) <= 126:
+            return None
+    return value
+
 
 async def request_tracing_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request_id = _normalize_request_id(request.headers.get("X-Request-ID")) or str(uuid.uuid4())
 
     clear_contextvars()
     bind_contextvars(request_id=request_id)

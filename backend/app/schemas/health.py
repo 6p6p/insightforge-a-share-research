@@ -4,17 +4,21 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+CheckStatus = Literal["ok", "error"]
+
 
 class LiveHealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
 
 
 class ReadyChecks(BaseModel):
-    configuration: Literal["ok"] = "ok"
+    configuration: CheckStatus = "ok"
+    database: CheckStatus = "ok"
+    chroma: CheckStatus = "ok"
 
 
 class ReadyHealthResponse(BaseModel):
-    status: Literal["ok"] = "ok"
+    status: Literal["ok", "not_ready"] = "ok"
     service: str
     version: str
     environment: str

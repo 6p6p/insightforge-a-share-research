@@ -1,0 +1,57 @@
+name: insightforge
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-insightforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-insightforge}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-insightforge} -d ${POSTGRES_DB:-insightforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chroma:
+    image: chromadb/chroma:1.5.9
+    ports:
+      - "${CHROMA_HOST_PORT:-8002}:8000"
+    volumes:
+      - chroma_data:/data
+    # 镜像未提供可靠的容器内 curl/wget，不编造内部 healthcheck；
+    # backend 的 ready 通过官方客户端 heartbeat 做真实检查。
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    environment:
+      APP_ENV: production
+      APP_PORT: "8000"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-insightforge}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-insightforge}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      CHROMA_SSL: "false"
+      CHROMA_TIMEOUT_SECONDS: "5"
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_started
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  chroma_data:
