@@ -98,7 +98,9 @@ class TaskService:
             current_stage=TaskStage.CREATED.value,
             progress=0,
             idempotency_key=idempotency_key,
-            request_fingerprint=fingerprint,
+            # 幂等对只在有 Idempotency-Key 时生效；无 key 时两个字段都置空，
+            # 满足 ck_research_tasks_idempotency_pair。
+            request_fingerprint=fingerprint if idempotency_key is not None else None,
         )
 
     @staticmethod

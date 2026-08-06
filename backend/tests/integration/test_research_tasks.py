@@ -175,6 +175,20 @@ def _request(**overrides: object) -> TaskCreateRequest:
 
 
 @pytest.mark.asyncio
+async def test_create_without_idempotency_key_via_service(session) -> None:
+    # 无 Idempotency-Key 时，idempotency_key 与 request_fingerprint 必须都置空，
+    # 满足 ck_research_tasks_idempotency_pair，不能只写 fingerprint。
+    repo = ResearchTaskRepository(session)
+    service = TaskService(repo)
+    result = await service.create_task(_request(), None)
+    assert result.replayed is False
+    assert result.task.status.value == "pending"
+    # 若 request_fingerprint 被单独写入而 idempotency_key 为空，
+    # 上面的 create 会抛 IntegrityError；走到这里即说明约束满足。
+    await session.rollback()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_idempotent_creation(session_factory) -> None:
     key = f"concurrent-{uuid.uuid4()}"
     request = _request()
