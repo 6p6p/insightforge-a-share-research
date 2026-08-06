@@ -1,0 +1,60 @@
+# --- 本地环境文件（保留 .env.example） ---
+.env
+.env.*
+!.env.example
+
+# --- Python 缓存 ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- 测试 / 质量工具缓存 ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+
+# --- 构建产物 ---
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- IDE 本地配置 ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- 前端 ---
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# --- 日志 ---
+*.log
+logs/
+
+# --- 运行时存储 / 导出 / 临时数据 ---
+data/
+exports/
+*.tmp
+*.temp
+
+# --- Windows / macOS 系统文件 ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Claude Code 本地设置（保留 .claude 目录下其他可提交内容） ---
+.claude/settings.local.json
