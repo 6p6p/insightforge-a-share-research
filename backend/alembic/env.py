@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings  # noqa: E402
 from app.core.runtime import configure_asyncio_runtime  # noqa: E402
+from app.db import models as _db_models  # noqa: E402, F401
 from app.db.base import Base  # noqa: E402
 
 config = context.config

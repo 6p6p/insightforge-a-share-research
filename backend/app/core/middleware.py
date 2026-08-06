@@ -29,6 +29,7 @@ async def request_tracing_middleware(request: Request, call_next):
 
     clear_contextvars()
     bind_contextvars(request_id=request_id)
+    request.state.request_id = request_id
 
     start = time.perf_counter()
     try:

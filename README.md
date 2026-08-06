@@ -83,6 +83,40 @@ conda run -n insightforge python -m uvicorn app.main:app --app-dir backend --hos
 - http://127.0.0.1:8001/api/v1/health/ready
 - API 文档：http://127.0.0.1:8001/docs
 
+## 研究任务 API
+
+当前已支持研究任务的创建与查询；**创建任务不会自动开始研究**，任务先落库为 `pending`（LangGraph 编排、Agent 与资料采集尚未实现）。
+
+创建任务：
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: task-20260806-001" \
+  -d '{
+    "company_query": "600519",
+    "research_start_date": "2023-01-01",
+    "research_end_date": "2025-12-31",
+    "modules": ["company_profile", "business", "financial", "risk"],
+    "questions": ["公司收入增长主要由哪些因素驱动？"],
+    "include_relative_valuation": false,
+    "require_plan_approval": true
+  }'
+```
+
+- 新建成功：`201`。
+- 相同 `Idempotency-Key` + 相同请求内容重放：`200`，响应头 `Idempotent-Replayed: true`。
+- 相同 `Idempotency-Key` + 不同请求内容：`409`（idempotency_conflict）。
+
+查询任务：
+
+```bash
+curl http://127.0.0.1:8001/api/v1/tasks/替换为task_id
+curl "http://127.0.0.1:8001/api/v1/tasks?status=pending&limit=20&offset=0"
+```
+
+以上示例仅用于演示接口，不构成任何投资建议。
+
 ## 完整系统（Docker Compose）
 
 ```bash
