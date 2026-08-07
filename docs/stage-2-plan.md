@@ -29,7 +29,28 @@
 
 ## 2C：宏观数据 Provider
 
-- 只使用正式 API、官方下载或官方页面（NBS/FRED/World Bank 等）。
+- **2C.1（当前进行，2026-08-07）**：Macro Provider 契约 + World Bank Indicators Provider。
+  - 宏观领域契约（`MacroQuery` / `MacroIndicator` / `MacroGeography` / `MacroObservation` / `MacroPageInfo` / `MacroFetchResult`）：只描述"获取结果"，不含 page/per_page/format/source 等 Provider 内部参数；country 规范化大写且拒绝 `ALL`；年份闭区间 1960—当前年、最多 60 年；`value=None ⇔ is_missing=True`，缺失值保留、不补齐缺失年份；value 只能由 Decimal 构造（`parse_float=Decimal`），`decimal_scale` 从 exponent 推导。
+  - `WorldBankProvider` 从 Source Registry 读取快照（短 Session，网络 I/O 不持有 AsyncSession），校验 enabled / `macro_data` / `official_api` / 无 API Key；`MacroFetchResult` 携带 authority_tier、critical_claim_eligible、provider_capabilities，`acquisition_method` 固定 `official_api`。
+  - 受控 `WorldBankClient`：仅 https、固定 `api.worldbank.org/v2` + `source=2`（World Development Indicators）、URL 仍通过 Registry allowlist（子域匹配）、`trust_env=False`、无 Cookie/Auth/Header、手动重定向（同 allowlist ≤3 次、跨域拒绝）、不重试、单响应流式上限 5 MiB、Content-Type 必须 JSON、日志只记录 hostname 不记录 query。
+  - 分页：`per_page=1000`、单查询 ≤20 请求、pages ≤20、响应 page 必须匹配请求 page、跨页去重与冲突检测；观测按年份升序。
+  - 稳定错误分类：provider_not_ready / request_failed / response_too_large / invalid_content_type / invalid_json / api_error / malformed_response / response_conflict / request_limit_exceeded。
+  - 本阶段只支持 `annual` 频率与 `country` 地理类型；不支持 FRED、NBS、月度/季度、多国家。
+  - 开发期 CLI `fetch_world_bank_macro` 输出 JSON 报告到 stdout（日志走 stderr，Decimal→字符串），退出码 0/2/3/4，不写数据库、不写文件。
+  - 决策记录：[docs/decisions/0011-macro-provider-and-world-bank.md](decisions/0011-macro-provider-and-world-bank.md)。
+  - **受控真实验收（§十一）待网络环境**：本机网络对 `worldbank.org` 域名级阻断（DNS 劫持到 28.0.0.x、TLS 握手被丢弃、`--resolve` 直连真实 IP 仍失败），CLI 按规范命令运行返回 `request_failed`（exit 4）；DB 前置条件已满足（`source_providers.world_bank` 已登记）。验收命令与断言不变量见 ADR-0011，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 视为"当前进行"。
+- **2C.2（尚未开始）**：宏观数据持久化、Provider 快照、原始 JSON 归档。
+- **2C.3（尚未开始）**：FRED Provider。
+- **2C.4（尚未开始）**：国内官方宏观数据接入（NBS 等）。
+
+### 阶段 2C 边界
+
+1. 2C.1 不写数据库：不创建 MacroSeries / MacroObservation 表，不引入 migration。
+2. 2C.1 的结果不是 Evidence：不创建 Evidence、Claim、Report 或 DocumentChunk。
+3. 只有 2C.2 完成原始响应归档、来源快照与持久化后，宏观数据才能进入 Evidence/Claim 管线。
+4. 宏观数据与公司 PDF SourceRecord 是不同资料形态：不强行复用当前 company-bound、PDF-only 的 SourceRecord，也不扩展 RawArtifact 支持 JSON。
+5. 不修改阶段 2B 的表结构。
+6. 宏观 Provider 只使用正式 API / 官方下载 / 官方页面（World Bank / FRED / NBS 等）。
 
 ## 2D：新闻发现与大模型联网搜索兜底
 

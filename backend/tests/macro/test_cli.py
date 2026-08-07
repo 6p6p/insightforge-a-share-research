@@ -1,0 +1,169 @@
+"""World Bank macro CLI tests (stage 2C.1, no real DB / network)."""
+
+import json
+
+from app.cli import fetch_world_bank_macro as cli
+from app.macro.world_bank.errors import WorldBankApiError, WorldBankProviderNotReady
+from tests.macro.world_bank.helpers import sample_result
+
+_ARGS = [
+    "--country",
+    "CHN",
+    "--indicator",
+    "SP.POP.TOTL",
+    "--start-year",
+    "2020",
+    "--end-year",
+    "2024",
+]
+
+
+def _install_fake_provider(monkeypatch, fetch_fn, *, test_settings):
+    monkeypatch.setattr(cli, "get_settings", lambda: test_settings)
+
+    class _FakeProvider:
+        def __init__(self, sessionmaker):
+            self.sessionmaker = sessionmaker
+
+        async def fetch(self, query):
+            return await fetch_fn(query)
+
+    monkeypatch.setattr(cli, "WorldBankProvider", _FakeProvider)
+
+
+def test_success_returns_0_and_json(capsys, monkeypatch, test_settings):
+    async def _fetch(query):
+        return sample_result()
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["provider_key"] == "world_bank"
+    assert payload["query"]["country_code"] == "CHN"
+    assert payload["provider_snapshot"]["authority_tier"] == 1
+    assert payload["provider_snapshot"]["acquisition_method"] == "official_api"
+
+
+def test_stdout_is_pure_json(capsys, monkeypatch, test_settings):
+    async def _fetch(query):
+        return sample_result()
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 0
+    out = capsys.readouterr().out
+    # 整段 stdout 必须能被当作单个 JSON 对象解析，无多余文本。
+    parsed = json.loads(out.strip())
+    assert isinstance(parsed, dict)
+    assert "error" not in parsed
+
+
+def test_decimal_serialized_as_string(capsys, monkeypatch, test_settings):
+    async def _fetch(query):
+        return sample_result()
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    obs = payload["observations"][0]
+    assert obs["period"] == "2020"
+    assert obs["period_start"] == "2020-01-01"
+    assert isinstance(obs["value"], str)
+    assert obs["decimal_scale"] == 0
+
+
+def test_invalid_input_exit_2(capsys, test_settings):
+    code = cli._main(
+        [
+            "--country",
+            "1A",
+            "--indicator",
+            "SP.POP.TOTL",
+            "--start-year",
+            "2020",
+            "--end-year",
+            "2024",
+        ]
+    )
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "invalid_input"
+
+
+def test_provider_not_ready_exit_3(capsys, monkeypatch, test_settings):
+    async def _fetch(query):
+        raise WorldBankProviderNotReady("provider not found in source registry")
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "provider_not_ready"
+
+
+def test_api_error_exit_4(capsys, monkeypatch, test_settings):
+    async def _fetch(query):
+        raise WorldBankApiError("http status 500")
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "api_error"
+
+
+def test_unexpected_error_exit_4(capsys, monkeypatch, test_settings):
+    async def _fetch(query):
+        raise RuntimeError("boom")
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "unexpected_error"
+
+
+def test_no_files_created(capsys, monkeypatch, test_settings, tmp_path):
+    async def _fetch(query):
+        return sample_result()
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    monkeypatch.chdir(tmp_path)
+    code = cli._main(_ARGS)
+    assert code == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_database_wired_and_disposed_without_connection(capsys, monkeypatch, test_settings):
+    calls = {"factory": 0, "dispose": 0}
+    received: list = []
+
+    class _FakeDatabaseManager:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def session_factory(self):
+            calls["factory"] += 1
+            return object()
+
+        async def dispose(self):
+            calls["dispose"] += 1
+
+    class _FakeProvider:
+        def __init__(self, sessionmaker):
+            received.append(sessionmaker)
+
+        async def fetch(self, query):
+            return sample_result()
+
+    monkeypatch.setattr(cli, "get_settings", lambda: test_settings)
+    monkeypatch.setattr(cli, "DatabaseManager", _FakeDatabaseManager)
+    monkeypatch.setattr(cli, "WorldBankProvider", _FakeProvider)
+    code = cli._main(_ARGS)
+    assert code == 0
+    assert calls["factory"] == 1
+    assert calls["dispose"] == 1
+    assert len(received) == 1
