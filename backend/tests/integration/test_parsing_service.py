@@ -1,0 +1,478 @@
+"""E2E integration tests for SourceParsingService (stage 2E.1, §8 persistence 部分)。
+
+需要真实 PostgreSQL（127.0.0.1:5433）。真实 LocalRawArtifactStore + 真实
+SourceParsingService + 真实 Parser，零真实网络（conftest autouse guard 兜底）。
+覆盖：
+- first parse：创建 ParsedSource + ParsedSourceBlock 快照（title/published_at/
+  block_count/locator 正确），SourceRecord 元数据不被回写；
+- replay：同 source + 同 raw bytes + 同 parser version → 同 fingerprint →
+  复用原快照（replayed=True），不重复插 Blocks；
+- parser version 变化 → 新 fingerprint → 新快照，旧快照保留；
+- 完整性损坏（block text_sha256 被篡改 / snapshot block_count 不一致 /
+  存储文件与 artifact 登记的 SHA 不一致）→ ParsedSourceIntegrityError，
+  不自动修复；
+- 并发相同 parse → 只产生 1 个 ParsedSource + 一套 Blocks；
+- blocks ordinal 连续 1..n 稳定；
+- 非 text/html artifact → UnsupportedParseMediaType；Source 不存在 →
+  SourceRecordNotFound。
+"""
+
+import asyncio
+import hashlib
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import func, select, text, update
+
+from app.core.config import get_settings
+from app.core.errors import SourceRecordNotFound
+from app.core.runtime import configure_asyncio_runtime
+from app.db.models.company import CompanyModel
+from app.db.models.parsed_source import ParsedSourceModel
+from app.db.models.parsed_source_block import ParsedSourceBlockModel
+from app.db.models.raw_artifact import RawArtifactModel
+from app.db.models.source_record import SourceRecordModel
+from app.db.session import DatabaseManager
+from app.parsing.contracts import HTML_PARSER_NAME, HTML_PARSER_VERSION
+from app.parsing.errors import (
+    ParsedSourceIntegrityError,
+    UnsupportedParseMediaType,
+)
+from app.repositories.company_repository import CompanyRepository
+from app.repositories.parsed_source_block_repository import (
+    ParsedSourceBlockRepository,
+)
+from app.repositories.parsed_source_repository import ParsedSourceRepository
+from app.repositories.raw_artifact_repository import RawArtifactRepository
+from app.repositories.source_record_repository import SourceRecordRepository
+from app.services.source_parsing_service import SourceParsingService
+from app.services.source_registry_service import SourceRegistryService
+from app.storage.raw_store import LocalRawArtifactStore
+
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+configure_asyncio_runtime()
+
+_XINHUA_URL = "https://www.xinhuanet.com/2026/0807/0001.htm"
+_XINHUA_URL_2 = "https://www.xinhuanet.com/2026/0807/0002.htm"
+# og:title 覆盖 <title>；article:published_time 携带 +08:00 偏移（机器可读）。
+_HTML = (
+    "<html><head>"
+    '<meta property="og:title" content="确定性解析标题">'
+    '<meta property="article:published_time" content="2026-08-07T09:30:00+08:00">'
+    "<title>文档标题</title>"
+    "</head><body><article>"
+    "<h1>确定性解析标题</h1>"
+    "<p>第一段正文。</p>"
+    "<ul><li>列表项一</li><li>列表项二</li></ul>"
+    "</article></body></html>"
+).encode()
+
+_JSON_ARTIFACT = b'{"url": "https://www.xinhuanet.com/2026/0807/0002.htm", "rank": 1}'
+_SOURCE_TITLE = "新闻标题"
+_PUBLISHED_AT = datetime(2026, 8, 7, 9, 30, tzinfo=UTC)  # SourceRecord 侧固定值
+
+
+@pytest_asyncio.fixture
+async def database() -> DatabaseManager:
+    settings = get_settings()
+    manager = DatabaseManager(
+        database_url=settings.database_url,
+        echo=False,
+        connect_timeout_seconds=settings.database_connect_timeout_seconds,
+    )
+    yield manager
+    await manager.dispose()
+
+
+@pytest_asyncio.fixture
+async def sessionmaker(database):
+    return database.session_factory()
+
+
+async def _cleanup(sessionmaker) -> None:
+    async with sessionmaker() as session:
+        await session.execute(text("DELETE FROM parsed_source_blocks"))
+        await session.execute(text("DELETE FROM parsed_sources"))
+        await session.execute(text("DELETE FROM news_source_verifications"))
+        await session.execute(text("DELETE FROM news_discovery_candidates"))
+        await session.execute(text("DELETE FROM news_discovery_runs"))
+        await session.execute(text("DELETE FROM source_records"))
+        await session.execute(text("DELETE FROM raw_artifacts"))
+        await session.execute(text("DELETE FROM company_aliases"))
+        await session.execute(text("DELETE FROM companies"))
+        await session.commit()
+
+
+@pytest_asyncio.fixture
+async def env(tmp_path, sessionmaker) -> dict:
+    raw_root = tmp_path / "raw"
+    store = LocalRawArtifactStore(root=raw_root, max_bytes=1024 * 1024)
+    await _cleanup(sessionmaker)
+    # 确保 xinhuanet 等默认 Provider 存在（upsert，不破坏其他测试）。
+    await SourceRegistryService(sessionmaker).seed_defaults()
+    company_id = uuid4()
+    async with sessionmaker() as session:
+        await CompanyRepository(session).create(
+            CompanyModel(
+                company_id=company_id,
+                exchange="SSE",
+                security_code="600519",
+                identity_key="SSE:600519",
+                board="sse_main",
+                official_name="测试公司",
+                short_name="测试",
+                listing_status="listed",
+                identity_source_provider_key="sse",
+                identity_source_url="https://www.sse.com.cn",
+            )
+        )
+        await session.commit()
+    yield {
+        "sessionmaker": sessionmaker,
+        "raw_store": store,
+        "raw_root": raw_root,
+        "company_id": company_id,
+    }
+    await _cleanup(sessionmaker)
+
+
+async def _seed_html_source(
+    env: dict,
+    *,
+    html: bytes = _HTML,
+    source_url: str = _XINHUA_URL,
+    media_type: str = "text/html",
+) -> tuple:
+    """真实 LocalRawArtifactStore 落盘 + 真实 Repository 登记 SourceRecord。
+
+    默认 text/html；media_type="application/json" 时用 JSON artifact
+    （用于非 HTML 拒绝路径）。返回 (source_id, artifact_id, storage_key)。
+    """
+    if media_type == "application/json":
+        stored = env["raw_store"].put_json_bytes(_JSON_ARTIFACT)
+        document_type = "news_article"
+        provider_key = "xinhuanet"
+    else:
+        stored = env["raw_store"].put_html_bytes(html)
+        document_type = "news_article"
+        provider_key = "xinhuanet"
+    async with env["sessionmaker"]() as session:
+        artifact = await RawArtifactRepository(session).create(
+            RawArtifactModel(
+                content_sha256=stored.content_sha256,
+                storage_key=stored.storage_key,
+                byte_size=stored.byte_size,
+                media_type=stored.media_type,
+            )
+        )
+        if artifact is None:  # 并发/残留冲突：复用既有行
+            artifact = await RawArtifactRepository(session).get_by_sha256(stored.content_sha256)
+            assert artifact is not None
+        record = SourceRecordModel(
+            company_id=env["company_id"],
+            provider_key=provider_key,
+            artifact_id=artifact.artifact_id,
+            document_type=document_type,
+            title=_SOURCE_TITLE,
+            published_at=_PUBLISHED_AT,
+            source_url=source_url,
+            acquisition_method="public_html",
+            status="available",
+            authority_tier_snapshot=3,
+            critical_claim_eligible_snapshot=False,
+            provider_capabilities_snapshot=["news_article"],
+            acquired_at=datetime.now(UTC),
+        )
+        record = await SourceRecordRepository(session).create(record)
+        await session.commit()
+        return record.source_id, artifact.artifact_id, stored.storage_key
+
+
+def _service(env: dict) -> SourceParsingService:
+    return SourceParsingService(env["sessionmaker"], env["raw_store"])
+
+
+async def _get_parsed_source(env: dict, source_id):
+    async with env["sessionmaker"]() as session:
+        return await ParsedSourceRepository(session).get_by_source_id(source_id)
+
+
+async def _get_blocks(env: dict, parsed_source_id):
+    async with env["sessionmaker"]() as session:
+        return await ParsedSourceBlockRepository(session).list_for_parsed_source(parsed_source_id)
+
+
+async def _counts(env: dict) -> tuple:
+    async with env["sessionmaker"]() as session:
+        parsed = (
+            await session.execute(select(func.count(ParsedSourceModel.parsed_source_id)))
+        ).scalar_one()
+        blocks = (
+            await session.execute(select(func.count(ParsedSourceBlockModel.block_id)))
+        ).scalar_one()
+    return parsed, blocks
+
+
+async def _get_source(env: dict, source_id):
+    async with env["sessionmaker"]() as session:
+        return await SourceRecordRepository(session).get_by_id(source_id)
+
+
+# ---------------------------------------------------------------- first parse
+
+
+async def test_first_parse_creates_snapshot_and_blocks(env) -> None:
+    source_id, artifact_id, storage_key = await _seed_html_source(env)
+    result = await _service(env).parse_source(source_id)
+
+    assert result.replayed is False
+    assert result.source_id == source_id
+    assert result.artifact_id == artifact_id
+    assert result.parser_name == HTML_PARSER_NAME
+    assert result.parser_version == HTML_PARSER_VERSION
+    assert result.raw_content_sha256 == hashlib.sha256(_HTML).hexdigest()
+    assert result.extracted_title == "确定性解析标题"  # og:title 优先
+    # PG timestamptz 统一按 UTC 规范化存储，+08:00 → 01:30 UTC。
+    assert result.extracted_published_at is not None
+    assert result.extracted_published_at.utcoffset() is not None
+    assert result.extracted_published_at.astimezone(UTC).isoformat() == (
+        "2026-08-07T01:30:00+00:00"
+    )
+    assert result.block_count == 4
+
+    snapshot = await _get_parsed_source(env, source_id)
+    assert snapshot is not None
+    assert snapshot.parsed_source_id == result.parsed_source_id
+    assert snapshot.raw_content_sha256 == result.raw_content_sha256
+    assert len(snapshot.parse_fingerprint) == 64
+
+    blocks = await _get_blocks(env, snapshot.parsed_source_id)
+    assert [(b.ordinal, b.block_type, b.text) for b in blocks] == [
+        (1, "heading", "确定性解析标题"),
+        (2, "paragraph", "第一段正文。"),
+        (3, "list_item", "列表项一"),
+        (4, "list_item", "列表项二"),
+    ]
+    # 文本哈希与原文 SHA-256 一致（确定性）
+    for block in blocks:
+        assert block.text_sha256 == hashlib.sha256(block.text.encode("utf-8")).hexdigest()
+    # locator 绝对 xpath（同 tag 兄弟仅一个时不加下标，多时才加 [N]）
+    assert [b.locator["xpath"] for b in blocks] == [
+        "/html/body/article/h1",
+        "/html/body/article/p",
+        "/html/body/article/ul/li[1]",
+        "/html/body/article/ul/li[2]",
+    ]
+    assert all(b.locator["type"] == "html_dom" for b in blocks)
+    assert all(b.locator["ordinal"] == b.ordinal for b in blocks)
+
+
+async def test_source_record_metadata_not_written_back(env) -> None:
+    """解析出的 title/published_at 只进 ParsedSource，SourceRecord 保持原始值。"""
+    source_id, _, _ = await _seed_html_source(env)
+    await _service(env).parse_source(source_id)
+
+    source = await _get_source(env, source_id)
+    assert source is not None
+    assert source.title == _SOURCE_TITLE  # 不被 og:title 覆盖
+    assert source.published_at == _PUBLISHED_AT  # 不被 article:published_time 覆盖
+
+
+# ---------------------------------------------------------------- replay
+
+
+async def test_replay_reuses_same_snapshot(env) -> None:
+    source_id, _, _ = await _seed_html_source(env)
+    service = _service(env)
+
+    first = await service.parse_source(source_id)
+    assert first.replayed is False
+    second = await service.parse_source(source_id)
+    assert second.replayed is True
+    assert second.parsed_source_id == first.parsed_source_id
+    assert second.parse_fingerprint == first.parse_fingerprint
+    assert second.block_count == first.block_count
+
+    parsed, blocks = await _counts(env)
+    assert parsed == 1
+    assert blocks == 4  # replay 不重复插 Blocks
+
+
+# ---------------------------------------------------------------- fingerprint / 版本
+
+
+async def test_parser_version_change_creates_new_snapshot_keeps_old(env, monkeypatch) -> None:
+    """parser version 升级 → 新 fingerprint → 新快照；旧快照保留（可追溯）。"""
+    source_id, _, _ = await _seed_html_source(env)
+    service = _service(env)
+    v1 = await service.parse_source(source_id)
+    assert v1.parser_version == 1
+
+    # 模拟 parser 升级到 v2（真实 parser + 真实 fingerprint，仅换版本号）。
+    import app.parsing.contracts as contracts_mod
+    import app.parsing.html_parser as parser_mod
+
+    monkeypatch.setattr(parser_mod, "HTML_PARSER_VERSION", 2)
+    monkeypatch.setattr(contracts_mod, "HTML_PARSER_VERSION", 2)
+
+    v2 = await service.parse_source(source_id)
+    assert v2.replayed is False
+    assert v2.parser_version == 2
+    assert v2.parse_fingerprint != v1.parse_fingerprint
+    assert v2.parsed_source_id != v1.parsed_source_id
+    assert v2.block_count == v1.block_count == 4
+
+    parsed, blocks = await _counts(env)
+    assert parsed == 2  # 新旧快照并存
+    assert blocks == 8  # 各自一套 blocks
+
+
+async def test_fingerprint_differs_when_raw_content_changes(env) -> None:
+    """同 source 归档内容更新 → 新 fingerprint → 新快照（旧快照保留）。"""
+    source_id, artifact_id, storage_key = await _seed_html_source(env)
+    service = _service(env)
+    v1 = await service.parse_source(source_id)
+
+    # 内容变化：存储文件字节替换 + artifact 登记 SHA 同步更新（等价于归档
+    # 了修订版原文，走真实内容寻址登记路径）。内容寻址一致性检查需通过，
+    # 指纹因 raw_content_sha256 变化而不同 → 新快照。
+    path = env["raw_root"] / storage_key
+    tampered = _HTML.replace("第一段正文。".encode(), "第一段正文（修订）。".encode())
+    path.write_bytes(tampered)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            update(RawArtifactModel)
+            .where(RawArtifactModel.artifact_id == artifact_id)
+            .values(
+                content_sha256=hashlib.sha256(tampered).hexdigest(),
+                byte_size=len(tampered),
+            )
+        )
+        await session.commit()
+
+    v2 = await service.parse_source(source_id)
+    assert v2.replayed is False
+    assert v2.parsed_source_id != v1.parsed_source_id
+    assert v2.parse_fingerprint != v1.parse_fingerprint
+    assert v2.raw_content_sha256 != v1.raw_content_sha256
+
+    parsed, blocks = await _counts(env)
+    assert parsed == 2
+    assert blocks == 8
+
+
+# ---------------------------------------------------------------- 完整性损坏
+
+
+async def test_tampered_block_text_sha256_raises_integrity_error(env) -> None:
+    """replay 校验发现 block 哈希被篡改 → ParsedSourceIntegrityError，不自动修复。"""
+    source_id, _, _ = await _seed_html_source(env)
+    service = _service(env)
+    first = await service.parse_source(source_id)
+
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            update(ParsedSourceBlockModel)
+            .where(ParsedSourceBlockModel.parsed_source_id == first.parsed_source_id)
+            .where(ParsedSourceBlockModel.ordinal == 2)
+            .values(text_sha256="0" * 64)
+        )
+        await session.commit()
+
+    with pytest.raises(ParsedSourceIntegrityError) as exc:
+        await service.parse_source(source_id)
+    assert exc.value.code == "parsed_source_integrity_error"
+
+    # 不自动修复：篡改残留，快照未被重建
+    parsed, blocks = await _counts(env)
+    assert parsed == 1
+    assert blocks == 4
+    tampered = await _get_blocks(env, first.parsed_source_id)
+    assert tampered[1].text_sha256 == "0" * 64
+
+
+async def test_tampered_snapshot_block_count_raises_integrity_error(env) -> None:
+    """snapshot.block_count 与 blocks 实际数不一致 → integrity error（不修）。"""
+    source_id, _, _ = await _seed_html_source(env)
+    service = _service(env)
+    first = await service.parse_source(source_id)
+
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            update(ParsedSourceModel)
+            .where(ParsedSourceModel.parsed_source_id == first.parsed_source_id)
+            .values(block_count=99)
+        )
+        await session.commit()
+
+    with pytest.raises(ParsedSourceIntegrityError):
+        await service.parse_source(source_id)
+    parsed, _ = await _counts(env)
+    assert parsed == 1
+
+
+async def test_storage_content_sha_mismatch_raises_integrity_error(env) -> None:
+    """存储文件与 artifact 登记的 SHA 不一致 → integrity error（内容寻址被篡改）。"""
+    source_id, _, storage_key = await _seed_html_source(env)
+    # 改文件但不改 artifact.content_sha256 登记值。
+    path = env["raw_root"] / storage_key
+    path.write_bytes("<html><body><p>被替换的内容</p></body></html>".encode())
+
+    with pytest.raises(ParsedSourceIntegrityError) as exc:
+        await _service(env).parse_source(source_id)
+    assert exc.value.code == "parsed_source_integrity_error"
+
+
+# ---------------------------------------------------------------- 并发
+
+
+async def test_concurrent_parse_single_snapshot(env) -> None:
+    source_id, _, _ = await _seed_html_source(env)
+    service = _service(env)
+
+    results = await asyncio.gather(service.parse_source(source_id), service.parse_source(source_id))
+
+    assert len({r.parsed_source_id for r in results}) == 1
+    assert {r.replayed for r in results} == {False, True}  # 一个赢家 + 一个 replay
+    assert results[0].parse_fingerprint == results[1].parse_fingerprint
+
+    parsed, blocks = await _counts(env)
+    assert parsed == 1
+    assert blocks == 4
+
+
+# ---------------------------------------------------------------- blocks 稳定
+
+
+async def test_blocks_ordinal_contiguous_and_stable(env) -> None:
+    source_id, _, _ = await _seed_html_source(env)
+    result = await _service(env).parse_source(source_id)
+
+    blocks = await _get_blocks(env, result.parsed_source_id)
+    assert [b.ordinal for b in blocks] == list(range(1, result.block_count + 1))
+    assert [b.ordinal for b in blocks] == [1, 2, 3, 4]
+    # 相邻 block (type, text) 不允许完全相同（parser 已去重）
+    for index in range(len(blocks) - 1):
+        left, right = blocks[index], blocks[index + 1]
+        assert (left.block_type, left.text) != (right.block_type, right.text)
+
+
+# ---------------------------------------------------------------- 错误路径
+
+
+async def test_non_html_artifact_rejected(env) -> None:
+    source_id, _, _ = await _seed_html_source(
+        env, source_url=_XINHUA_URL_2, media_type="application/json"
+    )
+    with pytest.raises(UnsupportedParseMediaType) as exc:
+        await _service(env).parse_source(source_id)
+    assert exc.value.code == "unsupported_parse_media_type"
+
+
+async def test_source_not_found(env) -> None:
+    with pytest.raises(SourceRecordNotFound) as exc:
+        await _service(env).parse_source(uuid4())
+    assert exc.value.code == "source_record_not_found"

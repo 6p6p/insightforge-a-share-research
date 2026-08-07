@@ -98,10 +98,24 @@
   - 受控真实 HTML 传输 Probe（live_html_transport_acceptance）：对 `www.xinhuanet.com` **恰好 1 次请求**、不重试、不代理、不 DNS 覆盖；真实 DNS + 真实 HTTPS → status=200 / text/html / redirects=0 / 178,458 字节，**只验证 HTML 传输链，不是真实文章端到端验收（real_article_e2e_acceptance = not performed）**。Docker 重建成功（新镜像 healthy、live 200、ready 200、五项 checks ok），docker_rebuild acceptance = completed。
   - 本阶段不创建 Evidence/Claim/DocumentChunk/Chroma、不用 LLM/LangGraph、不做正文解析/摘要/清洗、不做批量历史同步、不开一般 Web 爬虫。
   - 决策记录：[docs/decisions/0015-original-news-source-verification.md](docs/decisions/0015-original-news-source-verification.md)。
-- **2D.2B（尚未开始）**：真实新闻正文进入 Evidence 管线。Candidate verification_status 冻结为 unverified/verified，不存在 rejected / archived / evidence_ready 设计——验证失败不改 Candidate 状态，未来失败历史由独立 Attempt 模型记录（如 NewsSourceVerificationAttempt，见 ADR-0015），本阶段不建表。
+- **2D.2B（尚未开始，2026-08-07 移除 →Evidence 关联）**：真实新闻正文的确定性解析与结构化抽取由 2E 承接（2E.1 HTML → 2E.2 PDF）；**Evidence 管线属于 Stage 3**（DocumentChunk / Embedding / Chroma / EvidenceCard，见 2E 节），不再挂在 2D.2B 上。Candidate verification_status 冻结为 unverified/verified，不存在 rejected / archived / evidence_ready 设计——验证失败不改 Candidate 状态，未来失败历史由独立 Attempt 模型记录（如 NewsSourceVerificationAttempt，见 ADR-0015），本阶段不建表。
 - **2D.3（尚未开始）**：Model Web Search fallback + Discovery Router。
   - 在 2D.1 的 GDELT 发现（主要覆盖英文机器翻译内容）之外提供大模型联网搜索兜底与路由。GDELT 不是中文原生全文搜索的可靠替代，不承诺对 A 股中文媒体拥有完整 recall。
 
 ## 2E：原始归档、哈希、解析、去重与阶段验收
 
-- 统一归档 PDF、HTML、JSON、CSV、Excel 与上传文件。
+**顶层分工：确定性解析（2E）只把已归档原文变成可定位的结构化文本（ParsedSource / ParsedBlock），不建 Chunk、不 Embedding、不进 Chroma、不建 EvidenceCard——那些属于 Stage 3。** 解析产物是"Evidence 管线"的确定性前置，不是 Evidence 本身。
+
+- **2E.1（当前，2026-08-07）**：确定性 HTML 解析。
+  - 只把已归档的 text/html SourceRecord（如 2D.2A 归档的新闻原文）确定性解析为 ParsedSource + ParsedSourceBlock，**不做 Chunk / Embedding / Chroma / Evidence / Claim / LLM**。
+  - 两张表（migration 0013，已应用）：`parsed_sources` + `parsed_source_blocks`，明确约束（sha256 regex、block_type IN 5 类、ordinal≥1、text 非空、locator JSONB object、UNIQUE(parse_fingerprint)、UNIQUE(parsed_source_id, ordinal)、FK source/artifact RESTRICT、blocks→parsed_sources CASCADE）。
+  - `html_dom` parser（VERSION=1，lxml 5.4.0 唯一新增依赖）：不联网、不执行 JS、不修改 RawArtifact；编码检测 BOM→meta charset→UTF-8 默认（确定性解码为 str 再交 lxml，避免 latin-1 乱码，GBK 等声明受尊重）；删除 script/style/noscript/template/svg；内容根 article→main→body；DOM 顺序抽取 h1-h6/p/li/blockquote/table；whitespace normalize；空文本跳过；相邻相同 block 去重；title 优先 og:title→<title>→h1→None；published_at 只接受机器可读元数据（article:published_time / <time datetime>），naive→None，绝不使用 seen_at/parsed_at/now 伪造。
+  - Locator 至少含 `{"type":"html_dom","ordinal","tag","xpath","element_id"}`，绝对 xpath 在相同 DOM 下稳定。
+  - parse_fingerprint = 确定性 SHA-256（source_id、raw artifact sha256、parser_name/version、extracted metadata、ordered blocks text+locator；sort_keys、固定 separators、UTF-8；排除 parsed_at/created_at/DB ID）。
+  - `SourceParsingService.parse_source(source_id)`：短 session 读 SourceRecord+RawArtifact → 关闭；仅 text/html；文件 I/O 不持 DB transaction；create-or-get ParsedSource → bulk insert Blocks → commit；并发只 1 快照；replay 校验完整性，损坏抛 ParsedSourceIntegrityError 不自动修复；**不更新 SourceRecord.title/published_at**。
+  - 安全边界：HTML content API 保持 415；不新增 raw HTML endpoint；通过 storage 读取无浏览器；不创建 DocumentChunk/EvidenceCard/Chroma/Embedding/Claim。
+  - 测试：**29 parser 单元 + 25 contracts/fingerprint 单元 + 12 集成 E2E**（真实 PostgreSQL + 临时 RawStore，零网络）全部通过；ruff 零告警；`pip check` 通过。
+  - 决策记录：[docs/decisions/0016-deterministic-html-parsing.md](decisions/0016-deterministic-html-parsing.md)。
+- **2E.2（next，尚未开始）**：确定性 PDF 解析 + page location。
+- **2E.3（尚未开始）**：Stage-2 source pipeline E2E acceptance（PDF + HTML 全链路确定性解析的端到端验收）。
+- **Stage 3（尚未开始）**：DocumentChunk / Embedding / Chroma / EvidenceCard（不属于 Stage 2）。
