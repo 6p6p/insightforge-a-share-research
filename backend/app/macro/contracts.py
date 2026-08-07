@@ -52,6 +52,11 @@ _ERROR_MSG = {
     "acquisition_method": "acquisition_method 必须为 official_api",
     "source_id": "source_id 当前必须固定为 WDI 数据源 '2'",
     "indicator_source_consistency": "indicator.source_id 必须与 source_id 一致",
+    "provider_consistency": "provider_key 必须跨 result/query/indicator/observation 一致",
+    "indicator_consistency": "indicator 必须与 query/observation 的指标 id 一致",
+    "geography_consistency": "geography 必须与 query 国家代码及 observation 地理代码一致",
+    "observation_period_out_of_query": "observation.period 必须可转年份且落在 query 年份范围内",
+    "observation_frequency_consistency": "observation.frequency 当前必须为 annual",
 }
 
 
@@ -284,6 +289,41 @@ class MacroFetchResult:
             raise ValueError(_ERROR_MSG["source_id"])
         if self.indicator.source_id != self.source_id:
             raise ValueError(_ERROR_MSG["indicator_source_consistency"])
+        # A. Provider 一致性：result/query/indicator/observation 的 provider_key 必须互相一致。
+        if not (
+            self.query.provider_key == self.provider_key
+            and self.indicator.provider_key == self.provider_key
+            and all(o.provider_key == self.provider_key for o in self.observations)
+        ):
+            raise ValueError(_ERROR_MSG["provider_consistency"])
+        # B. Indicator 一致性：query.indicator_code 必须等于 indicator 的指标 id，
+        #    且每条 observation.external_indicator_id 必须等于该指标 id。
+        if not (
+            self.query.indicator_code == self.indicator.external_indicator_id
+            and all(
+                o.external_indicator_id == self.indicator.external_indicator_id
+                for o in self.observations
+            )
+        ):
+            raise ValueError(_ERROR_MSG["indicator_consistency"])
+        # C. Geography 一致性：query.country_code 必须等于 geography.requested_code；
+        #    每条 observation.geography_code 必须等于 geography.iso3_code。
+        #    不要求 query.country_code 直接等于 observation.geography_code：
+        #    ISO2 请求下 query 是 CN、observation 地理代码是 iso3 的 CHN，属合法。
+        if not (
+            self.query.country_code == self.geography.requested_code
+            and all(o.geography_code == self.geography.iso3_code for o in self.observations)
+        ):
+            raise ValueError(_ERROR_MSG["geography_consistency"])
+        # D. 时间范围一致性：每条 observation.period 必须可转年份，且落在 query 年份闭区间内。
+        for o in self.observations:
+            if not isinstance(o.period, str) or not _YEAR_RE.match(o.period):
+                raise ValueError(_ERROR_MSG["observation_period_out_of_query"])
+            if not (self.query.start_year <= int(o.period) <= self.query.end_year):
+                raise ValueError(_ERROR_MSG["observation_period_out_of_query"])
+        # E. 频率一致性：本阶段只支持 annual；月度/季度由后续 FRED 阶段演进。
+        if any(o.frequency != MacroFrequency.ANNUAL for o in self.observations):
+            raise ValueError(_ERROR_MSG["observation_frequency_consistency"])
         # 按 normalized_period_start 升序稳定排序（同一 period 的多条记录保持原相对顺序）。
         ordered = tuple(
             sorted(self.observations, key=lambda o: (o.normalized_period_start, o.period))

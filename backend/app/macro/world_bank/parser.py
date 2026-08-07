@@ -32,6 +32,8 @@ from app.macro.world_bank.errors import (
 )
 
 _YEAR_RE = re.compile(r"^\d{4}$")
+_COUNTRY_ID_RE = re.compile(r"^[A-Z]{3}$")
+_ISO2_RE = re.compile(r"^[A-Z]{2}$")
 
 
 def _coerce_int(value: object) -> int:
@@ -163,14 +165,46 @@ def parse_geography(raw: object, *, requested_code: str) -> MacroGeography:
     row = rows[0]
     if not isinstance(row, dict):
         raise WorldBankMalformedResponse("country row must be an object")
+
+    # country_id：必须是字符串、去掉首尾空白、3 位 ASCII 字母、规范化大写。
     country_id = row.get("id")
-    if not isinstance(country_id, str) or not country_id:
-        raise WorldBankMalformedResponse("country id missing")
+    if not isinstance(country_id, str):
+        raise WorldBankMalformedResponse("country id must be a string")
+    country_id = country_id.strip().upper()
+    if not _COUNTRY_ID_RE.match(country_id):
+        raise WorldBankMalformedResponse("country id must be 3 ASCII letters")
+
+    # iso2Code：必须是字符串、去掉首尾空白、2 位 ASCII 字母、规范化大写。
+    iso2 = row.get("iso2Code")
+    if not isinstance(iso2, str):
+        raise WorldBankMalformedResponse("iso2Code must be a string")
+    iso2 = iso2.strip().upper()
+    if not _ISO2_RE.match(iso2):
+        raise WorldBankMalformedResponse("iso2Code must be 2 ASCII letters")
+
+    # name：必须是非空字符串；去掉首尾空白后不能为空。
+    name = row.get("name")
+    if not isinstance(name, str):
+        raise WorldBankMalformedResponse("name must be a string")
+    name = name.strip()
+    if not name:
+        raise WorldBankMalformedResponse("name must not be empty")
+
     region = row.get("region")
     _reject_aggregate_geography(region)
+
+    # 响应国家必须与请求一致：ISO2 请求对 iso2Code，ISO3 请求对 country id（即 iso3）。
+    # 不做名称模糊匹配、不自行猜测国家映射。
+    requested = requested_code.strip().upper()
+    if len(requested) == 2:
+        if requested != iso2:
+            raise WorldBankMalformedResponse("country metadata does not match requested code")
+    elif requested != country_id:
+        raise WorldBankMalformedResponse("country metadata does not match requested code")
+
     income = row.get("incomeLevel")
 
-    def _name(value: object) -> str | None:
+    def _opt_name(value: object) -> str | None:
         if isinstance(value, dict):
             text = value.get("value")
             if isinstance(text, str) and text:
@@ -179,14 +213,14 @@ def parse_geography(raw: object, *, requested_code: str) -> MacroGeography:
 
     return MacroGeography(
         geography_type=MacroGeographyType.COUNTRY,
-        requested_code=requested_code,
+        requested_code=requested,
         provider_country_id=country_id,
-        iso2_code=str(row.get("iso2Code") or ""),
+        iso2_code=iso2,
         # World Bank 对真实国家，country id 即 ISO3（聚合项已在上面拒绝）。
         iso3_code=country_id,
-        name=str(row.get("name") or ""),
-        region_name=_name(region),
-        income_level_name=_name(income),
+        name=name,
+        region_name=_opt_name(region),
+        income_level_name=_opt_name(income),
     )
 
 

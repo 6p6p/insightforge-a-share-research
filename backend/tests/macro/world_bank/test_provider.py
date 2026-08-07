@@ -9,7 +9,11 @@ from app.domain.sources import (
     SourceCapability,
 )
 from app.macro.contracts import MacroQuery
-from app.macro.world_bank.errors import WorldBankGeographyNotCountry, WorldBankProviderNotReady
+from app.macro.world_bank.errors import (
+    WorldBankGeographyNotCountry,
+    WorldBankMalformedResponse,
+    WorldBankProviderNotReady,
+)
 from tests.macro.world_bank.helpers import (
     QUERY,
     country_response,
@@ -227,3 +231,40 @@ async def test_aggregate_geography_rejected_before_observations(world_bank_provi
         await provider.fetch(query)
     assert exc.value.code == "geography_not_country"
     assert requested_paths == []
+
+
+async def test_country_metadata_mismatch_aborts_before_observations(world_bank_provider):
+    # 响应国家与请求不一致（请求 CN、响应 USA/US）→ malformed_response；
+    # 拒绝后不继续获取 observations，实际发出的请求只有两条元数据请求。
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        requested_paths.append(path)
+        if path == "/v2/indicator/SP.POP.TOTL":
+            return json_response(indicator_response())
+        if path == "/v2/country/CN":
+            row = {
+                "id": "USA",
+                "iso2Code": "US",
+                "name": "United States",
+                "region": {"id": "NAC", "value": "North America"},
+                "incomeLevel": {"id": "HIC", "value": "High income"},
+            }
+            return json_response([page_header(total=1), [row]])
+        raise AssertionError(f"observations should not be fetched: {path}")
+
+    provider, _factory = world_bank_provider(transport=httpx.MockTransport(handler))
+    query = MacroQuery(
+        provider_key="world_bank",
+        indicator_code="SP.POP.TOTL",
+        country_code="CN",
+        start_year=2020,
+        end_year=2024,
+    )
+    with pytest.raises(WorldBankMalformedResponse) as exc:
+        await provider.fetch(query)
+    assert exc.value.code == "malformed_response"
+    assert "does not match" in str(exc.value)
+    # request_count 只含已发出的元数据请求（indicator + country），未发出观测分页请求。
+    assert requested_paths == ["/v2/indicator/SP.POP.TOTL", "/v2/country/CN"]

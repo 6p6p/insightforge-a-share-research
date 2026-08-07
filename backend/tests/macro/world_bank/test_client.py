@@ -118,6 +118,23 @@ async def test_indicator_and_country_metadata_urls():
     assert client.request_count == 2
 
 
+async def test_indicator_metadata_request_contains_source():
+    # indicator 元数据请求必须显式携带 source=2（World Development Indicators）。
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        return json_response(indicator_response())
+
+    client = _client(handler)
+    await client.fetch_indicator_metadata("SP.POP.TOTL")
+    assert seen["path"] == "/v2/indicator/SP.POP.TOTL"
+    assert seen["params"]["source"] == "2"
+    assert seen["params"]["format"] == "json"
+    assert client.request_count == 1
+
+
 async def test_non_allowlist_rejected_without_request():
     client = _client(_ok_router, allowed_domains=["example.org"])
     with pytest.raises(WorldBankRequestFailed):

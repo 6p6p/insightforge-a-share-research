@@ -147,6 +147,30 @@ def test_request_failed_stable_message(capsys, monkeypatch, test_settings):
     assert "api.worldbank.org" not in payload["message"]
 
 
+def test_country_metadata_mismatch_exit_4(capsys, monkeypatch, test_settings):
+    # 响应国家与请求不一致（§三）→ malformed_response → exit 4；
+    # stdout 只输出稳定脱敏 JSON（不含 traceback / 完整响应 / query / body），stderr 不泄漏 query。
+    from app.macro.world_bank.errors import WorldBankMalformedResponse
+
+    async def _fetch(query):
+        raise WorldBankMalformedResponse("country metadata does not match requested code")
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 4
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["error"] == "malformed_response"
+    assert payload["message"] == "country metadata does not match requested code"
+    assert "traceback" not in captured.out.lower()
+    # stdout 不含完整响应 / query / body 泄漏。
+    for leaked in ("query", "body", "observations", "SP.POP.TOTL"):
+        assert leaked not in captured.out
+    # stderr 只含结构化日志，不输出 query / 完整响应正文。
+    assert "SP.POP.TOTL" not in captured.err
+    assert "country metadata does not match requested code" not in captured.err
+
+
 def test_unexpected_error_exit_4(capsys, monkeypatch, test_settings):
     async def _fetch(query):
         raise RuntimeError("boom")

@@ -292,6 +292,7 @@ conda run -n insightforge python -m app.cli.probe_disclosure_sources \
 - 固定官方 Indicators API V2（`api.worldbank.org/v2`）+ 数据源 `source=2`（World Development Indicators）；客户端固定接口模板，不接受任意 endpoint/query 参数；`MacroFetchResult.source_id` 固定 `"2"`。
 - 数值使用 Decimal 全程（`parse_float=Decimal` + 显式拒绝 NaN/Infinity 字面量），不做单位换算或同比/环比；缺失年份保留为 `is_missing=true`，不补齐缺失年份；观测 `period` 为 Provider 年份标签，`normalized_period_start` 固定该年 1 月 1 日（仅用于排序/索引，不表示真实统计周期起始日）。
 - 请求预算 `per_page=1000`、2 次元数据请求 + 观测分页 ≤ 20、观测分页上限 18；受控客户端仅 https、URL 通过 Source Registry allowlist（子域匹配）、无 Cookie/Auth/Header、手动重定向（同 allowlist ≤3 次、跨域拒绝）、单响应上限 5 MiB。
+- 国家身份一致性：country metadata 校验返回国家与请求一致——两字母（ISO2）请求对 `iso2Code`、三字母（ISO3）请求对 country id（即 iso3），不匹配报 `malformed_response`，不按名称猜测国家映射；`MacroFetchResult` 是跨对象一致性边界，构造时强制 Query/Indicator/Geography/Observation/Provider/Source 六者一致（不要求 `query.country_code` 直接等于 `observation.geography_code`，如 ISO2 请求 CN→observation 地理代码 CHN 合法）。
 - 开发期 CLI `fetch_world_bank_macro`（需 Source Registry 已登记 `world_bank` Provider）：
 
 ```bash
@@ -305,7 +306,7 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
   - 输出 JSON 报告到 stdout（日志走 stderr），Decimal 输出为字符串，**不写数据库、不保存响应正文、不写本地文件**；
   - 退出码：0 成功 / 2 输入错误 / 3 Provider 配置错误 / 4 API/网络/响应错误。
 
-> **受控真实验收说明（2026-08-07，2C.1.1 收口）**：本机网络对 `worldbank.org` 存在域名级出口阻断（DNS 被劫持到合成地址、TLS 握手被丢弃），真实请求在本环境返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误、不泄漏底层细节），CLI 未跑通成功路径。上述命令与断言不变量已记录在 [docs/decisions/0011-macro-provider-and-world-bank.md](docs/decisions/0011-macro-provider-and-world-bank.md)，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 保持"当前进行"，阶段 2C.2 不开始。
+> **受控真实验收说明（2026-08-07，2C.1.1/2C.1.2 收口）**：本机网络对 `worldbank.org` 存在域名级出口阻断（DNS 被劫持到合成地址、TLS 握手被丢弃），真实请求在本环境返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误、不泄漏底层细节），CLI 未跑通成功路径。上述命令与断言不变量已记录在 [docs/decisions/0011-macro-provider-and-world-bank.md](docs/decisions/0011-macro-provider-and-world-bank.md)，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 保持"当前进行"（2C.1.2 收口仅冻结契约与测试），阶段 2C.2 不开始。
 
 ## 完整系统（Docker Compose）
 

@@ -74,6 +74,12 @@
     - FRED 需要 API Key、指标/频率语义更复杂（月度/季度/每日、多个 source），先由 World Bank 验证契约后再演进；
     - 国内官方宏观数据（NBS 等）接入形态尚未确认（可能要求注册或非文档化接口），不在本阶段启动；
     - 本阶段只支持 `annual` 频率，为 FRED 月度/季度留下显式演进路径（MacroFrequency 枚举扩展）。
+18. **国家身份一致性与 FetchResult 跨对象一致性（2C.1.2 冻结）**。
+    - country metadata 验证返回国家与请求一致：两字母（ISO2）请求对 `iso2Code`，三字母（ISO3）请求对 country id（即 iso3），不匹配报 `malformed_response`（`country metadata does not match requested code`）；不按名称模糊匹配、不自行猜测国家映射（CN→CHN/CN 合法、CHN→CHN/CN 合法、CN→USA/US 与 CHN→USA/US 拒绝、US→USA/US 合法）；
+    - 字段冻结：`country_id` 去空白后须 3 位 ASCII 大写字母、`iso2Code` 去空白后须 2 位 ASCII 大写字母、`name` 非空字符串；字段前后空白规范化；聚合项（`region.value=Aggregates`）仍在国家匹配之前拒绝为 `geography_not_country`；
+    - `MacroFetchResult` 是跨对象一致性边界：构造时强制 Query / Indicator / Geography / Observation / Provider / Source 六者互相一致——Provider（result/query/indicator/observation 的 `provider_key` 一致）、Indicator（`query.indicator_code` == indicator 指标 id == `observation.external_indicator_id`）、Geography（`query.country_code` == `geography.requested_code`，且 `observation.geography_code` == `geography.iso3_code`；不要求 `query.country_code` 直接等于 `observation.geography_code`）、时间范围（每条 `observation.period` 可转年份且落在 query 年份闭区间）、频率（当前必须 `annual`）、Source（`source_id` 固定 `"2"` 且 `indicator.source_id` 一致）；
+    - 一致性校验使用稳定错误消息键（provider_consistency / indicator_consistency / geography_consistency / observation_period_out_of_query / observation_frequency_consistency），不把完整 query/响应对象写入错误消息；
+    - 上述约束在阶段 2C.2 持久化之前冻结，避免把身份或跨对象不一致的数据固化进表。
 
 ## 后果
 
@@ -88,4 +94,10 @@
   5. 当前真实验收仍未完成（网络阻断）；
   6. 阶段 2C.1 仍为"当前进行"；
   7. 阶段 2C.2 不开始（不建表、不写宏观数据、不扩展 RawArtifact）。
+- **2C.1.2 收口澄清（2026-08-07）**：
+  1. country metadata 严格字段约束：`country_id`（3 位 ASCII 字母）、`iso2Code`（2 位 ASCII 字母）、`name`（非空）均去空白规范化，不直接使用 `str(value or "")` 掩盖类型错误；
+  2. 响应国家与请求一致：ISO2 请求对 `iso2Code`、ISO3 请求对 country id（iso3），不匹配报 `malformed_response`，不按名称猜测、不写完整响应；
+  3. `MacroFetchResult` 是跨对象一致性边界：Provider / Indicator / Geography / 时间范围 / Frequency / Source 六项在构造时强制一致，错误使用稳定消息键，不把完整对象写入错误消息；
+  4. indicator metadata 请求显式携带 `source=2`（测试断言 URL param）；
+  5. 真实验收仍 pending（网络阻断）；2C.1 仍为"当前进行"；2C.2 不开始。
 - 遗留边界：2C.1 不写数据库、不创建表/migration；宏观数据不是 Evidence；FRED、NBS、月度/季度频率、多国家查询均未实现。

@@ -108,13 +108,21 @@ def test_span_over_60_rejected():
 # --- MacroObservation: value / is_missing / decimal_scale ---
 
 
-def _obs(period: str = "2020", value: Decimal | None = None, is_missing: bool | None = None):
+def _obs(
+    period: str = "2020",
+    value: Decimal | None = None,
+    is_missing: bool | None = None,
+    *,
+    provider_key: str = "world_bank",
+    external_indicator_id: str = "SP.POP.TOTL",
+    geography_code: str = "CHN",
+):
     if is_missing is None:
         is_missing = value is None
     return MacroObservation(
-        provider_key="world_bank",
-        external_indicator_id="SP.POP.TOTL",
-        geography_code="CHN",
+        provider_key=provider_key,
+        external_indicator_id=external_indicator_id,
+        geography_code=geography_code,
         period=period,
         normalized_period_start=date(int(period), 1, 1),
         frequency=MacroFrequency.ANNUAL,
@@ -338,3 +346,115 @@ def test_fetch_result_rejects_non_tuple_observations():
             critical_claim_eligible=True,
             provider_capabilities=(SourceCapability.MACRO_DATA,),
         )
+
+
+# --- MacroFetchResult: 跨对象一致性（2C.1.2 §四/§五） ---
+
+
+def test_fetch_result_valid_china_ok():
+    """正常 CHN 请求：query/indicator/geography/observation 全部一致则成功。"""
+    result = _result(
+        [
+            _obs(period="2020", value=Decimal("1")),
+            _obs(period="2021", value=Decimal("2"), is_missing=False),
+        ]
+    )
+    assert result.query.country_code == "CHN"
+    assert result.geography.requested_code == "CHN"
+    assert [o.geography_code for o in result.observations] == ["CHN", "CHN"]
+
+
+def test_fetch_result_iso2_request_matches():
+    """ISO2 请求：query=CN + geography.requested_code=CN 合法，
+    observation.geography_code 为 iso3 的 CHN（不要求与 query 直接相等）。"""
+    query = _query(country_code="CN")
+    geo = MacroGeography(
+        geography_type=MacroGeographyType.COUNTRY,
+        requested_code="CN",
+        provider_country_id="CHN",
+        iso2_code="CN",
+        iso3_code="CHN",
+        name="China",
+    )
+    result = _result([_obs()], query=query, geography=geo)
+    assert result.query.country_code == "CN"
+    assert result.geography.requested_code == "CN"
+    assert result.observations[0].geography_code == "CHN"
+
+
+def test_fetch_result_result_provider_key_mismatch():
+    with pytest.raises(ValueError, match="provider_key 必须跨"):
+        _result([_obs()], provider_key="fred")
+
+
+def test_fetch_result_indicator_provider_key_mismatch():
+    indicator = MacroIndicator(
+        provider_key="fred",
+        external_indicator_id="SP.POP.TOTL",
+        name="Population, total",
+        unit="",
+        source_id="2",
+        source_name="World Development Indicators",
+        source_note="",
+        source_organization="World Bank",
+    )
+    with pytest.raises(ValueError, match="provider_key 必须跨"):
+        _result([_obs()], indicator=indicator)
+
+
+def test_fetch_result_observation_provider_key_mismatch():
+    obs = _obs(provider_key="fred")
+    with pytest.raises(ValueError, match="provider_key 必须跨"):
+        _result([obs])
+
+
+def test_fetch_result_query_indicator_code_mismatch():
+    query = _query(indicator_code="NY.GDP.MKTP.CD")
+    with pytest.raises(ValueError, match="indicator 必须与 query/observation"):
+        _result([_obs()], query=query)
+
+
+def test_fetch_result_observation_indicator_mismatch():
+    obs = _obs(external_indicator_id="NY.GDP.MKTP.CD")
+    with pytest.raises(ValueError, match="indicator 必须与 query/observation"):
+        _result([obs])
+
+
+def test_fetch_result_geography_requested_mismatch():
+    geo = MacroGeography(
+        geography_type=MacroGeographyType.COUNTRY,
+        requested_code="USA",
+        provider_country_id="USA",
+        iso2_code="US",
+        iso3_code="USA",
+        name="United States",
+    )
+    with pytest.raises(ValueError, match="geography 必须与 query"):
+        _result([_obs()], geography=geo)
+
+
+def test_fetch_result_observation_geography_mismatch():
+    obs = _obs(geography_code="USA")
+    with pytest.raises(ValueError, match="geography 必须与 query"):
+        _result([obs])
+
+
+def test_fetch_result_observation_before_start_year():
+    obs = _obs(period="2019")
+    with pytest.raises(ValueError, match="observation.period"):
+        _result([obs])
+
+
+def test_fetch_result_observation_after_end_year():
+    obs = _obs(period="2025")
+    with pytest.raises(ValueError, match="observation.period"):
+        _result([obs])
+
+
+def test_fetch_result_observation_frequency_mismatch():
+    # 合法 MacroObservation 必然 frequency=annual；用显式对象构造后的字段改写
+    # 模拟未来 FRED 月度/季度频率进入当前 annual-only 契约时被拒绝。
+    obs = _obs()
+    object.__setattr__(obs, "frequency", "monthly")  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="observation.frequency"):
+        _result([obs])

@@ -219,6 +219,132 @@ def test_aggregate_region_missing_is_malformed():
         parse_geography(raw, requested_code="WLD")
 
 
+# --- parse_geography: country metadata 字段约束（2C.1.2 §二） ---
+
+
+def _country_row(
+    *,
+    country_id: str = "CHN",
+    iso2: str = "CN",
+    name: str = "China",
+    region: object | None = None,
+) -> list:
+    row = {
+        "id": country_id,
+        "iso2Code": iso2,
+        "name": name,
+        "region": region if region is not None else {"id": "EAS", "value": "East Asia & Pacific"},
+        "incomeLevel": {"id": "UMC", "value": "Upper middle income"},
+    }
+    return [page_header(total=1), [row]]
+
+
+@pytest.mark.parametrize("bad_id", ["CH", "CHNA", "CH1", "cH", ""])
+def test_geography_country_id_invalid(bad_id: str):
+    raw = _country_row(country_id=bad_id)
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CHN")
+
+
+def test_geography_country_id_non_string():
+    raw = _country_row(country_id=123)
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CHN")
+
+
+@pytest.mark.parametrize("bad_iso2", ["C", "CNN", "C1", "c", ""])
+def test_geography_iso2_invalid(bad_iso2: str):
+    raw = _country_row(iso2=bad_iso2)
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CN")
+
+
+def test_geography_iso2_non_string():
+    raw = _country_row(iso2=12)
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CN")
+
+
+def test_geography_iso2_missing():
+    raw = _country_row()
+    del raw[1][0]["iso2Code"]
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CN")
+
+
+def test_geography_name_missing():
+    raw = _country_row()
+    del raw[1][0]["name"]
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CHN")
+
+
+def test_geography_name_empty_or_blank():
+    raw = _country_row(name="   ")
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CHN")
+
+
+def test_geography_name_non_string():
+    raw = _country_row(name=123)
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="CHN")
+
+
+def test_geography_fields_whitespace_normalized():
+    # 字段前后空白规范化：country_id/iso2Code/name 去空白并大写，requested_code 同样规范化。
+    raw = _country_row(country_id=" CHN ", iso2=" cn ", name=" China ")
+    geo = parse_geography(raw, requested_code="chn")
+    assert geo.requested_code == "CHN"
+    assert geo.provider_country_id == "CHN"
+    assert geo.iso2_code == "CN"
+    assert geo.iso3_code == "CHN"
+    assert geo.name == "China"
+
+
+# --- parse_geography: 响应国家与请求一致（2C.1.2 §三） ---
+
+
+def test_geography_iso2_request_matches_iso2():
+    # 两字母请求（CN）必须等于 iso2Code。
+    geo = parse_geography(country_response(), requested_code="CN")
+    assert geo.requested_code == "CN"
+    assert geo.iso2_code == "CN"
+    assert geo.iso3_code == "CHN"
+
+
+def test_geography_iso3_request_matches_country_id():
+    # 三字母请求（CHN）必须等于 country id（即 iso3）。
+    geo = parse_geography(country_response(), requested_code="CHN")
+    assert geo.requested_code == "CHN"
+    assert geo.provider_country_id == "CHN"
+    assert geo.iso3_code == "CHN"
+
+
+def test_geography_us_request_matches():
+    # US 请求 → 匹配 iso2Code=US；provider_country_id=USA（iso3）。
+    raw = _country_row(country_id="USA", iso2="US", name="United States")
+    geo = parse_geography(raw, requested_code="US")
+    assert geo.requested_code == "US"
+    assert geo.provider_country_id == "USA"
+    assert geo.iso2_code == "US"
+    assert geo.iso3_code == "USA"
+
+
+def test_geography_iso2_request_rejects_country_mismatch():
+    # CN 请求但响应返回 USA/US：国家不匹配 → malformed_response，不猜测国家映射。
+    raw = _country_row(country_id="USA", iso2="US", name="United States")
+    with pytest.raises(WorldBankMalformedResponse, match="does not match"):
+        parse_geography(raw, requested_code="CN")
+
+
+def test_geography_iso3_request_rejects_country_mismatch():
+    # CHN 请求但响应返回 USA/US：国家不匹配 → malformed_response。
+    raw = _country_row(country_id="USA", iso2="US", name="United States")
+    with pytest.raises(WorldBankMalformedResponse, match="does not match"):
+        parse_geography(raw, requested_code="CHN")
+
+
 # --- parse_observations: value semantics ---
 
 

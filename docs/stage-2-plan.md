@@ -41,6 +41,7 @@
   - 开发期 CLI `fetch_world_bank_macro` 输出 JSON 报告到 stdout（日志走 stderr，Decimal→字符串），退出码 0/2/3/4，不写数据库、不写文件。
   - 决策记录：[docs/decisions/0011-macro-provider-and-world-bank.md](decisions/0011-macro-provider-and-world-bank.md)。
   - **2C.1.1 收口（2026-08-07）**：单一国家约束（`geography_not_country`）、年度时间语义（`normalized_period_start` + `period_semantics`）、请求预算（2+N≤20、N≤18）、`source_id` 契约、严格 JSON/数字解析（拒绝 bool/NaN/Infinity）、移除 Client 构造的全局日志副作用、稳定错误消息均已冻结并通过测试。
+  - **2C.1.2 收口（2026-08-07）**：country metadata 字段约束（`country_id`/`iso2Code`/`name` 严格解析 + 空白规范化）、响应国家与请求一致（ISO2 对 `iso2Code`、ISO3 对 country id，不匹配 `malformed_response`，不按名称猜测）、`MacroFetchResult` 跨对象一致性（Provider/Indicator/Geography/时间范围/Frequency/Source 六项构造时强制一致）、indicator 请求显式 `source=2`、CLI `malformed_response` 稳定脱敏输出均已冻结并通过测试；**2C.1 仍为"当前进行 / acceptance pending"**（真实验收受网络阻断，见下）。
   - **受控真实验收（§十一）待网络环境**：本机网络对 `worldbank.org` 域名级阻断（DNS 劫持到 28.0.0.x、TLS 握手被丢弃、`--resolve` 直连真实 IP 仍失败），CLI 按规范命令运行返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误）；DB 前置条件已满足（`source_providers.world_bank` 已登记）。验收命令与断言不变量见 ADR-0011，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 视为"当前进行"，2C.2 不开始。
 - **2C.2（尚未开始）**：宏观数据持久化、Provider 快照、原始 JSON 归档。
 - **2C.3（尚未开始）**：FRED Provider。
