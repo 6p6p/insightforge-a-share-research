@@ -9,7 +9,7 @@
 
 ## 2B：官方公司披露文件 MVP、用户上传和 URL 导入
 
-- **2B.1（进行中，2026-08-07；收口验证并提交后标记为已完成）**：原始文件归档与来源登记。
+- **2B.1（已完成，2026-08-07）**：原始文件归档与来源登记。
   - RawArtifact（SHA-256 内容寻址不可变字节归档）与 SourceRecord（一次来源登记，引用 artifact_id）两个独立表。
   - 用户上传（multipart）与安全 URL 导入（SafePdfFetcher，重定向重校验域名、双重大小上限、MockTransport 测试）。
   - 决策记录：[docs/decisions/0009-source-ingestion-and-raw-artifacts.md](decisions/0009-source-ingestion-and-raw-artifacts.md)。
