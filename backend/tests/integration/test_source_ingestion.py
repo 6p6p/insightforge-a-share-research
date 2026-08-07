@@ -44,20 +44,6 @@ pytestmark = pytest.mark.integration
 configure_asyncio_runtime()
 
 
-@pytest.fixture(autouse=True)
-def _forbid_real_http(monkeypatch):
-    """测试级网络隔离：任何真实 httpx transport 请求都会失败。
-
-    MockTransport 继承 AsyncBaseTransport、自带 handle_async_request，
-    不受此 monkeypatch 影响；TestClient 走 ASGI transport 也不受影响。
-    """
-
-    async def _forbid(self, request, *args, **kwargs):
-        raise AssertionError("real external HTTP is forbidden in tests")
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _forbid)
-
-
 _PDF = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
 _PDF_OTHER = b"%PDF-1.7\n%% another report\n%%EOF\n"
 _SOURCE_URL = "https://www.sse.com.cn/2024/000001.pdf"

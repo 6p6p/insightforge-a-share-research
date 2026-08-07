@@ -2,7 +2,7 @@
 
 面向 A 股上市公司的证据驱动基本面研究与事实审核系统。
 
-> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）与阶段 2B.1（原始文件归档 + 来源登记）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
+> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）与阶段 2B.2A（官方披露发现契约 + 可行性探测）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
 
 ## 目录职责
 
@@ -263,6 +263,22 @@ curl http://127.0.0.1:8001/api/v1/source-records/替换为source_id
 curl "http://127.0.0.1:8001/api/v1/companies/替换为company_id/source-records?document_type=annual_report&limit=20&offset=0"
 curl -o source.pdf http://127.0.0.1:8001/api/v1/source-records/替换为source_id/content
 ```
+
+## 官方披露发现契约与探测 CLI（阶段 2B.2A）
+
+阶段 2B.2A 建立了官方公告"发现"契约与受控可行性探测工具。**探测 CLI 是开发期诊断工具，不代表自动公告采集已实现**；也不承诺任何第三方 API 免费或稳定。探测只访问 Source Registry 已登记且启用的 Provider（当前仅 sse、cninfo），受控请求数（单 Provider ≤6、整次 ≤12），仅访问官方 allowlist 内的 https URL，不使用 Cookie/Auth、不执行 JS、不逆向内部接口。
+
+```bash
+conda run -n insightforge python -m app.cli.probe_disclosure_sources \
+  --providers sse,cninfo \
+  --security-code 600519 \
+  --start-date 2026-01-01 \
+  --end-date 2026-08-07
+```
+
+- 输出 JSON 到 stdout，不写数据库、不下载/保留响应正文。
+- 自动发现仅限 `documented_api` 与 `public_server_rendered_html` 两种接入形态；探测不得出的形态不实现生产 Adapter。
+- 探测边界、决策规则与人工验收门槛见 [docs/decisions/0010-official-disclosure-discovery-policy.md](docs/decisions/0010-official-disclosure-discovery-policy.md)。
 
 ## 完整系统（Docker Compose）
 

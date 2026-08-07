@@ -13,8 +13,14 @@
   - RawArtifact（SHA-256 内容寻址不可变字节归档）与 SourceRecord（一次来源登记，引用 artifact_id）两个独立表。
   - 用户上传（multipart）与安全 URL 导入（SafePdfFetcher，重定向重校验域名、双重大小上限、MockTransport 测试）。
   - 决策记录：[docs/decisions/0009-source-ingestion-and-raw-artifacts.md](decisions/0009-source-ingestion-and-raw-artifacts.md)。
-- 2B.2（后续）：官方公司披露文件自动获取。
-- 不做通用爬虫；获取方式严格限定为官方 API / 官方下载 / 官方页面。阶段 2B.1 不执行外网请求、不解析 PDF 正文。
+- **2B.2A（当前，2026-08-07）**：官方披露来源可行性探测与 Discovery 契约。
+  - Discovery 契约（SearchRequest / Candidate / Provider Protocol）只做发现候选，不下载、不落库、不解析 PDF。
+  - 受控 ProbeClient + Probe CLI：只探测 sse/cninfo，单 Provider ≤6 请求、整次 ≤12，仅访问 Source Registry allowlist 内的 https URL，无 Cookie/Auth、不执行 JS、不逆向内部 API。
+  - 决策规则把探测结果归入 6 种接入形态；仅 `documented_api` 与 `public_server_rendered_html` 可自动发现。
+  - 决策记录：[docs/decisions/0010-official-disclosure-discovery-policy.md](decisions/0010-official-disclosure-discovery-policy.md)。
+- 2B.2B（后续）：官方公司披露文件自动获取。
+  - 前置门槛：探测得出 `documented_api` 或 `public_server_rendered_html` 且通过人工验收；否则记录停止原因，继续依赖用户上传与 URL 导入。
+- 不做通用爬虫；获取方式严格限定为官方 API / 官方下载 / 官方页面。阶段 2B.1 不执行外网请求、不解析 PDF 正文；2B.2A 只做受控探测，不批量抓取。
 
 ## 2C：宏观数据 Provider
 

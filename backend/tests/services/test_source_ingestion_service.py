@@ -37,19 +37,6 @@ _ALLOWED_DOMAIN = "www.sse.com.cn"
 _GOOD_URL = f"https://{_ALLOWED_DOMAIN}/2024/000001.pdf"
 
 
-@pytest.fixture(autouse=True)
-def _forbid_real_http(monkeypatch):
-    """测试级网络隔离：任何真实 httpx transport 请求都会失败。
-
-    MockTransport 自带 handle_async_request，不受此 monkeypatch 影响。
-    """
-
-    async def _forbid(self, request, *args, **kwargs):
-        raise AssertionError("real external HTTP is forbidden in tests")
-
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _forbid)
-
-
 def _provider(**overrides: object) -> SourceProviderModel:
     defaults: dict = {
         "provider_key": "sse",

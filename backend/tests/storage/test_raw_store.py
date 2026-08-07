@@ -186,7 +186,41 @@ def test_check_ready_fsync_failure_raises_unavailable(monkeypatch, tmp_path) -> 
     assert leftovers == []
 
 
-def test_check_ready_delete_failure_does_not_leak_path(monkeypatch, tmp_path) -> None:
+def test_check_ready_write_failure_raises_unavailable(monkeypatch, tmp_path) -> None:
+    store = _store(tmp_path / "raw")
+
+    class FailingProbe:
+        def __init__(self, fd: int) -> None:
+            self._fd = fd
+
+        def __enter__(self) -> "FailingProbe":
+            return self
+
+        def __exit__(self, *exc_info) -> bool:
+            # 模拟真实 fdopen 的关闭行为，避免 Windows 下 fd 未关闭导致无法删除
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            return False
+
+        def write(self, data: bytes) -> int:
+            raise OSError("write failed")
+
+        def flush(self) -> None:
+            raise AssertionError("should not reach flush")
+
+        def fileno(self) -> int:
+            return self._fd
+
+    monkeypatch.setattr(os, "fdopen", lambda fd, *args, **kwargs: FailingProbe(fd), raising=True)
+    with pytest.raises(SourceStorageUnavailable):
+        store.check_ready()
+    leftovers = [p for p in (tmp_path / "raw").iterdir() if p.name.startswith(".ready-")]
+    assert leftovers == []
+
+
+def test_check_ready_delete_failure_raises_unavailable(monkeypatch, tmp_path) -> None:
     store = _store(tmp_path / "raw")
     real_unlink = os.unlink
 
@@ -196,6 +230,23 @@ def test_check_ready_delete_failure_does_not_leak_path(monkeypatch, tmp_path) ->
         return real_unlink(path)
 
     monkeypatch.setattr(os, "unlink", fail_unlink)
-    # 删除失败被吞掉：check_ready 不抛异常，也不把绝对路径带上错误
-    store.check_ready()
-    assert (tmp_path / "raw").is_dir()
+    # 删除探测文件失败同样视为存储不可用
+    with pytest.raises(SourceStorageUnavailable):
+        store.check_ready()
+
+
+def test_check_ready_delete_failure_error_has_no_tmp_path(monkeypatch, tmp_path) -> None:
+    store = _store(tmp_path / "raw")
+    real_unlink = os.unlink
+
+    def fail_unlink(path) -> None:
+        if Path(path).name.startswith(".ready-"):
+            raise OSError("unlink failed")
+        return real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", fail_unlink)
+    with pytest.raises(SourceStorageUnavailable) as excinfo:
+        store.check_ready()
+    # 错误消息与异常链都不泄露绝对路径
+    assert str(tmp_path) not in str(excinfo.value)
+    assert "raw" not in str(excinfo.value).lower()

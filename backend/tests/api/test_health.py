@@ -77,6 +77,35 @@ def test_ready_raw_storage_failure_returns_503(client, fake_raw_store) -> None:
     assert body["checks"]["database"] == "ok"
 
 
+def test_ready_raw_storage_delete_failure_returns_503_hiding_paths(
+    app, monkeypatch, tmp_path
+) -> None:
+    """删除探测文件失败 → 503、raw_storage=error，且响应不含任何绝对路径。"""
+    import os as _os
+    from pathlib import Path as _Path
+
+    from app.api.dependencies import get_raw_storage
+
+    store = LocalRawArtifactStore(root=tmp_path / "raw", max_bytes=1024 * 1024)
+    real_unlink = _os.unlink
+
+    def fail_unlink(path) -> None:
+        if _Path(path).name.startswith(".ready-"):
+            raise OSError("unlink failed")
+        return real_unlink(path)
+
+    monkeypatch.setattr(_os, "unlink", fail_unlink)
+    app.dependency_overrides[get_raw_storage] = lambda: store
+    with TestClient(app) as test_client:
+        response = test_client.get("/api/v1/health/ready")
+        assert response.status_code == 503
+        body = response.json()
+        assert body["status"] == "not_ready"
+        assert body["checks"]["raw_storage"] == "error"
+        assert str(tmp_path) not in response.text
+        assert ".ready-" not in response.text
+
+
 def test_ready_both_failures_returns_503(client, fake_database, fake_chroma) -> None:
     fake_database.healthy = False
     fake_chroma.healthy = False

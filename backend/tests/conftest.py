@@ -1,5 +1,6 @@
 """Shared fixtures for the backend test suite."""
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -14,6 +15,33 @@ from app.main import create_app
 from app.vectorstore.dependencies import get_chroma
 
 _APP_ENV_KEYS = ("APP_NAME", "APP_ENV", "APP_HOST", "APP_PORT", "LOG_LEVEL", "API_V1_PREFIX")
+
+# 测试级网络隔离放行名单：本地回环地址不受 guard 拦截，
+# 保证 PostgreSQL、Docker Chroma、FastAPI TestClient 的本地连接不受影响。
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_http(monkeypatch):
+    """测试级真实外网隔离：任何非回环的真实 httpx transport 请求都会失败。
+
+    - httpx.MockTransport（AsyncBaseTransport）自带 handle_async_request，不受影响；
+    - FastAPI TestClient 走 ASGI transport，不受影响；
+    - PostgreSQL（psycopg 驱动）、Docker Chroma（chromadb 内部 httpx 走 127.0.0.1）
+      均在回环放行名单内，不受影响；
+    - 任何 Provider/acquisition/source ingestion 测试忘记注入 MockTransport
+      而发起真实外部请求时立即失败。
+    """
+    original = httpx.AsyncHTTPTransport.handle_async_request
+
+    async def _forbid(self, request, *args, **kwargs):
+        host = getattr(request, "url", None)
+        hostname = host.host if host is not None else None
+        if hostname in _LOOPBACK_HOSTS:
+            return await original(self, request, *args, **kwargs)
+        raise AssertionError("real external HTTP is forbidden in tests")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _forbid)
 
 
 class FakeDatabase:

@@ -114,7 +114,13 @@ class LocalRawArtifactStore:
         return path.is_file()
 
     def check_ready(self) -> None:
-        """Verify the store is writable by creating and fsyncing a probe file."""
+        """Verify the store is writable by creating and fsyncing a probe file.
+
+        任一步（创建、写入、flush、fsync、删除探测文件）失败都视为存储不可用，
+        抛 SourceStorageUnavailable；finally 中仍尽力清理，清理失败不再向外抛，
+        也不把绝对路径带进错误。
+        """
+        probe_path: str | None = None
         try:
             self._root.mkdir(parents=True, exist_ok=True)
             fd, probe_path = tempfile.mkstemp(dir=self._root, prefix=".ready-")
@@ -124,14 +130,21 @@ class LocalRawArtifactStore:
                     probe.write(os.urandom(16))
                     probe.flush()
                     os.fsync(probe.fileno())
-            finally:
-                # 尽力清理探测文件；删除失败不向外泄露路径，直接吞掉
+            except OSError:
+                raise
+            else:
+                # 文件已关闭并 fsync；删除探测文件本身也是 readiness 的一部分
+                os.unlink(probe_path)
+                probe_path = None  # 已成功删除，无需再清理
+        except OSError as exc:
+            raise SourceStorageUnavailable() from exc
+        finally:
+            # 尽力清理：前面任一步失败时探测文件可能残留；清理失败吞掉
+            if probe_path is not None:
                 try:
                     os.unlink(probe_path)
                 except OSError:
                     pass
-        except OSError as exc:
-            raise SourceStorageUnavailable() from exc
 
     @staticmethod
     def _storage_key_for(content_sha256: str) -> str:
