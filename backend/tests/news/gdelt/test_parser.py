@@ -97,6 +97,43 @@ def test_non_object_article_skipped() -> None:
     assert len(candidates) == 1
 
 
+def test_empty_object_article_skipped() -> None:
+    # 空 dict {} 是 object 但缺 url/title → 单条跳过，不让整个查询失败。
+    payload = {"articles": [{}, _article()]}
+    candidates = GdeltDocParser.parse(payload)
+    assert len(candidates) == 1
+    assert candidates[0].title == "A headline"
+
+
+def test_all_invalid_articles_empty_result() -> None:
+    # 全部条目不合法 → 空候选成功（不是 malformed response）。
+    payload = {"articles": [{}, {"url": "ftp://bad.example.com/x", "title": "t"}]}
+    assert GdeltDocParser.parse(payload) == ()
+
+
+def test_mixed_valid_invalid_only_valid() -> None:
+    # 合法 + 非法（非 object / 缺 url / 非法 URL / 非法 date）混合：
+    # 只输出合法 Candidate，非法条目不拖垮整个查询。
+    payload = {
+        "articles": [
+            "not-an-object",
+            {},
+            {"title": "no url"},
+            {"url": "ftp://bad.example.com/x", "title": "bad scheme"},
+            {"url": "https://news.example.com/x", "title": "bad date", "seendate": "not-a-date"},
+            _article(),
+            _article(url="https://news.example.com/b"),
+        ]
+    }
+    candidates = GdeltDocParser.parse(payload)
+    assert [c.title for c in candidates] == ["A headline", "A headline"]
+    assert [c.normalized_url for c in candidates] == [
+        "https://news.example.com/a?utm=1",
+        "https://news.example.com/b",
+    ]
+    assert [c.rank for c in candidates] == [1, 2]
+
+
 def test_language_country_optional_and_trimmed() -> None:
     payload = {"articles": [_article(language="  ", sourcecountry="  China  ")]}
     (candidate,) = GdeltDocParser.parse(payload)

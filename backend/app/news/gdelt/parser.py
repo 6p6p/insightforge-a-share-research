@@ -37,12 +37,12 @@ class GdeltDocParser:
     @staticmethod
     def parse(payload: object) -> tuple[NewsDiscoveryCandidate, ...]:
         if not isinstance(payload, dict):
-            raise GdeltMalformedResponse("top level must be an object")
+            raise GdeltMalformedResponse()
         articles = payload.get("articles")
         if articles is None:
             return ()
         if not isinstance(articles, list):
-            raise GdeltMalformedResponse("articles must be a list")
+            raise GdeltMalformedResponse()
 
         seen_normalized: set[str] = set()
         candidates: list[NewsDiscoveryCandidate] = []

@@ -9,6 +9,11 @@ class GdeltDiscoveryError(Exception):
     """GDELT discovery 稳定错误基类。"""
 
     code = "gdelt_discovery_error"
+    message = "gdelt discovery error"
+
+    def __init__(self, message: str | None = None) -> None:
+        # 未传 message 时使用类级默认（稳定默认 message），str() 即返回该值。
+        super().__init__(message if message is not None else self.message)
 
 
 class GdeltRequestFailed(GdeltDiscoveryError):
@@ -36,6 +41,11 @@ class GdeltInvalidJson(GdeltDiscoveryError):
 
 
 class GdeltMalformedResponse(GdeltDiscoveryError):
-    """JSON 合法但结构不符合 DOC 2.0 artlist 契约。"""
+    """JSON 合法但结构不符合 DOC 2.0 artlist 契约。
+
+    top-level 非 object / articles 非 list 才属于 malformed；单条 article
+    的异常由 Parser 跳过，不抛本类。默认 message 稳定且不含响应正文。
+    """
 
     code = "gdelt_malformed_response"
+    message = "GDELT response structure is invalid"

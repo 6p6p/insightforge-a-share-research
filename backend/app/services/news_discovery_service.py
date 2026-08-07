@@ -102,12 +102,16 @@ class NewsDiscoveryPersistenceService:
                         media_type=_MEDIA_TYPE_JSON,
                     )
                 )
+                # 内容寻址强一致：既有一行若已存在，四个元数据字段必须与本次
+                # 落盘描述完全一致，否则说明同一 SHA-256 被不同类型的材料占用
+                # （如 PDF）或元数据被篡改，拒绝继续创建 run/candidate。
                 if (
                     artifact.media_type != _MEDIA_TYPE_JSON
-                    or artifact.storage_key != stored.storage_key
+                    or artifact.content_sha256 != stored.content_sha256
                     or artifact.byte_size != stored.byte_size
+                    or artifact.storage_key != stored.storage_key
                 ):
-                    raise NewsDiscoveryArtifactConflict("existing raw artifact metadata mismatch")
+                    raise NewsDiscoveryArtifactConflict()
 
                 # D. query fingerprint（仅归档后的内容寻址，不含过程元数据）。
                 fingerprint = build_query_fingerprint(

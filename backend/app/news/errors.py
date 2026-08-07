@@ -9,6 +9,12 @@ class NewsDiscoveryError(Exception):
     """News Discovery 稳定错误基类。"""
 
     code = "news_discovery_error"
+    message = "news discovery error"
+
+    def __init__(self, message: str | None = None) -> None:
+        # 未传 message 时使用类级默认（稳定默认 message），str() 即返回该值；
+        # 传了 message 时保留既有按位置传参的调用语义不变。
+        super().__init__(message if message is not None else self.message)
 
 
 class NewsDiscoveryInvalidQuery(NewsDiscoveryError):
@@ -18,9 +24,15 @@ class NewsDiscoveryInvalidQuery(NewsDiscoveryError):
 
 
 class NewsDiscoveryArtifactConflict(NewsDiscoveryError):
-    """RawArtifact 引用冲突：既有 artifact 与期望的 JSON 内容/元数据不一致。"""
+    """RawArtifact 引用冲突：既有 artifact 与期望的 JSON 内容/元数据不一致。
+
+    默认 message 稳定且不含敏感信息（无 SHA 完整值 / storage absolute path /
+    raw JSON / DB URL / query_text）。Service 发现冲突时直接 raise 本类
+    （不传参），以保证调用方拿到的是这个稳定默认 message。
+    """
 
     code = "news_discovery_artifact_conflict"
+    message = "news discovery raw artifact metadata conflict"
 
 
 class NewsDiscoveryIntegrityError(NewsDiscoveryError):

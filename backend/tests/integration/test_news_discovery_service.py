@@ -37,6 +37,7 @@ from app.db.session import DatabaseManager
 from app.domain.news_discovery import NewsDiscoveryEngine
 from app.news.contracts import NewsDiscoveryQuery
 from app.news.errors import (
+    NewsDiscoveryArtifactConflict,
     NewsDiscoveryIntegrityError,
     NewsDiscoveryPersistenceFailed,
 )
@@ -169,6 +170,43 @@ def _query(company_id, **overrides: object) -> NewsDiscoveryQuery:
 
 def _service(env: dict) -> NewsDiscoveryPersistenceService:
     return NewsDiscoveryPersistenceService(env["sessionmaker"], env["raw_store"])
+
+
+# 冲突测试：受控原始字节，便于预先计算 content_sha256 制造"同 SHA 不同媒体类型"。
+_CONFLICT_RAW_JSON = (
+    b'{"articles":[{"url":"https://news.example.com/c","title":"Headline",'
+    b'"seendate":"20260803050000"}]}'
+)
+
+
+def _bytes_router(raw: bytes) -> httpx.MockTransport:
+    """返回固定原始字节的 router，保证测试可精确预测 content_sha256。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=raw, headers={"content-type": "application/json"})
+
+    return httpx.MockTransport(handler)
+
+
+async def _seed_artifact(
+    env: dict,
+    *,
+    media_type: str,
+    storage_key: str,
+    byte_size: int,
+    content_sha256: str,
+) -> None:
+    """预先插入一条 RawArtifact，制造与待发现响应相同 SHA 的既有行。"""
+    async with env["sessionmaker"]() as session:
+        session.add(
+            RawArtifactModel(
+                content_sha256=content_sha256,
+                storage_key=storage_key,
+                byte_size=byte_size,
+                media_type=media_type,
+            )
+        )
+        await session.commit()
 
 
 async def _all_rows(env: dict) -> dict:
@@ -328,6 +366,109 @@ async def test_replay_integrity_error_on_tampered_candidates(env) -> None:
     with pytest.raises(NewsDiscoveryIntegrityError) as exc:
         await service.discover_and_persist(_provider(httpx.MockTransport(_router)), query)
     assert exc.value.code == "news_discovery_integrity_error"
+
+
+async def test_news_discovery_rejects_existing_non_json_artifact(env) -> None:
+    """同 SHA 已有 application/pdf artifact → NewsDiscoveryArtifactConflict。
+
+    内容寻址强一致：同一个 content_sha256 已被 PDF 占用时，不允许再以
+    application/json 语义创建 run/candidate。raw 内容寻址文件可存在（不要求
+    删除），但 news_discovery_runs/candidates 必须为 0。
+    """
+    sha = hashlib.sha256(_CONFLICT_RAW_JSON).hexdigest()
+    pdf_key = f"sha256/{sha[:2]}/{sha[2:4]}/{sha}.pdf"
+    await _seed_artifact(
+        env,
+        media_type="application/pdf",
+        storage_key=pdf_key,
+        byte_size=len(_CONFLICT_RAW_JSON),
+        content_sha256=sha,
+    )
+
+    service = _service(env)
+    with pytest.raises(NewsDiscoveryArtifactConflict) as exc:
+        await service.discover_and_persist(
+            _provider(_bytes_router(_CONFLICT_RAW_JSON)),
+            _query(env["company_id"]),
+        )
+    assert exc.value.code == "news_discovery_artifact_conflict"
+    assert str(exc.value) == "news discovery raw artifact metadata conflict"
+
+    rows = await _all_rows(env)
+    assert len(rows["runs"]) == 0
+    assert len(rows["candidates"]) == 0
+
+
+async def test_news_discovery_rejects_artifact_storage_key_mismatch(env) -> None:
+    """同 SHA 已有行但 storage_key 不符 → 冲突，不创建 run/candidate。"""
+    sha = hashlib.sha256(_CONFLICT_RAW_JSON).hexdigest()
+    wrong_key = f"sha256/{sha[:2]}/{sha[2:4]}/{sha}.pdf"  # 故意用 .pdf 路径
+    await _seed_artifact(
+        env,
+        media_type="application/json",
+        storage_key=wrong_key,
+        byte_size=len(_CONFLICT_RAW_JSON),
+        content_sha256=sha,
+    )
+
+    service = _service(env)
+    with pytest.raises(NewsDiscoveryArtifactConflict):
+        await service.discover_and_persist(
+            _provider(_bytes_router(_CONFLICT_RAW_JSON)),
+            _query(env["company_id"]),
+        )
+
+    rows = await _all_rows(env)
+    assert len(rows["runs"]) == 0
+    assert len(rows["candidates"]) == 0
+
+
+async def test_news_discovery_rejects_artifact_byte_size_mismatch(env) -> None:
+    """同 SHA 已有行但 byte_size 不符 → 冲突，不创建 run/candidate。"""
+    sha = hashlib.sha256(_CONFLICT_RAW_JSON).hexdigest()
+    json_key = f"sha256/{sha[:2]}/{sha[2:4]}/{sha}.json"
+    await _seed_artifact(
+        env,
+        media_type="application/json",
+        storage_key=json_key,
+        byte_size=len(_CONFLICT_RAW_JSON) + 1,  # 故意多 1 字节
+        content_sha256=sha,
+    )
+
+    service = _service(env)
+    with pytest.raises(NewsDiscoveryArtifactConflict):
+        await service.discover_and_persist(
+            _provider(_bytes_router(_CONFLICT_RAW_JSON)),
+            _query(env["company_id"]),
+        )
+
+    rows = await _all_rows(env)
+    assert len(rows["runs"]) == 0
+    assert len(rows["candidates"]) == 0
+
+
+async def test_persist_leaves_source_record_count_unchanged(env) -> None:
+    """GDELT 原始归档是 Discovery audit material：不产生任何 SourceRecord。
+
+    持久化前后 source_records 行数必须保持不变（恒为 0）。GDELT raw artifact
+    是发现审计材料，不是 Original Publisher Source、不是 Evidence。
+    """
+
+    async def _count_source_records() -> int:
+        async with env["sessionmaker"]() as session:
+            rows = (await session.execute(select(SourceRecordModel))).scalars().all()
+        return len(rows)
+
+    before = await _count_source_records()
+    result = await _service(env).discover_and_persist(
+        _provider(httpx.MockTransport(_router)),
+        _query(env["company_id"]),
+    )
+    after = await _count_source_records()
+
+    assert result.candidate_count == 2
+    assert before == 0
+    assert after == before
 
 
 async def test_persistence_failed_wraps_db_error(env) -> None:

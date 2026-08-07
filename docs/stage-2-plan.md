@@ -80,11 +80,13 @@
 
 **发现（Discovery）与事实来源（Source）分离是 2D 的顶层不变量。** GDELT、搜索引擎、LLM 搜索都是 **Discovery Provider / Acquisition mechanism**（`AcquisitionMethod.WEB_SEARCH_DISCOVERY` 等），它们不是：事实发布者、SourceProvider、Evidence source。真正的新闻来源是 `candidate.discovered_url`（本阶段契约字段名 `discovered_url`）指向的**原始发布网页**。只有完成 2D.2 的 original-source verification + 原文归档后，新闻材料才有资格进入后续 Evidence 管线。
 
-- **2D.1（completed，2026-08-07）**：News Discovery 基础 + GDELT DOC 2.0 Discovery Provider。
+- **2D.1（状态四维：implementation = completed / automated_tests = completed / docker_rebuild_acceptance = completed / live_external_acceptance = pending，2026-08-07）**：News Discovery 基础 + GDELT DOC 2.0 Discovery Provider。
   - 通用 News Discovery 契约（`NewsDiscoveryQuery` / `NewsDiscoveryCandidate` / `NewsDiscoveryProvider` Protocol / `NewsDiscoveryResult`）。
   - `GdeltNewsDiscoveryProvider`：固定 endpoint `https://api.gdeltproject.org/api/v2/doc/doc`，仅 `mode=artlist&format=json&sort=datedesc&maxrecords=1..100&startdatetime&enddatetime`；安全 HTTP 规则（仅 https、固定 hostname、`trust_env=false`、无 Cookie/Auth/API Key、手动重定向 ≤3 次且 hostname 不变、不自动重试、5 MiB 流式上限、日志脱敏）。
   - Discovery Run / Discovery Candidate 持久化（migration 0011，`news_discovery_runs` + `news_discovery_candidates`）；GDELT 原始 JSON 搜索响应归档为 RawArtifact；确定性 query/result 去重（query fingerprint + replay）。
-  - 75 项 News 单元测试（Contracts/Client/Parser/Fingerprint）+ 7 项 MockTransport E2E 集成测试通过；受控真实 Probe 已执行（本机对 `api.gdeltproject.org` 连接超时，acceptance 记录为 pending，与 2C.1 相同的网络阻断环境）。
+  - **RawArtifact 内容寻址强一致（2D.1.1 收口）**：get_or_create 后校验既有一行 media_type/content_sha256/byte_size/storage_key 四项与落盘描述完全一致，任一不一致（如同一 SHA 已被 PDF 占用）抛 `NewsDiscoveryArtifactConflict`，不创建任何 Run/Candidate。
+  - **Parser 边界（2D.1.1 收口）**：malformed response（top-level 非 object / articles 非 list）抛 `GdeltMalformedResponse`，与 `GdeltInvalidJson`（JSON 解析层失败）严格区分；单条 bad candidate（缺 url/title、非法 URL、日期无法解析）一律跳过，不让整个查询失败。
+  - **78 项 News non-integration 测试**（Contracts 35 / GDELT Client 16 / Parser 18 / Fingerprint 9）+ **11 项 MockTransport E2E 集成测试**（含 artifact conflict 3 项、SourceRecord count 不变化 1 项）通过。GDELT 原始归档是 Discovery audit material，不产生任何 SourceRecord（E2E 断言 count 不变化）。受控真实 Probe 已执行：对 `api.gdeltproject.org` 的单次受控请求发生 ConnectTimeout（不经过 pytest Network Guard），live acceptance 记录为 pending。Docker 重建已成功（`docker compose build backend` 生成含当前代码的新镜像，`up -d` 后 healthy、live 200、ready 200、五项 checks ok），docker_rebuild acceptance 记录为 completed。
   - **GDELT 不进 Source Registry**：`source_providers` seed 禁止 `gdelt`/`gdelt_doc`/`openai`/`chatgpt`/`search_engine`；GDELT 不伪装成 Tier 3/4 SourceProvider。
   - 本阶段不下载新闻正文、不解析 HTML、不把 Candidate 当 Source、不创建 Evidence/Claim、不用 LLM、不接 LangGraph。
 - **2D.2（尚未开始）**：Original Source Verification + HTML RawArtifact archival。
