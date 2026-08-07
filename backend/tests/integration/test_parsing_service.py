@@ -5,12 +5,16 @@ SourceParsingService + 真实 Parser，零真实网络（conftest autouse guard 
 覆盖：
 - first parse：创建 ParsedSource + ParsedSourceBlock 快照（title/published_at/
   block_count/locator 正确），SourceRecord 元数据不被回写；
-- replay：同 source + 同 raw bytes + 同 parser version → 同 fingerprint →
+- replay：同 source + 同 RawArtifact + 同 parser version → 同 fingerprint →
   复用原快照（replayed=True），不重复插 Blocks；
-- parser version 变化 → 新 fingerprint → 新快照，旧快照保留；
+- RawArtifact 永久不可变、SourceRecord 固定引用其 artifact：原始内容变化
+  必须由新 RawArtifact + 新 SourceRecord 表达 → source_v1/artifact_v1 与
+  source_v2/artifact_v2 内容不同 → 各自独立 ParsedSource，旧记录零 UPDATE；
+- parser version 变化（同 source + 同 RawArtifact）→ 新 fingerprint → 新快照，
+  旧快照保留；
 - 完整性损坏（block text_sha256 被篡改 / snapshot block_count 不一致 /
   存储文件与 artifact 登记的 SHA 不一致）→ ParsedSourceIntegrityError，
-  不自动修复；
+  不自动修复；其中存储 SHA 不一致是存储层损坏/篡改检测，不是原文更新；
 - 并发相同 parse → 只产生 1 个 ParsedSource + 一套 Blocks；
 - blocks ordinal 连续 1..n 稳定；
 - 非 text/html artifact → UnsupportedParseMediaType；Source 不存在 →
@@ -330,38 +334,56 @@ async def test_parser_version_change_creates_new_snapshot_keeps_old(env, monkeyp
     assert blocks == 8  # 各自一套 blocks
 
 
-async def test_fingerprint_differs_when_raw_content_changes(env) -> None:
-    """同 source 归档内容更新 → 新 fingerprint → 新快照（旧快照保留）。"""
-    source_id, artifact_id, storage_key = await _seed_html_source(env)
+async def test_distinct_raw_artifacts_produce_distinct_snapshots(env) -> None:
+    """原始内容变化必须由新 RawArtifact + 新 SourceRecord 表达（RawArtifact 不可变）。
+
+    source_v1/artifact_v1 与 source_v2/artifact_v2 内容不同 → 各自独立的
+    ParsedSource；旧 RawArtifact / SourceRecord 全程零 UPDATE。
+    """
+    html_v1 = _HTML
+    html_v2 = _HTML.replace("第一段正文。".encode(), "第一段正文（修订）。".encode())
+    assert html_v1 != html_v2
+    source_v1, artifact_v1, storage_key_v1 = await _seed_html_source(
+        env, html=html_v1, source_url=_XINHUA_URL
+    )
+    source_v2, artifact_v2, storage_key_v2 = await _seed_html_source(
+        env, html=html_v2, source_url=_XINHUA_URL_2
+    )
     service = _service(env)
-    v1 = await service.parse_source(source_id)
 
-    # 内容变化：存储文件字节替换 + artifact 登记 SHA 同步更新（等价于归档
-    # 了修订版原文，走真实内容寻址登记路径）。内容寻址一致性检查需通过，
-    # 指纹因 raw_content_sha256 变化而不同 → 新快照。
-    path = env["raw_root"] / storage_key
-    tampered = _HTML.replace("第一段正文。".encode(), "第一段正文（修订）。".encode())
-    path.write_bytes(tampered)
-    async with env["sessionmaker"]() as session:
-        await session.execute(
-            update(RawArtifactModel)
-            .where(RawArtifactModel.artifact_id == artifact_id)
-            .values(
-                content_sha256=hashlib.sha256(tampered).hexdigest(),
-                byte_size=len(tampered),
-            )
-        )
-        await session.commit()
+    r1 = await service.parse_source(source_v1)
+    r2 = await service.parse_source(source_v2)
 
-    v2 = await service.parse_source(source_id)
-    assert v2.replayed is False
-    assert v2.parsed_source_id != v1.parsed_source_id
-    assert v2.parse_fingerprint != v1.parse_fingerprint
-    assert v2.raw_content_sha256 != v1.raw_content_sha256
+    assert r1.replayed is False and r2.replayed is False
+    assert r1.parsed_source_id != r2.parsed_source_id
+    assert r1.parse_fingerprint != r2.parse_fingerprint
+    assert r1.raw_content_sha256 == hashlib.sha256(html_v1).hexdigest()
+    assert r2.raw_content_sha256 == hashlib.sha256(html_v2).hexdigest()
+    assert r1.artifact_id == artifact_v1
+    assert r2.artifact_id == artifact_v2
+    assert r1.block_count == r2.block_count == 4
 
     parsed, blocks = await _counts(env)
     assert parsed == 2
     assert blocks == 8
+
+    # RawArtifact / SourceRecord 不可变：两个 source 各自引用各自 artifact，
+    # 旧记录内容、SHA、storage_key、引用全部保持原值（零 UPDATE）。
+    async with env["sessionmaker"]() as session:
+        a1 = await RawArtifactRepository(session).get_by_id(artifact_v1)
+        a2 = await RawArtifactRepository(session).get_by_id(artifact_v2)
+        assert a1 is not None and a2 is not None
+        assert a1.content_sha256 == hashlib.sha256(html_v1).hexdigest()
+        assert a1.byte_size == len(html_v1)
+        assert a1.storage_key == storage_key_v1
+        assert a2.content_sha256 == hashlib.sha256(html_v2).hexdigest()
+        assert a2.byte_size == len(html_v2)
+        assert a2.storage_key == storage_key_v2
+        s1 = await SourceRecordRepository(session).get_by_id(source_v1)
+        s2 = await SourceRecordRepository(session).get_by_id(source_v2)
+        assert s1 is not None and s2 is not None
+        assert s1.artifact_id == artifact_v1
+        assert s2.artifact_id == artifact_v2
 
 
 # ---------------------------------------------------------------- 完整性损坏
@@ -415,9 +437,13 @@ async def test_tampered_snapshot_block_count_raises_integrity_error(env) -> None
 
 
 async def test_storage_content_sha_mismatch_raises_integrity_error(env) -> None:
-    """存储文件与 artifact 登记的 SHA 不一致 → integrity error（内容寻址被篡改）。"""
+    """存储文件与 artifact 登记的 SHA 不一致 → integrity error（内容寻址被篡改）。
+
+    这是存储层损坏/篡改检测（RawArtifact 不可变 ⇒ 文件与登记不一致即损坏），
+    不是原文更新语义；正常的原始内容变化必须走新 RawArtifact + 新 SourceRecord。
+    """
     source_id, _, storage_key = await _seed_html_source(env)
-    # 改文件但不改 artifact.content_sha256 登记值。
+    # 故障注入：改存储文件但不改 artifact.content_sha256 登记值。
     path = env["raw_root"] / storage_key
     path.write_bytes("<html><body><p>被替换的内容</p></body></html>".encode())
 

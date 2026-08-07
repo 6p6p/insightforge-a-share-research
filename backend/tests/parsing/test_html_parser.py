@@ -7,12 +7,16 @@
 - 嵌套去重（li 内 p、blockquote 内 p 不重复）；
 - whitespace normalize；空文本跳过；相邻完全相同 block 去重；
 - title 优先级 og:title → <title> → h1 → None；
-- published_at 只接受明确机器可读元数据（naive / 无效 → None）；
-- 中文 UTF-8 / GBK 编码；
+- published_at 只接受明确 publication 元数据（article:published_time /
+  itemprop=datePublished 的 meta content / time datetime），普通 <time
+  datetime> 忽略，updated/modified 不冒充（naive / 无效 → None）；
+- 编码只从真实 meta 声明识别（<meta charset> / http-equiv Content-Type），
+  body/script 文本 charset= 不影响判定；UTF-8 / GBK / BOM；
 - locator（element_id / 绝对 xpath）与确定性输出；
 - 空输入 / 纯空白 → HtmlParseError。
 """
 
+import codecs
 import hashlib
 
 import pytest
@@ -186,9 +190,42 @@ def test_published_at_from_meta_with_offset() -> None:
 
 
 def test_published_at_from_time_datetime() -> None:
-    doc = _doc('<html><body><time datetime="2026-08-07T01:00:00Z">时间</time></body></html>')
+    # 只有 [itemprop="datePublished"] 的 <time datetime> 才被认可。
+    doc = _doc(
+        "<html><body>"
+        '<time itemprop="datePublished" datetime="2026-08-07T01:00:00Z">时间</time>'
+        "</body></html>"
+    )
     assert doc.extracted_published_at is not None
     assert doc.extracted_published_at.isoformat() == "2026-08-07T01:00:00+00:00"
+
+
+def test_published_at_from_meta_date_published() -> None:
+    doc = _doc(
+        '<html><head><meta itemprop="datePublished" '
+        'content="2026-08-07T09:30:00+08:00"></head><body><p>正文</p></body></html>'
+    )
+    assert doc.extracted_published_at is not None
+    assert doc.extracted_published_at.isoformat() == "2026-08-07T09:30:00+08:00"
+
+
+def test_generic_time_datetime_ignored() -> None:
+    """普通 <time datetime> 无 itemprop=datePublished → 不认可。"""
+    doc = _doc('<html><body><time datetime="2026-08-07T01:00:00Z">时间</time></body></html>')
+    assert doc.extracted_published_at is None
+
+
+def test_updated_time_not_published_at() -> None:
+    """updated/modified 元数据（含 itemprop=dateModified）不冒充 published_at。"""
+    doc = _doc(
+        "<html><head>"
+        '<meta property="article:modified_time" content="2026-08-08T10:00:00+08:00">'
+        '<meta property="article:updated_time" content="2026-08-08T11:00:00+08:00">'
+        "</head><body>"
+        '<time itemprop="dateModified" datetime="2026-08-08T12:00:00+08:00">改</time>'
+        "<p>正文</p></body></html>"
+    )
+    assert doc.extracted_published_at is None
 
 
 def test_published_at_rejects_naive_datetime() -> None:
@@ -226,6 +263,48 @@ def test_chinese_gbk_encoding_detected() -> None:
     html = '<html><head><meta charset="gbk"></head><body><p>中文GBK编码段落。</p></body></html>'
     doc = parse_html_bytes(html.encode("gbk"))
     assert doc.blocks[0].text == "中文GBK编码段落。"
+
+
+def test_chinese_gbk_via_http_equiv_meta() -> None:
+    """<meta http-equiv="Content-Type" content="text/html; charset=gbk"> 被认可。"""
+    html = (
+        '<html><head><meta http-equiv="Content-Type" '
+        'content="text/html; charset=gbk"></head>'
+        "<body><p>中文GBK编码段落。</p></body></html>"
+    )
+    doc = parse_html_bytes(html.encode("gbk"))
+    assert doc.blocks[0].text == "中文GBK编码段落。"
+
+
+def test_charset_in_body_or_script_text_ignored() -> None:
+    """body/script 文本出现 charset=gbk 不改变 UTF-8 解码（不全局扫描 charset=）。"""
+    html = (
+        "<html><head></head><body>"
+        "<p>中文段落 charset=gbk 正文。</p>"
+        "<script>var cfg = 'charset=gbk';</script>"
+        "</body></html>"
+    )
+    doc = _doc(html)  # UTF-8 bytes
+    # 若误按 GBK 解码，中文 UTF-8 字节将乱码；此断言证明仍是 UTF-8。
+    assert doc.blocks[0].text == "中文段落 charset=gbk 正文。"
+    assert doc.blocks[0].text_sha256 == _sha("中文段落 charset=gbk 正文。")
+
+
+def test_invalid_declared_charset_falls_back_to_utf8() -> None:
+    """声明编码不可用（未知名称）→ 回退 UTF-8；合法 UTF-8 内容正常解码。"""
+    html = (
+        '<html><head><meta charset="not-a-real-encoding"></head>'
+        "<body><p>中文段落。</p></body></html>"
+    )
+    doc = _doc(html)
+    assert doc.blocks[0].text == "中文段落。"
+
+
+def test_utf8_bom_handled() -> None:
+    """UTF-8 BOM 被识别并剥离（utf-8-sig），内容正常解码。"""
+    raw = codecs.BOM_UTF8 + "<html><body><p>BOM 中文。</p></body></html>".encode()
+    doc = parse_html_bytes(raw)
+    assert doc.blocks[0].text == "BOM 中文。"
 
 
 # ---------------------------------------------------------- locator

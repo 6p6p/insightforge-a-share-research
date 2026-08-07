@@ -106,15 +106,15 @@
 
 **顶层分工：确定性解析（2E）只把已归档原文变成可定位的结构化文本（ParsedSource / ParsedBlock），不建 Chunk、不 Embedding、不进 Chroma、不建 EvidenceCard——那些属于 Stage 3。** 解析产物是"Evidence 管线"的确定性前置，不是 Evidence 本身。
 
-- **2E.1（当前，2026-08-07）**：确定性 HTML 解析。
+- **2E.1（completed，2026-08-07；2E.1.1 语义收口）**：确定性 HTML 解析。
   - 只把已归档的 text/html SourceRecord（如 2D.2A 归档的新闻原文）确定性解析为 ParsedSource + ParsedSourceBlock，**不做 Chunk / Embedding / Chroma / Evidence / Claim / LLM**。
   - 两张表（migration 0013，已应用）：`parsed_sources` + `parsed_source_blocks`，明确约束（sha256 regex、block_type IN 5 类、ordinal≥1、text 非空、locator JSONB object、UNIQUE(parse_fingerprint)、UNIQUE(parsed_source_id, ordinal)、FK source/artifact RESTRICT、blocks→parsed_sources CASCADE）。
-  - `html_dom` parser（VERSION=1，lxml 5.4.0 唯一新增依赖）：不联网、不执行 JS、不修改 RawArtifact；编码检测 BOM→meta charset→UTF-8 默认（确定性解码为 str 再交 lxml，避免 latin-1 乱码，GBK 等声明受尊重）；删除 script/style/noscript/template/svg；内容根 article→main→body；DOM 顺序抽取 h1-h6/p/li/blockquote/table；whitespace normalize；空文本跳过；相邻相同 block 去重；title 优先 og:title→<title>→h1→None；published_at 只接受机器可读元数据（article:published_time / <time datetime>），naive→None，绝不使用 seen_at/parsed_at/now 伪造。
+  - `html_dom` parser（VERSION=1，lxml 5.4.0 唯一新增依赖）：不联网、不执行 JS、不修改 RawArtifact；编码只从真实 meta 声明识别（`<meta charset>` / http-equiv Content-Type charset），body/script 文本 charset= 不影响判定，BOM→声明→UTF-8 默认（确定性解码为 str 再交 lxml，避免 latin-1 乱码，GBK 等声明受尊重，无声明非 UTF-8 宁失败不乱码）；删除 script/style/noscript/template/svg；内容根 article→main→body；DOM 顺序抽取 h1-h6/p/li/blockquote/table；whitespace normalize；空文本跳过；相邻相同 block 去重；title 优先 og:title→<title>→h1→None；published_at 只接受明确 publication 元数据（article:published_time meta，或 [itemprop="datePublished"] 的 meta content / time datetime；普通 <time datetime> 无 itemprop 忽略、updated/modified 不冒充），naive→None，绝不使用 seen_at/parsed_at/now 伪造。
   - Locator 至少含 `{"type":"html_dom","ordinal","tag","xpath","element_id"}`，绝对 xpath 在相同 DOM 下稳定。
-  - parse_fingerprint = 确定性 SHA-256（source_id、raw artifact sha256、parser_name/version、extracted metadata、ordered blocks text+locator；sort_keys、固定 separators、UTF-8；排除 parsed_at/created_at/DB ID）。
-  - `SourceParsingService.parse_source(source_id)`：短 session 读 SourceRecord+RawArtifact → 关闭；仅 text/html；文件 I/O 不持 DB transaction；create-or-get ParsedSource → bulk insert Blocks → commit；并发只 1 快照；replay 校验完整性，损坏抛 ParsedSourceIntegrityError 不自动修复；**不更新 SourceRecord.title/published_at**。
+  - parse_fingerprint = 确定性 SHA-256（source_id、raw artifact sha256、parser_name/version、extracted metadata、ordered blocks text+locator；sort_keys、固定 separators、UTF-8；排除 parsed_at/created_at/DB ID）。**RawArtifact 永久不可变、SourceRecord 固定引用其 artifact**：同 source + 同 raw + 同 parser version → replay 原快照；原始内容变化必须由新 RawArtifact + 新 SourceRecord 表达（→ 各自独立快照，旧记录零 UPDATE）；同 source + 同 raw + parser version 变化 → 新快照、旧快照保留。
+  - `SourceParsingService.parse_source(source_id)`：短 session 读 SourceRecord+RawArtifact → 关闭；仅 text/html；文件 I/O 不持 DB transaction；create-or-get ParsedSource → bulk insert Blocks → commit；并发只 1 快照；replay 校验完整性，损坏抛 ParsedSourceIntegrityError 不自动修复（存储文件与登记 SHA 不一致视为存储层损坏/篡改，非原文更新）；**不更新 SourceRecord.title/published_at**。
   - 安全边界：HTML content API 保持 415；不新增 raw HTML endpoint；通过 storage 读取无浏览器；不创建 DocumentChunk/EvidenceCard/Chroma/Embedding/Claim。
-  - 测试：**29 parser 单元 + 25 contracts/fingerprint 单元 + 12 集成 E2E**（真实 PostgreSQL + 临时 RawStore，零网络）全部通过；ruff 零告警；`pip check` 通过。
+  - 测试：**36 parser 单元 + 25 contracts/fingerprint 单元 + 12 集成 E2E**（真实 PostgreSQL + 临时 RawStore，零网络）全部通过；ruff 零告警；`pip check` 通过。
   - 决策记录：[docs/decisions/0016-deterministic-html-parsing.md](decisions/0016-deterministic-html-parsing.md)。
 - **2E.2（next，尚未开始）**：确定性 PDF 解析 + page location。
 - **2E.3（尚未开始）**：Stage-2 source pipeline E2E acceptance（PDF + HTML 全链路确定性解析的端到端验收）。

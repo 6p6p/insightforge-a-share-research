@@ -3,14 +3,17 @@
 基于 lxml（本阶段唯一新增依赖）。只把已归档的 text/html SourceRecord
 原始字节确定性解析为可定位结构化文本：
 
-- 不联网、不执行 JS、不修改 RawArtifact；bytes 直接交 lxml 检测编码；
+- 不联网、不执行 JS、不修改 RawArtifact；bytes 先按真实 meta 声明
+  （<meta charset> / http-equiv Content-Type charset）确定性解码为 str，
+  再交 lxml（绝不从 body/script 文本推断编码）；
 - 删除 script/style/noscript/template/svg；
 - 内容根优先 article → main → body；
 - DOM 顺序抽取 h1-h6/p/li/blockquote/table；
 - normalize 连续 whitespace；空文本跳过；相邻完全相同 block 去重；
 - title 优先 og:title → <title> → h1 → None；
-- published_at 只接受明确机器可读元数据（article:published_time /
-  <time datetime>）；naive 时间无法可靠确定绝对时刻 → None；
+- published_at 只接受明确 publication 元数据：article:published_time meta
+  或 [itemprop="datePublished"]（meta content / time datetime）；普通
+  <time datetime> 无 itemprop 忽略；naive 时间无法可靠确定绝对时刻 → None；
   绝不使用 Candidate.seen_at / parsed_at / 当前时间伪造；
 - 同一 raw bytes + parser version → 输出完全确定。
 """
@@ -53,12 +56,13 @@ _HTML_PARSER = lxml_html.HTMLParser(
 )
 
 _BOM_UTF8 = codecs.BOM_UTF8
-_META_CHARSET_RE = re.compile(
-    rb"<meta[^>]+charset\s*=\s*[\"']?\s*([a-zA-Z0-9._\-]+)",
-    re.IGNORECASE,
-)
-_HTTP_EQUIV_CHARSET_RE = re.compile(
-    rb"charset\s*=\s*([a-zA-Z0-9._\-]+)",
+# 只从真实 meta 声明识别编码，绝不全局扫描任意 charset= 文本（body/script
+# 内出现 charset=... 不影响编码判定）。覆盖两种合法形式：
+#   (a) <meta charset="gbk">（HTML5 属性形式）
+#   (b) <meta http-equiv="Content-Type" content="text/html; charset=gbk">
+_META_TAG_RE = re.compile(rb"<meta\b[^>]*>", re.IGNORECASE)
+_META_CHARSET_ATTR_RE = re.compile(
+    rb"\scharset\s*=\s*([\"']?)([a-zA-Z0-9._\-]+)",
     re.IGNORECASE,
 )
 _HEAD_SCAN_BYTES = 8192
@@ -107,18 +111,21 @@ def _decode(raw: bytes) -> str:
 
 
 def _detect_encoding(raw: bytes) -> str | None:
-    """只做纯本地字节扫描，不联网；返回声明编码或 None（→ 默认 UTF-8）。"""
+    """只做纯本地字节扫描，不联网；返回声明编码或 None（→ 默认 UTF-8）。
+
+    只从真实 meta 声明识别编码（<meta charset> 属性形式，或
+    <meta http-equiv="Content-Type" content="...; charset=...">），
+    绝不从 body/script 文本或任意 charset= 文本推断编码。
+    """
     if raw.startswith(_BOM_UTF8):
         return "utf-8-sig"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return "utf-16"
     head = raw[:_HEAD_SCAN_BYTES]
-    match = _META_CHARSET_RE.search(head)
-    if match:
-        return match.group(1).decode("ascii", errors="ignore").lower()
-    match = _HTTP_EQUIV_CHARSET_RE.search(head)
-    if match:
-        return match.group(1).decode("ascii", errors="ignore").lower()
+    for meta_tag in _META_TAG_RE.finditer(head):
+        match = _META_CHARSET_ATTR_RE.search(meta_tag.group(0))
+        if match:
+            return match.group(2).decode("ascii", errors="ignore").lower()
     return None
 
 
@@ -169,12 +176,19 @@ def _extract_title(
 
 
 def _extract_published_at(root: lxml_html.HtmlElement) -> datetime | None:
+    # 只认可明确 publication 元数据：
+    #   1. <meta property/name="article:published_time" content="...">
+    #   2. [itemprop="datePublished"]（<meta content> 或 <time datetime>）
+    # 普通 <time datetime> 无 itemprop=datePublished → 忽略；updated_time /
+    # dateModified 不冒充 published_at。
     for attr in _META_PROPERTIES:
         for content in root.xpath(f"//meta[@{attr}='article:published_time']/@content"):
             parsed = _parse_machine_datetime(content)
             if parsed is not None:
                 return parsed
-    for value in root.xpath("//time/@datetime"):
+    for value in root.xpath(
+        "//meta[@itemprop='datePublished']/@content | //time[@itemprop='datePublished']/@datetime"
+    ):
         parsed = _parse_machine_datetime(value)
         if parsed is not None:
             return parsed
