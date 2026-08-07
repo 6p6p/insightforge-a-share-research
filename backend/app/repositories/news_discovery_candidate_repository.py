@@ -24,6 +24,14 @@ class NewsDiscoveryCandidateRepository:
         await self._session.flush()
         return len(candidates)
 
+    async def get_by_id(self, candidate_id: UUID) -> NewsDiscoveryCandidateModel | None:
+        result = await self._session.execute(
+            select(NewsDiscoveryCandidateModel).where(
+                NewsDiscoveryCandidateModel.candidate_id == candidate_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_for_run(self, discovery_run_id: UUID) -> list[NewsDiscoveryCandidateModel]:
         # 稳定排序：rank ASC, candidate_id ASC
         result = await self._session.execute(

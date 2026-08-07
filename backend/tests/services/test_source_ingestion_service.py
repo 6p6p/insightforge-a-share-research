@@ -16,6 +16,7 @@ from app.acquisition.http_fetcher import SafePdfFetcher
 from app.core.errors import (
     CompanyIdentityNotFound,
     InvalidPdfFile,
+    NewsArticleIngestionNotAllowed,
     RawArtifactNotFound,
     SourceCapabilityNotAllowed,
     SourceProviderDisabled,
@@ -377,6 +378,41 @@ async def test_ingest_url_rejects_disallowed_domain(monkeypatch) -> None:
             document_type=SourceDocumentType.ANNUAL_REPORT,
             title="t",
             source_url="https://evil.example.org/a.pdf",
+            published_at=None,
+            reporting_period_end=None,
+            external_document_id=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_ingest_upload_rejects_news_article(monkeypatch) -> None:
+    """§二十：news_article 不能通过 upload 注入（守卫先于 provider 校验触发）。"""
+    service = _make_service()
+    with pytest.raises(NewsArticleIngestionNotAllowed):
+        await service.ingest_upload(
+            company_id=uuid4(),
+            provider_key="sse",
+            document_type=SourceDocumentType.NEWS_ARTICLE,
+            title="t",
+            source_url=_GOOD_URL,
+            published_at=None,
+            reporting_period_end=None,
+            external_document_id=None,
+            stream=io.BytesIO(_PDF),
+        )
+
+
+@pytest.mark.asyncio
+async def test_ingest_url_rejects_news_article(monkeypatch) -> None:
+    """§二十：news_article 不能通过 import-url 注入。"""
+    service = _make_service()
+    with pytest.raises(NewsArticleIngestionNotAllowed):
+        await service.ingest_url(
+            company_id=uuid4(),
+            provider_key="sse",
+            document_type=SourceDocumentType.NEWS_ARTICLE,
+            title="t",
+            source_url=_GOOD_URL,
             published_at=None,
             reporting_period_end=None,
             external_document_id=None,

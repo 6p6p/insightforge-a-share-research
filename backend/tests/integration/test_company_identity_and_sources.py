@@ -112,8 +112,8 @@ async def test_seed_defaults_idempotent_and_preserves_unknown(database, sessionm
     service = SourceRegistryService(sessionmaker)
 
     r1 = await service.seed_defaults()
-    assert r1.inserted_or_updated == 8
-    assert r1.total == 8
+    assert r1.inserted_or_updated == 11
+    assert r1.total == 11
 
     async with sessionmaker() as session:
         repo = SourceProviderRepository(session)
@@ -123,8 +123,8 @@ async def test_seed_defaults_idempotent_and_preserves_unknown(database, sessionm
         await session.commit()
 
     r2 = await service.seed_defaults()
-    assert r2.inserted_or_updated == 8
-    assert r2.total == 9
+    assert r2.inserted_or_updated == 11
+    assert r2.total == 12
 
     async with sessionmaker() as session:
         unknown = await SourceProviderRepository(session).get_by_key("unknown_test_provider")

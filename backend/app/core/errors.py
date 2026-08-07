@@ -115,6 +115,12 @@ class InvalidJsonFile(DomainError):
     message = "不是有效的 JSON 文件"
 
 
+class InvalidHtmlFile(DomainError):
+    code = "invalid_html_file"
+    http_status = 400
+    message = "不是有效的 HTML 文件"
+
+
 class SourceProviderDisabled(DomainError):
     code = "source_provider_disabled"
     http_status = 409
@@ -143,3 +149,28 @@ class SourceStorageUnavailable(DomainError):
     code = "source_storage_unavailable"
     http_status = 503
     message = "原始文件存储不可用"
+
+
+class SourceContentUnsupportedMediaType(DomainError):
+    """内容下载端点只支持 PDF；HTML/JSON 等媒体类型一律 415 拒绝。
+
+    news_article 的 raw HTML 归档不可通过本端点下载（2D.2A §二十一），
+    后续阶段如需浏览器查看 HTML 应新增专用端点而非放开本端点。
+    """
+
+    code = "source_content_unsupported_media_type"
+    http_status = 415
+    message = "该来源媒体类型不支持内容下载"
+
+
+class NewsArticleIngestionNotAllowed(DomainError):
+    """news_article 不能通过 upload / import-url 注入。
+
+    新闻来源记录只能由 NewsOriginalSourceService 走原创发布者验证链路创建
+    （acquisition_method=public_html）；上传/导入边界仅服务公司文件类
+    document_type（2D.2A §二十）。
+    """
+
+    code = "news_article_ingestion_not_allowed"
+    http_status = 400
+    message = "news_article 只能通过原创发布者验证流程创建"

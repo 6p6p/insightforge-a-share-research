@@ -25,9 +25,11 @@ from app.db.base import Base
 
 _DOCUMENT_TYPE_CHECK = (
     "document_type IN ('annual_report','semiannual_report','quarterly_report',"
-    "'company_announcement','issuer_ir_material','prospectus','other')"
+    "'company_announcement','issuer_ir_material','prospectus','news_article','other')"
 )
-_ACQUISITION_METHOD_CHECK = "acquisition_method IN ('user_upload','user_provided_url')"
+_ACQUISITION_METHOD_CHECK = (
+    "acquisition_method IN ('user_upload','user_provided_url','public_html')"
+)
 _STATUS_CHECK = "status IN ('available')"
 
 

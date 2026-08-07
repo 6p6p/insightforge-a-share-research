@@ -91,3 +91,27 @@ class SourceProviderRepository:
     async def count(self) -> int:
         result = await self._session.execute(select(func.count()).select_from(SourceProviderModel))
         return result.scalar_one()
+
+    async def list_original_publishers(self) -> list[SourceProviderModel]:
+        """enabled + news_article + public_html 的 Original Publishers（2D.2A）。
+
+        供 OriginalPublisherResolver 使用；Resolver 内部仍会独立复核资格
+        （enabled / news_article / public_html），本方法只是缩小查询范围。
+        """
+        result = await self._session.execute(
+            select(SourceProviderModel)
+            .where(SourceProviderModel.enabled.is_(True))
+            .where(
+                SourceProviderModel.capabilities.contains([SourceCapability.NEWS_ARTICLE.value])
+            )
+            .where(
+                SourceProviderModel.acquisition_methods.contains(
+                    [AcquisitionMethod.PUBLIC_HTML.value]
+                )
+            )
+            .order_by(
+                SourceProviderModel.authority_tier.asc(),
+                SourceProviderModel.provider_key.asc(),
+            )
+        )
+        return list(result.scalars().all())

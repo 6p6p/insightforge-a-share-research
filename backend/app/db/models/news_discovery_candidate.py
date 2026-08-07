@@ -33,7 +33,7 @@ _RANK_CHECK = "rank >= 1"
 _TITLE_CHECK = "btrim(title) <> ''"
 _NORMALIZED_URL_CHECK = "btrim(normalized_url) <> ''"
 _DOMAIN_CHECK = "btrim(domain) <> ''"
-_VERIFICATION_STATUS_CHECK = "verification_status = 'unverified'"
+_VERIFICATION_STATUS_CHECK = "verification_status IN ('unverified','verified')"
 
 
 class NewsDiscoveryCandidateModel(Base):

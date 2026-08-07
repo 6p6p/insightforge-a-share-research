@@ -21,11 +21,14 @@ class NewsDiscoveryStatus(StrEnum):
 
 
 class NewsCandidateVerificationStatus(StrEnum):
-    """Candidate 验证状态。当前只有 unverified。
+    """Candidate 验证状态（2D.2A 演进为 unverified + verified）。
 
-    2D.1 只产生"线索"：Candidate 未经验证，原始发布网页是否可访问、
-    是否与公司相关均未知。verified / rejected / archived / evidence_ready
-    属于 2D.2 的 Original Source Verification，本阶段不提前引入。
+    2D.1 只产生"线索"：Candidate 未经验证。2D.2A 定义 verified 的严格语义：
+    仅表示"原始发布网页属于 Source Registry 登记的原创媒体、公开页面被安全
+    抓取、raw HTML 已不可变归档、Candidate → SourceRecord 溯源已建立"；
+    不代表新闻内容为真、不代表已交叉验证、不代表支持关键声明、更不是 Evidence。
+    rejected / archived / evidence_ready 属于后续 2D 阶段，本阶段不引入。
     """
 
     UNVERIFIED = "unverified"
+    VERIFIED = "verified"

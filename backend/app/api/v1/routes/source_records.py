@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import get_source_ingestion_service
-from app.domain.source_records import SourceDocumentType
+from app.core.errors import SourceContentUnsupportedMediaType
+from app.domain.source_records import RawArtifactMediaType, SourceDocumentType
 from app.schemas.source_record import (
     SourceRecordListResponse,
     SourceRecordResponse,
@@ -127,6 +128,11 @@ async def download_source_content(
     service: Annotated[SourceIngestionService, Depends(get_source_ingestion_service)],
 ) -> StreamingResponse:
     record, stream = await service.open_source_content(source_id)
+    # §二十一：内容下载端点只服务 PDF；HTML（news_article raw artifact）
+    # 等媒体类型一律 415，避免把不可解析的原始字节当作 PDF 流式输出。
+    if record.media_type != RawArtifactMediaType.PDF.value:
+        stream.close()
+        raise SourceContentUnsupportedMediaType()
     headers = {
         "Content-Length": str(record.byte_size),
         "Content-Disposition": f'attachment; filename="source-{source_id}.pdf"',

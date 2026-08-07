@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from app.core.errors import (
+    InvalidHtmlFile,
     InvalidJsonFile,
     InvalidPdfFile,
     RawArtifactNotFound,
@@ -32,7 +33,9 @@ _HEAD_SCAN_BYTES = 1024
 _ASCII_WHITESPACE = b"\t\n\r\x20"
 _MEDIA_TYPE_PDF = "application/pdf"
 _MEDIA_TYPE_JSON = "application/json"
+_MEDIA_TYPE_HTML = "text/html"
 _DEFAULT_MAX_JSON_BYTES = 5 * 1024 * 1024  # 5 MiB
+_DEFAULT_MAX_HTML_BYTES = 5 * 1024 * 1024  # 5 MiB
 
 
 def _reject_json_constant(value: str) -> None:
@@ -60,10 +63,12 @@ class LocalRawArtifactStore:
         max_bytes: int,
         *,
         max_json_bytes: int = _DEFAULT_MAX_JSON_BYTES,
+        max_html_bytes: int = _DEFAULT_MAX_HTML_BYTES,
     ) -> None:
         self._root = root
         self._max_bytes = max_bytes
         self._max_json_bytes = max_json_bytes
+        self._max_html_bytes = max_html_bytes
 
     def put_pdf_stream(self, stream: BinaryIO) -> StoredRawArtifact:
         """Stream a PDF into the content-addressed store.
@@ -167,6 +172,54 @@ class LocalRawArtifactStore:
                 except OSError:
                     pass
 
+    def put_html_bytes(self, data: bytes) -> StoredRawArtifact:
+        """Store raw HTML byte string into the content-addressed store.
+
+        与 put_json_bytes 同语义：**不解码、不解析、不重编码**，只做原始字节
+        归档（media_type=text/html，storage key `sha256/ab/cd/<sha256>.html`）。
+        内容寻址、原子写、不可变、replay 不覆盖（相同 SHA 复用）。空字节拒绝
+        （沿用 PDF/JSON 的空内容策略），单文件字节上限 5 MiB。
+        """
+        self._root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = self._root / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        if not data:
+            raise InvalidHtmlFile()
+        if len(data) > self._max_html_bytes:
+            raise SourceFileTooLarge()
+        content_sha256 = hashlib.sha256(data).hexdigest()
+        storage_key = self._storage_key_for_html(content_sha256)
+        final_path = self._resolve(storage_key)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if final_path.exists():
+            return StoredRawArtifact(
+                content_sha256=content_sha256,
+                storage_key=storage_key,
+                byte_size=len(data),
+                media_type=_MEDIA_TYPE_HTML,
+                newly_created=False,
+            )
+        fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, prefix="upload-html-")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, final_path)
+            return StoredRawArtifact(
+                content_sha256=content_sha256,
+                storage_key=storage_key,
+                byte_size=len(data),
+                media_type=_MEDIA_TYPE_HTML,
+                newly_created=True,
+            )
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
     @staticmethod
     def _validate_json(data: bytes) -> None:
         """非空、UTF-8（允许 BOM）、合法 JSON、Decimal 数值、拒绝非有限字面量。"""
@@ -238,6 +291,10 @@ class LocalRawArtifactStore:
     @staticmethod
     def _storage_key_for_json(content_sha256: str) -> str:
         return f"sha256/{content_sha256[:2]}/{content_sha256[2:4]}/{content_sha256}.json"
+
+    @staticmethod
+    def _storage_key_for_html(content_sha256: str) -> str:
+        return f"sha256/{content_sha256[:2]}/{content_sha256[2:4]}/{content_sha256}.html"
 
     def _resolve(self, storage_key: str) -> Path:
         if not storage_key or storage_key.startswith(("/", "\\")):

@@ -289,6 +289,17 @@ def test_download_content_not_found_returns_404(ingestion_client, fake_ingestion
     assert response.status_code == 404
 
 
+def test_download_content_html_returns_415(ingestion_client, fake_ingestion) -> None:
+    """§二十一：news_article 的 HTML raw artifact 不允许通过 content 端点下载。"""
+    html_record = _record()
+    html_record.media_type = "text/html"
+    fake_ingestion.record = html_record
+    response = ingestion_client.get(f"/api/v1/source-records/{html_record.source_id}/content")
+    assert response.status_code == 415
+    body = response.json()
+    assert body["error"]["code"] == "source_content_unsupported_media_type"
+
+
 def test_openapi_contains_source_endpoints(ingestion_client) -> None:
     schema = ingestion_client.get("/openapi.json").json()
     paths = schema["paths"]

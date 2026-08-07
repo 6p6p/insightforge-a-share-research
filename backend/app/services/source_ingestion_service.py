@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.acquisition.http_fetcher import SafePdfFetcher
 from app.core.errors import (
     CompanyIdentityNotFound,
+    NewsArticleIngestionNotAllowed,
     RawArtifactNotFound,
     SourceCapabilityNotAllowed,
     SourceProviderDisabled,
@@ -78,6 +79,7 @@ class SourceIngestionService:
         external_document_id: str | None,
         stream: BinaryIO,
     ) -> IngestionResult:
+        self._ensure_not_news_article(document_type)
         provider = await self._load_company_and_provider(company_id, provider_key, source_url)
         stored = self._raw_store.put_pdf_stream(stream)
         return await self._persist(
@@ -106,6 +108,7 @@ class SourceIngestionService:
         reporting_period_end: date | None,
         external_document_id: str | None,
     ) -> IngestionResult:
+        self._ensure_not_news_article(document_type)
         provider = await self._load_company_and_provider(company_id, provider_key, source_url)
         pdf = await self._fetcher.fetch(
             source_url,
@@ -170,6 +173,17 @@ class SourceIngestionService:
         return self._build_response(record, artifact), stream
 
     # ------------------------------------------------------------- internals
+
+    @staticmethod
+    def _ensure_not_news_article(document_type: SourceDocumentType) -> None:
+        """§二十：news_article 只能由原创发布者验证链路创建。
+
+        DB CHECK（document_type / acquisition_method 相互独立）不会拦截
+        news_article + user_upload 的组合，必须在服务层显式拒绝，防止新闻
+        来源绕过 Original Publisher → SafeHtmlFetcher → 归档验证流程注入。
+        """
+        if document_type == SourceDocumentType.NEWS_ARTICLE:
+            raise NewsArticleIngestionNotAllowed()
 
     async def _load_company_and_provider(
         self,

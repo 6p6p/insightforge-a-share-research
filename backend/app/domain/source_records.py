@@ -10,6 +10,7 @@ class SourceDocumentType(StrEnum):
     COMPANY_ANNOUNCEMENT = "company_announcement"
     ISSUER_IR_MATERIAL = "issuer_ir_material"
     PROSPECTUS = "prospectus"
+    NEWS_ARTICLE = "news_article"
     OTHER = "other"
 
 
@@ -20,3 +21,4 @@ class SourceRecordStatus(StrEnum):
 class RawArtifactMediaType(StrEnum):
     PDF = "application/pdf"
     JSON = "application/json"
+    HTML = "text/html"

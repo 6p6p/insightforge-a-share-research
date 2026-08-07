@@ -20,7 +20,7 @@ from app.db.base import Base
 _PROVIDER_TYPE_CHECK = (
     "provider_type IN ('exchange','regulator','statutory_disclosure_platform',"
     "'issuer','government_data','authoritative_data','international_organization',"
-    "'professional_media','general_web')"
+    "'professional_media','general_web','media')"
 )
 
 

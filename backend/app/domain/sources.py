@@ -20,6 +20,7 @@ class SourceProviderType(StrEnum):
     INTERNATIONAL_ORGANIZATION = "international_organization"
     PROFESSIONAL_MEDIA = "professional_media"
     GENERAL_WEB = "general_web"
+    MEDIA = "media"
 
 
 class SourceCapability(StrEnum):
@@ -30,6 +31,7 @@ class SourceCapability(StrEnum):
     ISSUER_IR = "issuer_ir"
     MACRO_DATA = "macro_data"
     NEWS = "news"
+    NEWS_ARTICLE = "news_article"
     DOCUMENT_DOWNLOAD = "document_download"
 
 
@@ -41,3 +43,4 @@ class AcquisitionMethod(StrEnum):
     USER_PROVIDED_URL = "user_provided_url"
     WEB_SEARCH_DISCOVERY = "web_search_discovery"
     MODEL_WEB_SEARCH_DISCOVERY = "model_web_search_discovery"
+    PUBLIC_HTML = "public_html"

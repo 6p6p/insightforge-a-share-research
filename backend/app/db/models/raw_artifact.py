@@ -39,7 +39,7 @@ class RawArtifactModel(Base):
             name="ck_raw_artifacts_byte_size",
         ),
         CheckConstraint(
-            "media_type IN ('application/pdf','application/json')",
+            "media_type IN ('application/pdf','application/json','text/html')",
             name="ck_raw_artifacts_media_type",
         ),
         CheckConstraint(
