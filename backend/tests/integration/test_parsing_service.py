@@ -70,6 +70,8 @@ configure_asyncio_runtime()
 
 _XINHUA_URL = "https://www.xinhuanet.com/2026/0807/0001.htm"
 _XINHUA_URL_2 = "https://www.xinhuanet.com/2026/0807/0002.htm"
+# 公司 PDF 走合法 sse provider（TIER_1、company_announcement + document_download）。
+_SSE_URL = "https://www.sse.com.cn/disclosure/listedinfo/announcement/"
 # og:title 覆盖 <title>；article:published_time 携带 +08:00 偏移（机器可读）。
 _HTML = (
     "<html><head>"
@@ -208,11 +210,14 @@ async def _seed_pdf_source(
     env: dict,
     *,
     pdf: bytes = single_page_pdf(title="季度报告"),
-    source_url: str = _XINHUA_URL,
+    source_url: str = _SSE_URL,
 ) -> tuple:
     """真实 LocalRawArtifactStore 落盘 PDF（put_pdf_stream）+ 真实 SourceRecord。
 
-    media_type=application/pdf；返回 (source_id, artifact_id, storage_key)。
+    media_type=application/pdf；**不绕过已冻结的 news_article ingestion 语义**：
+    用项目合法的公司 PDF SourceRecord（sse provider + annual_report），
+    acquisition_method=user_upload（DB CHECK 仅允许三种来源）。
+    返回 (source_id, artifact_id, storage_key)。
     """
     stored = env["raw_store"].put_pdf_stream(BytesIO(pdf))
     async with env["sessionmaker"]() as session:
@@ -229,17 +234,17 @@ async def _seed_pdf_source(
             assert artifact is not None
         record = SourceRecordModel(
             company_id=env["company_id"],
-            provider_key="xinhuanet",
+            provider_key="sse",
             artifact_id=artifact.artifact_id,
-            document_type="news_article",
+            document_type="annual_report",
             title=_SOURCE_TITLE,
             published_at=_PUBLISHED_AT,
             source_url=source_url,
             acquisition_method="user_upload",  # CHECK 仅允许三种来源
             status="available",
-            authority_tier_snapshot=3,
-            critical_claim_eligible_snapshot=False,
-            provider_capabilities_snapshot=["news_article"],
+            authority_tier_snapshot=1,
+            critical_claim_eligible_snapshot=True,
+            provider_capabilities_snapshot=["company_announcement", "document_download"],
             acquired_at=datetime.now(UTC),
         )
         record = await SourceRecordRepository(session).create(record)
@@ -537,7 +542,7 @@ async def test_blocks_ordinal_contiguous_and_stable(env) -> None:
     blocks = await _get_blocks(env, result.parsed_source_id)
     assert [b.ordinal for b in blocks] == list(range(1, result.block_count + 1))
     assert [b.ordinal for b in blocks] == [1, 2, 3, 4]
-    # 相邻 block (type, text) 不允许完全相同（parser 已去重）
+    # 契约不再限制相邻相同文本（2E.2 收口）；仅对当前 HTML fixture 复核输出稳定。
     for index in range(len(blocks) - 1):
         left, right = blocks[index], blocks[index + 1]
         assert (left.block_type, left.text) != (right.block_type, right.text)
@@ -628,9 +633,9 @@ async def test_pdf_source_record_metadata_not_written_back(env) -> None:
 
 
 async def test_html_and_pdf_produce_distinct_parser_snapshots(env) -> None:
-    """同公司两个 Source：HTML → html_dom v2，PDF → pdf_layout v1，独立快照。"""
+    """同公司两个 Source：HTML → html_dom v2，PDF → pdf_layout v2，独立快照。"""
     html_source, _, _ = await _seed_html_source(env, source_url=_XINHUA_URL)
-    pdf_source, _, _ = await _seed_pdf_source(env, source_url=_XINHUA_URL_2)
+    pdf_source, _, _ = await _seed_pdf_source(env, source_url=_SSE_URL)
     service = _service(env)
 
     html_result = await service.parse_source(html_source)

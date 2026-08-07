@@ -6,6 +6,11 @@ ToUnicode 恒等映射）、metadata Title、加密 trailer（V=1/R=2，密码�
 测试用本模块生成 bytes 后经 LocalRawArtifactStore.put_pdf_stream 归档，再走
 真实 SourceParsingService；不引入 reportlab/fpdf 等 PDF 生成运行时依赖。
 
+重复文本语义（PDF v2 收口）：
+- 相同位置重复绘制字符（同一坐标两次 'aa'）→ 由 pdfplumber dedupe_chars 去重；
+- 不同位置的相同文本行（同页不同 bbox / 跨页）→ 全部保留，各自独立 block，
+  由 pdf_page locator（page_number/line_index/bbox）区分原文位置。
+
 坐标语义：spans 里 (x, y) 是 PDF 坐标（原点在页面左下角，单位 pt）；
 pdfplumber 的 top 从页面顶部算起，所以 top = page_height - y - 字形高度。
 """
@@ -179,10 +184,18 @@ def duplicate_chars_pdf() -> bytes:
     return build_pdf([[(72.0, 720.0, "aa"), (72.0, 720.0, "aa")]])
 
 
-def duplicate_line_across_pages_pdf() -> bytes:
-    """页边界相邻相同行：page1 末行与 page2 首行同为 'Dup' → 相邻去重。
+def duplicate_line_same_page_pdf() -> bytes:
+    """同页两个不同 bbox 的 'Dup'（不同 top）：位置不同 → 两个独立 block。
 
-    结果只保留首个 'Dup'（page1），page2 幸存行 line_index 重新编号。
+    PDF v2 收口：原文不同位置的相同文本必须全部保留，不按文本内容去重。
+    """
+    return build_pdf([[(72.0, 720.0, "Dup"), (72.0, 700.0, "Dup")]])
+
+
+def duplicate_line_across_pages_pdf() -> bytes:
+    """page1 与 page2 各一个 'Dup'：跨页相同文本 → 两个独立 block（page 不同）。
+
+    PDF v2 收口：跨页相同文本行不按文本去重，由 page_number locator 区分。
     """
     return build_pdf(
         [

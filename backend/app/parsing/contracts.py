@@ -1,6 +1,6 @@
 """Deterministic parsing contracts (stage 2E.1 / 2E.2).
 
-ParsedBlock / ParsedDocument 是确定性 Parser（html_dom v2 / pdf_layout v1）
+ParsedBlock / ParsedDocument 是确定性 Parser（html_dom v2 / pdf_layout v2）
 的统一输出契约：
 
 - ParsedDocument 是"某一 SourceRecord + 特定 parser 版本下的解析快照"
@@ -13,7 +13,6 @@ ParsedSource 是 SourceRecord 的确定性解析快照，不是 Chunk，也不�
 """
 
 import hashlib
-import itertools
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,9 +28,12 @@ HTML_PARSER_NAME = "html_dom"
 HTML_PARSER_VERSION = 2
 
 PDF_PARSER_NAME = "pdf_layout"
-# v1：2E.2 首版。PDF 无确定性页面语义变更时不需 bump；变更提取/排序/聚合
-# 语义时递增（同 source + 同 raw + 新 version → 新 fingerprint → 新快照）。
-PDF_PARSER_VERSION = 1
+# v1 → v2：2E.2 正确性收口删除了 PDF 的 text-level 相邻去重（同/跨页相同
+# 文本行必须全部保留，靠 page locator 区分原文位置；只有相同位置的重复绘制
+# 字符由 pdfplumber dedupe_chars 去重），因此 PDF 输出语义改变，版本升为 2。
+# 旧 v1 快照不修改不删除；同 source + 同 raw + 新 version → 新 fingerprint →
+# 新快照，旧快照保留（可追溯）。
+PDF_PARSER_VERSION = 2
 
 # 已知 locator type → 必须精确匹配的字段集合（含 "type" 本身）。
 _LOCATOR_SPECS: dict[str, set[str]] = {
@@ -189,9 +191,6 @@ class ParsedDocument:
         for index, block in enumerate(self.blocks, start=1):
             if block.ordinal != index:
                 raise ParsingContractViolation("blocks 的 ordinal 必须连续 1..n")
-        for left, right in itertools.pairwise(self.blocks):
-            if (left.block_type, left.text) == (right.block_type, right.text):
-                raise ParsingContractViolation("相邻 block 不得完全相同")
 
 
 def compute_parse_fingerprint(source_id: UUID, document: ParsedDocument) -> str:

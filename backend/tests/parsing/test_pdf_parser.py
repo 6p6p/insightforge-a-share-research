@@ -9,7 +9,8 @@
   PdfResourceLimitError；
 - metadata Title（normalize 后非空否则 None）/ published_at 恒 None；
 - 同一 raw → 完全确定（多遍一致）；
-- 跨页相邻相同行去重（保持 ParsedDocument 契约不变量）。
+- 相同文本行全部保留（同页不同 bbox / 跨页都各自独立 block，不按文本去重），
+  仅相同坐标重复绘制字符由 dedupe_chars 去重（2E.2 收口，PDF v2）。
 """
 
 import hashlib
@@ -30,6 +31,7 @@ from tests.pdf_fixtures import (
     chinese_pdf,
     duplicate_chars_pdf,
     duplicate_line_across_pages_pdf,
+    duplicate_line_same_page_pdf,
     empty_page_then_text_pdf,
     encrypted_pdf,
     multi_page_pdf,
@@ -143,14 +145,31 @@ def test_chinese_text_extracted() -> None:
     assert 0.0 <= top < bottom <= _PAGE_HEIGHT
 
 
-def test_adjacent_identical_lines_across_pages_deduped() -> None:
-    """page1 末行与 page2 首行文本相同（相邻）→ 保留首个，幸存行重编号。"""
+def test_identical_text_across_pages_preserved() -> None:
+    """page1 与 page2 各一个 'Dup'：跨页相同文本 → 两个独立 block（page 不同）。
+
+    PDF v2 收口：不做 text-level 去重，page_number locator 区分原文位置。
+    """
     doc = parse_pdf_bytes(duplicate_line_across_pages_pdf())
     assert [(b.locator["page_number"], b.locator["line_index"], b.text) for b in doc.blocks] == [
         (1, 1, "Header"),
         (1, 2, "Dup"),
-        (2, 1, "Body two"),
+        (2, 1, "Dup"),
+        (2, 2, "Body two"),
     ]
+    assert [b.ordinal for b in doc.blocks] == [1, 2, 3, 4]
+
+
+def test_identical_text_same_page_different_bbox_preserved() -> None:
+    """同页两个不同 bbox 的 'Dup'：位置不同 → 两个独立 block（top 不同）。"""
+    doc = parse_pdf_bytes(duplicate_line_same_page_pdf())
+    assert [(b.locator["page_number"], b.locator["line_index"], b.text) for b in doc.blocks] == [
+        (1, 1, "Dup"),
+        (1, 2, "Dup"),
+    ]
+    tops = [b.locator["bbox"][1] for b in doc.blocks]
+    assert tops[0] != tops[1]  # 不同原文位置 → 不同 top
+    assert [b.ordinal for b in doc.blocks] == [1, 2]
 
 
 def test_metadata_title_and_published_at() -> None:
@@ -171,7 +190,7 @@ def test_metadata_missing_title_none() -> None:
 
 
 def test_document_blocks_contract_satisfied() -> None:
-    """parser 输出必须通过 ParsedDocument 契约（ordinal 连续、相邻不同、文本已 normalize）。"""
+    """parser 输出必须通过 ParsedDocument 契约（ordinal 连续、文本已 normalize）。"""
     doc = parse_pdf_bytes(multi_page_pdf())
     # 契约校验在 ParsedDocument.__post_init__ 完成；此处再显式复核。
     assert isinstance(doc, ParsedDocument)

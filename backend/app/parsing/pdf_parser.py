@@ -6,13 +6,15 @@ SourceRecord 原始字节确定性解析为可定位结构化文本：
 - 只读 bytes（BytesIO），不联网、不写临时外部文件、不修改 PDF；
 - 仅支持机器可读 PDF；**整个 PDF** 无任何可提取文本 → PdfTextUnavailable
   （OCR 留未来）；单页无文字不失败；
-- 每页先 `page.dedupe_chars()`（去掉重叠重复字符），再
+- 每页先 `page.dedupe_chars()`（去掉相同位置的重复绘制字符），再
   `extract_words(use_text_flow=False, keep_blank_chars=False,
   expand_ligatures=True, 固定 x/y tolerance)` 取稳定 word 级输出；
 - 固定排序 page_number ASC → top ASC → x0 ASC；固定 y tolerance 聚合
   words 为行；每行一个 block（block_type=paragraph，不做 heading/语义推断）；
-- 相邻 (block_type, text) 完全相同去重（保留首个），满足 ParsedDocument
-  契约不变量（与 HTML parser 一致）；
+- **不做 text-level 去重**：原文不同位置的相同文本必须全部保留，由
+  pdf_page locator（page_number/line_index/bbox）区分原文位置；
+  `dedupe_chars` 只处理同一坐标的重复绘制字符，与文本内容去重职责不同；
+  相同文本行（同页不同 bbox 或跨页）各自独立成 block（2E.2 收口，PDF v2）；
 - locator = {"type":"pdf_page","page_number":N,"line_index":M,
   "bbox":[x0,top,x1,bottom],"page_width":...,"page_height":...}，
   全部 float round(...,3)；page_number/line_index 1-based；
@@ -113,19 +115,13 @@ def parse_pdf_bytes(raw: bytes) -> ParsedDocument:
     except PSException as exc:
         raise PdfParseError() from exc
 
-    # 相邻 (block_type, text) 完全相同 → 去重（保留首个），保持契约不变量。
-    deduped = []
-    for item in collected:
-        if deduped and deduped[-1]["text"] == item["text"]:
-            continue
-        deduped.append(item)
-    if not deduped:
+    if not collected:
         raise PdfTextUnavailable()
 
     blocks: list[ParsedBlock] = []
     ordinal = 0
     line_counts: dict[int, int] = {}
-    for item in deduped:
+    for item in collected:
         page_number = item["page_number"]
         line_counts[page_number] = line_counts.get(page_number, 0) + 1
         ordinal += 1

@@ -2,7 +2,7 @@
 
 纯函数（不联网、不访问 DB）覆盖：
 - ParsedBlock 契约校验（ordinal / text normalize / text_sha256 / locator 五键）；
-- ParsedDocument 契约校验（ordinal 连续、相邻 block 不同、published_at aware）；
+- ParsedDocument 契约校验（ordinal 连续、相同文本不限相邻、published_at aware）；
 - compute_parse_fingerprint 确定性（同一输入 → 同一指纹；任何字段变化 →
   指纹变化；不包含 parsed_at / created_at / DB ID）。
 """
@@ -169,10 +169,13 @@ def test_document_ordinal_non_contiguous_rejected() -> None:
         _doc(blocks)
 
 
-def test_document_adjacent_identical_blocks_rejected() -> None:
+def test_document_adjacent_identical_blocks_allowed() -> None:
+    """相邻相同文本合法：不同原文位置允许相同文本（2E.2 收口）。
+
+    删除"相邻 block (type,text) 不得相同"约束；只有 ordinal 必须连续。
+    """
     blocks = (_block(1, "相同"), _block(2, "相同"))
-    with pytest.raises(ParsingContractViolation):
-        _doc(blocks)
+    assert _doc(blocks).blocks == blocks
 
 
 def test_document_non_adjacent_identical_blocks_allowed() -> None:
