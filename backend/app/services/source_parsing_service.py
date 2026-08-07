@@ -1,10 +1,11 @@
-"""Deterministic source parsing service (stage 2E.1).
+"""Deterministic source parsing service (stage 2E.1 / 2E.2).
 
-parse_source(source_id) 把已归档的 text/html SourceRecord 确定性解析为
-ParsedSource + ParsedSourceBlock 快照：
+parse_source(source_id) 把已归档的 text/html 或 application/pdf
+SourceRecord 确定性解析为 ParsedSource + ParsedSourceBlock 快照：
 
 1. 短 DB session 读 SourceRecord + RawArtifact metadata → 关闭 session；
-   仅允许 artifact.media_type == text/html；
+   按 artifact.media_type dispatch 到对应 parser（text/html → html_dom v2，
+   application/pdf → pdf_layout v1，其他 → UnsupportedParseMediaType）；
 2. 文件 I/O（从 LocalRawArtifactStore 读 raw bytes）**不持 DB transaction**；
 3. Parser 解析 + 计算 parse_fingerprint；
 4. 短 DB transaction：create-or-get ParsedSource →（created 时）bulk insert
@@ -18,6 +19,7 @@ metadata 只写入 ParsedSource，SourceRecord 保持原始 provenance 不可变
 """
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -35,6 +37,7 @@ from app.parsing.errors import (
     UnsupportedParseMediaType,
 )
 from app.parsing.html_parser import parse_html_bytes
+from app.parsing.pdf_parser import parse_pdf_bytes
 from app.repositories.parsed_source_block_repository import (
     ParsedSourceBlockRepository,
 )
@@ -44,11 +47,19 @@ from app.repositories.source_record_repository import SourceRecordRepository
 from app.storage.raw_store import LocalRawArtifactStore
 
 _MEDIA_TYPE_HTML = "text/html"
+_MEDIA_TYPE_PDF = "application/pdf"
+
+# media_type → 确定性解析函数。新增解析器只在此注册（parser 身份与版本
+# 由 contracts._PARSER_SPECS 校验；fingerprint 用 parser_name/version 计算）。
+_PARSERS_BY_MEDIA_TYPE: dict[str, Callable[[bytes], ParsedDocument]] = {
+    _MEDIA_TYPE_HTML: parse_html_bytes,
+    _MEDIA_TYPE_PDF: parse_pdf_bytes,
+}
 
 
 @dataclass(frozen=True)
 class ParsedSourceResult:
-    """一次 parse_source 的结果摘要（不含任何 HTML 正文 / block 文本）。"""
+    """一次 parse_source 的结果摘要（不含任何正文文本 / block 内容）。"""
 
     parsed_source_id: UUID
     source_id: UUID
@@ -83,7 +94,8 @@ class SourceParsingService:
             artifact = await artifact_repo.get_by_id(source.artifact_id)
             if artifact is None:
                 raise RawArtifactNotFound()
-            if artifact.media_type != _MEDIA_TYPE_HTML:
+            parser = _PARSERS_BY_MEDIA_TYPE.get(artifact.media_type)
+            if parser is None:
                 raise UnsupportedParseMediaType()
             storage_key = artifact.storage_key
             expected_content_sha256 = artifact.content_sha256
@@ -95,7 +107,7 @@ class SourceParsingService:
             raw = handle.read()
 
         # 3. 解析 + 内容寻址一致性 + fingerprint。
-        document = parse_html_bytes(raw)
+        document = parser(raw)
         if document.raw_content_sha256 != expected_content_sha256:
             # 存储内容与 artifact 登记的 SHA 不一致 = 内容寻址存储被篡改/损坏。
             raise ParsedSourceIntegrityError()

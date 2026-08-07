@@ -116,6 +116,15 @@
   - 安全边界：HTML content API 保持 415；不新增 raw HTML endpoint；通过 storage 读取无浏览器；不创建 DocumentChunk/EvidenceCard/Chroma/Embedding/Claim。
   - 测试：**36 parser 单元 + 25 contracts/fingerprint 单元 + 12 集成 E2E**（真实 PostgreSQL + 临时 RawStore，零网络）全部通过；ruff 零告警；`pip check` 通过。
   - 决策记录：[docs/decisions/0016-deterministic-html-parsing.md](decisions/0016-deterministic-html-parsing.md)。
-- **2E.2（next，尚未开始）**：确定性 PDF 解析 + page location。
-- **2E.3（尚未开始）**：Stage-2 source pipeline E2E acceptance（PDF + HTML 全链路确定性解析的端到端验收）。
+- **2E.2（completed，2026-08-07）**：确定性 PDF 解析 + page location。
+  - 只把已归档的 application/pdf SourceRecord 确定性解析为 ParsedSource + ParsedSourceBlock，**复用 2E.1 全链路**（ParsedDocument/ParsedBlock/parse_fingerprint/Repository/replay/integrity/并发），**不建新表、不改 schema（Alembic 保持 0013 head）**；**不做 OCR / Chunk / Embedding / Chroma / Evidence / LLM**。
+  - `pdf_layout` parser（VERSION=1，pdfplumber 0.11.x 唯一新增依赖）：只读 bytes（内部 BytesIO），不联网、不修改 PDF、不写临时外部文件；仅支持 machine-generated PDF，整个 PDF 无文本 → `PdfTextUnavailable`（OCR 留未来），单页无文字不失败。
+  - 确定性提取：每页 `dedupe_chars()` → `extract_words(use_text_flow=False, keep_blank_chars=False, expand_ligatures=True, 固定 x/y tolerance)`（不用 experimental API）；固定排序 page ASC → top ASC → x0 ASC；固定 y tolerance 聚行，每行一个 block（`block_type=paragraph`，不推断 heading/语义）；空文本跳过；跨页相邻相同行去重。
+  - Locator `{"type":"pdf_page","page_number","line_index","bbox":[x0,top,x1,bottom],"page_width","page_height"}`：page/line 1-based（line_index 每页重置）、bbox 全 float round(...,3) 且在 page bounds 内、同一 PDF + version 完全稳定。
+  - metadata：`extracted_title` = Info Title normalize 后非空否则 None；`extracted_published_at` 恒 None（绝不使用 CreationDate/ModDate/SourceRecord.published_at）。
+  - 安全边界：magic 必须有效（`%PDF-`）；encrypted/password-protected → `PdfEncryptedError`；page_count ∈ 1..1000、提取字符总量 ≤ 5,000,000，超限 → `PdfResourceLimitError`；非加密但损坏 → `PdfParseError`。
+  - `SourceParsingService` 泛化为 dispatcher：text/html → html_dom v2、application/pdf → pdf_layout v1，其他 media type → `UnsupportedParseMediaType`；复用同一持久化/replay/integrity/并发逻辑；SourceRecord 元数据不被回写。
+  - 测试：**27 PDF parser 单元 + 新增 PDF contracts/fingerprint 单元 + 6 解析 Service 集成**（真实 PostgreSQL + 临时 RawStore，零网络；PDF bytes 由纯 stdlib 手写 fixture 确定性构造）全部通过；ruff 零告警、`pip check` 通过。
+  - 决策记录：[docs/decisions/0017-deterministic-pdf-parsing.md](decisions/0017-deterministic-pdf-parsing.md)。
+- **2E.3（next，尚未开始）**：Stage-2 source pipeline E2E acceptance（PDF + HTML 全链路确定性解析的端到端验收）。
 - **Stage 3（尚未开始）**：DocumentChunk / Embedding / Chroma / EvidenceCard（不属于 Stage 2）。

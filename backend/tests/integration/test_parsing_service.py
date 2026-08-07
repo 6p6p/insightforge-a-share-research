@@ -1,10 +1,10 @@
-"""E2E integration tests for SourceParsingService (stage 2E.1, §8 persistence 部分)。
+"""E2E integration tests for SourceParsingService (stage 2E.1 / 2E.2, §8 persistence)。
 
 需要真实 PostgreSQL（127.0.0.1:5433）。真实 LocalRawArtifactStore + 真实
 SourceParsingService + 真实 Parser，零真实网络（conftest autouse guard 兜底）。
 覆盖：
-- first parse：创建 ParsedSource + ParsedSourceBlock 快照（title/published_at/
-  block_count/locator 正确），SourceRecord 元数据不被回写；
+- first parse（HTML + PDF）：创建 ParsedSource + ParsedSourceBlock 快照
+  （title/published_at/block_count/locator 正确），SourceRecord 元数据不被回写；
 - replay：同 source + 同 RawArtifact + 同 parser version → 同 fingerprint →
   复用原快照（replayed=True），不重复插 Blocks；
 - RawArtifact 永久不可变、SourceRecord 固定引用其 artifact：原始内容变化
@@ -17,13 +17,15 @@ SourceParsingService + 真实 Parser，零真实网络（conftest autouse guard 
   不自动修复；其中存储 SHA 不一致是存储层损坏/篡改检测，不是原文更新；
 - 并发相同 parse → 只产生 1 个 ParsedSource + 一套 Blocks；
 - blocks ordinal 连续 1..n 稳定；
-- 非 text/html artifact → UnsupportedParseMediaType；Source 不存在 →
-  SourceRecordNotFound。
+- HTML vs PDF：parser_name 分别为 html_dom / pdf_layout，独立快照；
+- 非 text/html / application/pdf artifact → UnsupportedParseMediaType；
+  Source 不存在 → SourceRecordNotFound。
 """
 
 import asyncio
 import hashlib
 from datetime import UTC, datetime
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
@@ -39,9 +41,15 @@ from app.db.models.parsed_source_block import ParsedSourceBlockModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_record import SourceRecordModel
 from app.db.session import DatabaseManager
-from app.parsing.contracts import HTML_PARSER_NAME, HTML_PARSER_VERSION
+from app.parsing.contracts import (
+    HTML_PARSER_NAME,
+    HTML_PARSER_VERSION,
+    PDF_PARSER_NAME,
+    PDF_PARSER_VERSION,
+)
 from app.parsing.errors import (
     ParsedSourceIntegrityError,
+    PdfEncryptedError,
     UnsupportedParseMediaType,
 )
 from app.repositories.company_repository import CompanyRepository
@@ -54,6 +62,7 @@ from app.repositories.source_record_repository import SourceRecordRepository
 from app.services.source_parsing_service import SourceParsingService
 from app.services.source_registry_service import SourceRegistryService
 from app.storage.raw_store import LocalRawArtifactStore
+from tests.pdf_fixtures import encrypted_pdf, single_page_pdf
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -184,6 +193,49 @@ async def _seed_html_source(
             published_at=_PUBLISHED_AT,
             source_url=source_url,
             acquisition_method="public_html",
+            status="available",
+            authority_tier_snapshot=3,
+            critical_claim_eligible_snapshot=False,
+            provider_capabilities_snapshot=["news_article"],
+            acquired_at=datetime.now(UTC),
+        )
+        record = await SourceRecordRepository(session).create(record)
+        await session.commit()
+        return record.source_id, artifact.artifact_id, stored.storage_key
+
+
+async def _seed_pdf_source(
+    env: dict,
+    *,
+    pdf: bytes = single_page_pdf(title="季度报告"),
+    source_url: str = _XINHUA_URL,
+) -> tuple:
+    """真实 LocalRawArtifactStore 落盘 PDF（put_pdf_stream）+ 真实 SourceRecord。
+
+    media_type=application/pdf；返回 (source_id, artifact_id, storage_key)。
+    """
+    stored = env["raw_store"].put_pdf_stream(BytesIO(pdf))
+    async with env["sessionmaker"]() as session:
+        artifact = await RawArtifactRepository(session).create(
+            RawArtifactModel(
+                content_sha256=stored.content_sha256,
+                storage_key=stored.storage_key,
+                byte_size=stored.byte_size,
+                media_type=stored.media_type,
+            )
+        )
+        if artifact is None:
+            artifact = await RawArtifactRepository(session).get_by_sha256(stored.content_sha256)
+            assert artifact is not None
+        record = SourceRecordModel(
+            company_id=env["company_id"],
+            provider_key="xinhuanet",
+            artifact_id=artifact.artifact_id,
+            document_type="news_article",
+            title=_SOURCE_TITLE,
+            published_at=_PUBLISHED_AT,
+            source_url=source_url,
+            acquisition_method="user_upload",  # CHECK 仅允许三种来源
             status="available",
             authority_tier_snapshot=3,
             critical_claim_eligible_snapshot=False,
@@ -507,3 +559,107 @@ async def test_source_not_found(env) -> None:
     with pytest.raises(SourceRecordNotFound) as exc:
         await _service(env).parse_source(uuid4())
     assert exc.value.code == "source_record_not_found"
+
+
+# ---------------------------------------------------------------- PDF（2E.2）
+
+
+async def test_pdf_first_parse_creates_snapshot_and_blocks(env) -> None:
+    pdf = single_page_pdf(title="季度报告")
+    source_id, artifact_id, _ = await _seed_pdf_source(env, pdf=pdf)
+    result = await _service(env).parse_source(source_id)
+
+    assert result.replayed is False
+    assert result.parser_name == PDF_PARSER_NAME
+    assert result.parser_version == PDF_PARSER_VERSION
+    assert result.raw_content_sha256 == hashlib.sha256(pdf).hexdigest()
+    assert result.extracted_title == "季度报告"  # metadata Title
+    assert result.extracted_published_at is None  # 绝不使用 CreationDate/ModDate
+    assert result.block_count == 3
+
+    snapshot = await _get_parsed_source(env, source_id)
+    assert snapshot is not None
+    assert snapshot.parser_name == PDF_PARSER_NAME
+    assert snapshot.raw_content_sha256 == result.raw_content_sha256
+
+    blocks = await _get_blocks(env, snapshot.parsed_source_id)
+    assert [(b.ordinal, b.block_type, b.text) for b in blocks] == [
+        (1, "paragraph", "Hello world"),
+        (2, "paragraph", "Second line"),
+        (3, "paragraph", "Third line"),
+    ]
+    for block in blocks:
+        assert block.text_sha256 == hashlib.sha256(block.text.encode("utf-8")).hexdigest()
+        locator = block.locator
+        assert locator["type"] == "pdf_page"
+        assert locator["page_number"] == 1
+        assert locator["line_index"] == block.ordinal
+        assert locator["page_width"] == 612.0
+        assert locator["page_height"] == 792.0
+        x0, top, x1, bottom = locator["bbox"]
+        assert 0.0 <= x0 <= x1 <= 612.0
+        assert 0.0 <= top <= bottom <= 792.0
+
+
+async def test_pdf_replay_reuses_same_snapshot(env) -> None:
+    source_id, _, _ = await _seed_pdf_source(env)
+    service = _service(env)
+
+    first = await service.parse_source(source_id)
+    assert first.replayed is False
+    second = await service.parse_source(source_id)
+    assert second.replayed is True
+    assert second.parsed_source_id == first.parsed_source_id
+    assert second.parse_fingerprint == first.parse_fingerprint
+
+    parsed, blocks = await _counts(env)
+    assert parsed == 1
+    assert blocks == 3  # replay 不重复插 Blocks
+
+
+async def test_pdf_source_record_metadata_not_written_back(env) -> None:
+    source_id, _, _ = await _seed_pdf_source(env, pdf=single_page_pdf(title="PDF标题"))
+    await _service(env).parse_source(source_id)
+
+    source = await _get_source(env, source_id)
+    assert source is not None
+    assert source.title == _SOURCE_TITLE  # 不被 PDF metadata Title 覆盖
+    assert source.published_at == _PUBLISHED_AT
+
+
+async def test_html_and_pdf_produce_distinct_parser_snapshots(env) -> None:
+    """同公司两个 Source：HTML → html_dom v2，PDF → pdf_layout v1，独立快照。"""
+    html_source, _, _ = await _seed_html_source(env, source_url=_XINHUA_URL)
+    pdf_source, _, _ = await _seed_pdf_source(env, source_url=_XINHUA_URL_2)
+    service = _service(env)
+
+    html_result = await service.parse_source(html_source)
+    pdf_result = await service.parse_source(pdf_source)
+
+    assert html_result.parser_name == HTML_PARSER_NAME
+    assert html_result.parser_version == HTML_PARSER_VERSION
+    assert pdf_result.parser_name == PDF_PARSER_NAME
+    assert pdf_result.parser_version == PDF_PARSER_VERSION
+    assert html_result.parsed_source_id != pdf_result.parsed_source_id
+    assert html_result.parse_fingerprint != pdf_result.parse_fingerprint
+
+    parsed, blocks = await _counts(env)
+    assert parsed == 2
+    assert blocks == 4 + 3  # HTML 4 blocks + PDF 3 blocks
+
+
+async def test_pdf_encrypted_raises_encrypted_error(env) -> None:
+    source_id, _, _ = await _seed_pdf_source(env, pdf=encrypted_pdf())
+    with pytest.raises(PdfEncryptedError) as exc:
+        await _service(env).parse_source(source_id)
+    assert exc.value.code == "pdf_encrypted_error"
+
+
+async def test_pdf_malformed_raises_parse_error(env) -> None:
+    # magic 有效但结构损坏：put_pdf_stream 只校验 %PDF- 头，解析时失败。
+    malformed = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< >>\n%%EOF\n"
+    source_id, _, _ = await _seed_pdf_source(env, pdf=malformed)
+    from app.parsing.errors import PdfParseError
+
+    with pytest.raises(PdfParseError):
+        await _service(env).parse_source(source_id)

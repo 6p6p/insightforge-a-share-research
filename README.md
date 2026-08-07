@@ -2,7 +2,7 @@
 
 面向 A 股上市公司的证据驱动基本面研究与事实审核系统。
 
-> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）、阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）、阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）、阶段 2C.2B（原始响应捕获 + Snapshot Fingerprint + 事务化持久化）、阶段 2D.1（News Discovery 基础 + GDELT DOC 2.0 Discovery Provider，实现、自动化测试与 Docker 重建验收已完成、真实验收待环境，见下）、阶段 2D.2A（原始新闻来源核验 + Safe HTML 归档，实现、自动化测试、Docker 重建验收与受控 HTML 传输验收均已完成）与阶段 2E.1（确定性 HTML 解析 → ParsedSource / ParsedBlock 快照，实现与自动化测试已完成）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文（PDF 解析属 2E.2）、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
+> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）、阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）、阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）、阶段 2C.2B（原始响应捕获 + Snapshot Fingerprint + 事务化持久化）、阶段 2D.1（News Discovery 基础 + GDELT DOC 2.0 Discovery Provider，实现、自动化测试与 Docker 重建验收已完成、真实验收待环境，见下）、阶段 2D.2A（原始新闻来源核验 + Safe HTML 归档，实现、自动化测试、Docker 重建验收与受控 HTML 传输验收均已完成）、阶段 2E.1（确定性 HTML 解析 → ParsedSource / ParsedBlock 快照，实现与自动化测试已完成）与阶段 2E.2（确定性 PDF 解析 + 页面定位 → pdf_layout v1，实现与自动化测试已完成）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不做扫描件/OCR PDF 识别、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
 
 ## 目录职责
 
@@ -385,7 +385,20 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 - **安全边界**：HTML content API 对 text/html 保持 HTTP 415（存储型 XSS 防线）；**不新增 raw HTML endpoint**；解析只经 LocalRawArtifactStore 读归档字节、不启动浏览器；**不创建 DocumentChunk / EvidenceCard / Chroma / Embedding / Claim**。
 - **测试**：**40 项 HTML parser 单元测试 + 25 项 contracts/fingerprint 单元测试 + 12 项解析 Service 集成测试**（真实 PostgreSQL + 临时 RawStore，零网络）全部通过，覆盖 first parse / replay / fingerprint 确定性 / **不同 RawArtifact → 独立快照（RawArtifact 不可变，旧记录零 UPDATE）** / parser version 变化（v1→v2）→新快照、旧快照保留（v1 不修改不删除）/ 完整性损坏（block sha 篡改、block_count 不一致、存储 SHA 与登记不一致）→ integrity error 不自动修复 / 并发单快照 / ordinal 稳定 / 非 HTML 拒绝 / Source 不存在 / SourceRecord 元数据不被回写 / **published_at 只认 publication 元数据（普通 time 忽略、updated 不冒充）** / **charset 只认真实 meta 声明（stdlib HTMLParser attribute 扫描；description content 里的 charset= 不产生声明；http-equiv 大小写不敏感；body/script 文本 charset= 不影响判定）**；ruff 零告警，`pip check` 通过。
 - **决策记录**：[docs/decisions/0016-deterministic-html-parsing.md](docs/decisions/0016-deterministic-html-parsing.md)。
-- **后续**：2E.2 = 确定性 PDF 解析 + page location；2E.3 = Stage-2 source pipeline E2E acceptance；Stage 3 才开始 DocumentChunk / Embedding / Chroma / EvidenceCard。
+- **后续**：2E.2 已完成（确定性 PDF 解析，见下节）；2E.3 = Stage-2 source pipeline E2E acceptance；Stage 3 才开始 DocumentChunk / Embedding / Chroma / EvidenceCard。
+
+## 确定性 PDF 解析（阶段 2E.2）
+
+阶段 2E.2 把已归档的 application/pdf SourceRecord（如公告、研报 PDF）**确定性解析为可定位结构化文本快照**，复用 2E.1 的 ParsedDocument / ParsedBlock / parse_fingerprint / Repository / replay / integrity / concurrency 全链路，不建任何新表。**状态（2026-08-07）：implementation = completed / automated_tests = completed / docker rebuild acceptance = completed / live acceptance = not required（本阶段纯本地确定性解析，无真实网络依赖）**。
+
+- **`pdf_layout` parser（VERSION=1，pdfplumber 0.11.x 是 2E.2 唯一新增依赖）**：只读 bytes（内部 `BytesIO`），**不联网、不修改 PDF、不写临时外部文件**；**仅支持 machine-generated PDF**，整个 PDF 无任何可提取文本 → `PdfTextUnavailable`（OCR 留未来），单页无文字不失败。
+- **确定性提取**：每页 `page.dedupe_chars()`（去重叠重复字符）→ `extract_words(use_text_flow=False, keep_blank_chars=False, expand_ligatures=True, 固定 x/y tolerance)`（不用 experimental API）；固定排序 page_number ASC → top ASC → x0 ASC；固定 y tolerance（3.0）聚合 words 为行，每行一个 block（`block_type=paragraph`，**不推断 heading/语义**）；空文本跳过；跨页相邻相同行去重（保持契约不变量）。
+- **Locator**：每块携带 `{"type":"pdf_page","page_number","line_index","bbox":[x0,top,x1,bottom],"page_width","page_height"}`，page_number/line_index 1-based（line_index 每页重置），bbox 用 pdfplumber top-left 语义、全 float `round(...,3)`、必须在 page bounds 内；同一 PDF + parser version → locator 完全稳定。
+- **metadata**：`extracted_title` = PDF metadata `Title` normalize 后非空否则 None；`extracted_published_at` **恒为 None**（绝不使用 CreationDate/ModDate/SourceRecord.published_at）。
+- **安全边界**：PDF magic 必须有效（`%PDF-`）；encrypted / password-protected → `PdfEncryptedError`；page_count ∈ 1..1000、提取字符总量 ≤ 5,000,000，超限 → `PdfResourceLimitError`；非加密但损坏 → `PdfParseError`。
+- **`SourceParsingService` 泛化为 dispatcher**：`text/html → html_dom v2`、`application/pdf → pdf_layout v1`，其他 media type → `UnsupportedParseMediaType`；复用同一 ParsedSource/ParsedSourceBlock 持久化、replay、integrity、并发单快照逻辑；**不改 schema（Alembic 保持 0013 head）**；SourceRecord 元数据不被回写。
+- **测试**：**27 项 PDF parser 单元测试 + 新增 PDF contracts/fingerprint 单元测试 + 6 项解析 Service 集成测试**（真实 PostgreSQL + 临时 RawStore，零网络；PDF bytes 由纯 stdlib 手写 fixture 确定性构造，不引入 PDF 生成运行时依赖），覆盖 first parse / replay / HTML vs PDF 独立快照 / page/line 1-based 与每页重置 / bbox bounds 与 float rounding / 重复字符 dedupe / 中文提取 / 空页允许 / 整篇无文本 → PdfTextUnavailable / magic 与 malformed → PdfParseError / encrypted → PdfEncryptedError / 页数与字符超限 → PdfResourceLimitError / 跨页相邻重复行去重 / metadata Title normalize / published_at 恒 None / 确定性多遍一致 / SourceRecord 元数据不被回写 / 并发单快照 / 非受支持 media type 拒绝。
+- **决策记录**：[docs/decisions/0017-deterministic-pdf-parsing.md](docs/decisions/0017-deterministic-pdf-parsing.md)。
 
 ## 完整系统（Docker Compose）
 

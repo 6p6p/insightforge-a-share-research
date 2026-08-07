@@ -1,11 +1,13 @@
-"""Deterministic parsing contracts (stage 2E.1).
+"""Deterministic parsing contracts (stage 2E.1 / 2E.2).
 
-ParsedBlock / ParsedDocument 是 HTML Parser 的确定性输出契约：
+ParsedBlock / ParsedDocument 是确定性 Parser（html_dom v2 / pdf_layout v1）
+的统一输出契约：
 
 - ParsedDocument 是"某一 SourceRecord + 特定 parser 版本下的解析快照"
   （不含 DB ID、不含 parsed_at/created_at），后续由 SourceParsingService
   计算 parse_fingerprint 并落库；
-- ParsedBlock 带 locator（DOM 级定位），供后续 Evidence 原文核对。
+- ParsedBlock 带 locator（html_dom：DOM 级定位；pdf_page：页面坐标定位），
+  供后续 Evidence 原文核对。
 
 ParsedSource 是 SourceRecord 的确定性解析快照，不是 Chunk，也不是 Evidence。
 """
@@ -26,8 +28,35 @@ HTML_PARSER_NAME = "html_dom"
 # 新 fingerprint → 新快照，旧快照保留（可追溯）。
 HTML_PARSER_VERSION = 2
 
-_LOCATOR_TYPE = "html_dom"
-_LOCATOR_KEYS = {"type", "ordinal", "tag", "xpath", "element_id"}
+PDF_PARSER_NAME = "pdf_layout"
+# v1：2E.2 首版。PDF 无确定性页面语义变更时不需 bump；变更提取/排序/聚合
+# 语义时递增（同 source + 同 raw + 新 version → 新 fingerprint → 新快照）。
+PDF_PARSER_VERSION = 1
+
+# 已知 locator type → 必须精确匹配的字段集合（含 "type" 本身）。
+_LOCATOR_SPECS: dict[str, set[str]] = {
+    "html_dom": {"type", "ordinal", "tag", "xpath", "element_id"},
+    "pdf_page": {
+        "type",
+        "page_number",
+        "line_index",
+        "bbox",
+        "page_width",
+        "page_height",
+    },
+}
+
+
+def _parser_specs() -> dict[str, int]:
+    """已注册 parser：parser_name → 当前 parser_version。
+
+    动态读取当前常量（而非 import 时冻结），使测试可通过 monkeypatch 版本号
+    模拟旧 parser（version bump 场景：旧快照不修改不删除，新版本新快照）。
+    """
+    return {
+        HTML_PARSER_NAME: HTML_PARSER_VERSION,
+        PDF_PARSER_NAME: PDF_PARSER_VERSION,
+    }
 
 
 class ParsingContractViolation(ParsingError):
@@ -48,8 +77,11 @@ def _normalized(text: str) -> bool:
 class ParsedBlock:
     """一段可定位的结构化文本（确定性、不可变）。
 
-    locator 是 DOM 级定位（type/ordinal/tag/xpath/element_id），同一
-    raw bytes + parser version 下完全稳定；不含绝对路径 / 浏览器坐标。
+    locator 按 type 区分：
+    - html_dom：{"type","ordinal","tag","xpath","element_id"}（DOM 级定位）；
+    - pdf_page：{"type","page_number","line_index","bbox","page_width",
+      "page_height"}（页面坐标定位，bbox=[x0,top,x1,bottom]）。
+    同一 raw bytes + parser version 下完全稳定；不含绝对路径。
     """
 
     ordinal: int
@@ -75,10 +107,18 @@ class ParsedBlock:
             raise ParsingContractViolation("text_sha256 必须等于 text 的 SHA-256")
         if not isinstance(self.locator, dict):
             raise ParsingContractViolation("locator 必须是 dict")
-        if set(self.locator) != _LOCATOR_KEYS:
-            raise ParsingContractViolation("locator 字段必须精确匹配五键")
-        if self.locator.get("type") != _LOCATOR_TYPE:
-            raise ParsingContractViolation("locator.type 必须是 html_dom")
+        locator_type = self.locator.get("type")
+        expected_keys = _LOCATOR_SPECS.get(locator_type)
+        if expected_keys is None:
+            raise ParsingContractViolation("locator.type 必须匹配已知定位类型")
+        if set(self.locator) != expected_keys:
+            raise ParsingContractViolation("locator 字段必须精确匹配")
+        if locator_type == "html_dom":
+            self._validate_html_locator()
+        else:
+            self._validate_pdf_locator()
+
+    def _validate_html_locator(self) -> None:
         if self.locator.get("ordinal") != self.ordinal:
             raise ParsingContractViolation("locator.ordinal 必须等于 block.ordinal")
         tag = self.locator.get("tag")
@@ -90,6 +130,29 @@ class ParsedBlock:
             raise ParsingContractViolation("locator.xpath 必须是绝对 xpath")
         if element_id is not None and not isinstance(element_id, str):
             raise ParsingContractViolation("locator.element_id 必须是字符串或 None")
+
+    def _validate_pdf_locator(self) -> None:
+        page_number = self.locator.get("page_number")
+        line_index = self.locator.get("line_index")
+        bbox = self.locator.get("bbox")
+        page_width = self.locator.get("page_width")
+        page_height = self.locator.get("page_height")
+        for name, value in (("page_number", page_number), ("line_index", line_index)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ParsingContractViolation(f"locator.{name} 必须是 >= 1 的 int")
+        for name, value in (("page_width", page_width), ("page_height", page_height)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ParsingContractViolation(f"locator.{name} 必须是正数")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            raise ParsingContractViolation("locator.bbox 必须是 [x0, top, x1, bottom]")
+        for value in bbox:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ParsingContractViolation("locator.bbox 分量必须是数字")
+        x0, top, x1, bottom = bbox
+        if not (0.0 <= x0 <= x1 <= float(page_width)):
+            raise ParsingContractViolation("locator.bbox 必须在 page 宽度范围内")
+        if not (0.0 <= top <= bottom <= float(page_height)):
+            raise ParsingContractViolation("locator.bbox 必须在 page 高度范围内")
 
 
 @dataclass(frozen=True)
@@ -104,10 +167,8 @@ class ParsedDocument:
     blocks: tuple[ParsedBlock, ...]
 
     def __post_init__(self) -> None:
-        if self.parser_name != HTML_PARSER_NAME:
-            raise ParsingContractViolation("parser_name 必须匹配 HTML_PARSER_NAME")
-        if self.parser_version != HTML_PARSER_VERSION:
-            raise ParsingContractViolation("parser_version 必须匹配 HTML_PARSER_VERSION")
+        if _parser_specs().get(self.parser_name) != self.parser_version:
+            raise ParsingContractViolation("parser_name/version 必须匹配已注册的解析器")
         if not isinstance(self.raw_content_sha256, str) or len(self.raw_content_sha256) != 64:
             raise ParsingContractViolation("raw_content_sha256 必须是 64 位 hex")
         if self.extracted_title is not None:
