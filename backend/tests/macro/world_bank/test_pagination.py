@@ -106,6 +106,9 @@ async def test_page_request_order_ascending(world_bank_provider):
 
 
 async def test_pages_exceed_max(world_bank_provider):
+    # pages=21 > MAX_OBSERVATION_PAGES=18：第一页即拒绝，不再请求后续页。
+    requested: list[int] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/v2/indicator/SP.POP.TOTL":
@@ -114,14 +117,66 @@ async def test_pages_exceed_max(world_bank_provider):
             return json_response(country_response())
         if "/v2/country/CHN/indicator/" in path:
             page = int(request.url.params["page"])
+            requested.append(page)
             return json_response(
                 observations_response(page=page, pages=21, per_page=1000, total=21000, rows=[])
             )
         raise AssertionError(f"unexpected path {path}")
 
     provider, _factory = world_bank_provider(transport=httpx.MockTransport(handler))
-    with pytest.raises(WorldBankMalformedResponse):
+    with pytest.raises(WorldBankRequestLimitExceeded):
         await provider.fetch(QUERY)
+    assert requested == [1]  # 不继续请求下一页
+
+
+async def test_pages_exceed_max_rejected_first_page(world_bank_provider):
+    # 边界：pages=19 > 18，总请求只到 3（2 元数据 + 首页观测），不超过 20。
+    requested: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v2/indicator/SP.POP.TOTL":
+            return json_response(indicator_response())
+        if path == "/v2/country/CHN":
+            return json_response(country_response())
+        if "/v2/country/CHN/indicator/" in path:
+            page = int(request.url.params["page"])
+            requested.append(page)
+            return json_response(
+                observations_response(page=page, pages=19, per_page=1000, total=19000, rows=[])
+            )
+        raise AssertionError(f"unexpected path {path}")
+
+    provider, _factory = world_bank_provider(transport=httpx.MockTransport(handler))
+    with pytest.raises(WorldBankRequestLimitExceeded) as exc:
+        await provider.fetch(QUERY)
+    assert exc.value.code == "request_limit_exceeded"
+    assert requested == [1]
+
+
+async def test_pages_at_max_completes_within_budget(world_bank_provider):
+    # pages=18：2 + 18 == 20 == REQUEST_LIMIT，恰好完成，总请求不超过 20。
+    requested: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v2/indicator/SP.POP.TOTL":
+            return json_response(indicator_response())
+        if path == "/v2/country/CHN":
+            return json_response(country_response())
+        if "/v2/country/CHN/indicator/" in path:
+            page = int(request.url.params["page"])
+            requested.append(page)
+            return json_response(
+                observations_response(page=page, pages=18, per_page=1000, total=18000, rows=[])
+            )
+        raise AssertionError(f"unexpected path {path}")
+
+    provider, _factory = world_bank_provider(transport=httpx.MockTransport(handler))
+    result = await provider.fetch(QUERY)
+    assert requested == list(range(1, 19))
+    assert result.page_info.pages == 18
+    assert result.request_count == 20  # 2 元数据 + 18 观测页 == REQUEST_LIMIT
 
 
 async def test_response_page_mismatch(world_bank_provider):

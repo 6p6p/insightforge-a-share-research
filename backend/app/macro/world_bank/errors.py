@@ -17,6 +17,15 @@ class WorldBankProviderNotReady(WorldBankError):
     code = "provider_not_ready"
 
 
+class WorldBankGeographyNotCountry(WorldBankError):
+    """请求的 country 代码解析后不是单一国家/经济体（地区/收入组/贷款组聚合项）。
+
+    保守拒绝：region 缺失或无法确定时不得错误标记为 country。
+    """
+
+    code = "geography_not_country"
+
+
 class WorldBankRequestFailed(WorldBankError):
     """请求传输失败：超时、连接错误、重定向违规或重定向超限。"""
 

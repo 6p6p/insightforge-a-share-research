@@ -20,12 +20,14 @@ from app.macro.contracts import (
     MacroIndicator,
     MacroObservation,
     MacroPageInfo,
+    MacroPeriodSemantics,
     MacroQuery,
     MacroTopic,
 )
 from app.macro.world_bank.client import SOURCE_ID
 from app.macro.world_bank.errors import (
     WorldBankApiError,
+    WorldBankGeographyNotCountry,
     WorldBankMalformedResponse,
 )
 
@@ -33,11 +35,16 @@ _YEAR_RE = re.compile(r"^\d{4}$")
 
 
 def _coerce_int(value: object) -> int:
-    """page/pages/per_page/total：整数或数字字符串；其余拒绝。"""
+    """page/pages/per_page/total：整数、整值 Decimal 或数字字符串；其余拒绝。"""
     if isinstance(value, bool):
         raise WorldBankMalformedResponse("bool is not a valid page field")
     if isinstance(value, int):
         return value
+    if isinstance(value, Decimal):
+        integral = value.to_integral_value()
+        if value == integral:
+            return int(integral)
+        raise WorldBankMalformedResponse("non-integral page field")
     if isinstance(value, str) and value.strip() and value.strip().lstrip("-").isdigit():
         return int(value)
     raise WorldBankMalformedResponse("invalid page field")
@@ -128,6 +135,26 @@ def parse_indicator(
     )
 
 
+_AGGREGATE_REGION_VALUE = "aggregates"
+
+
+def _reject_aggregate_geography(region: object) -> None:
+    """确认目标是单一国家/经济体而非聚合项（地区/收入组/贷款组）。
+
+    - region 不是 object → 结构性 malformed；
+    - region.value 缺失/为空 → 保守拒绝（不得错误标记为 country）；
+    - region.value 规范化后等于 Aggregates → 拒绝；
+    - 不使用容易过期的全部聚合代码黑名单。
+    """
+    if not isinstance(region, dict):
+        raise WorldBankMalformedResponse("region must be an object")
+    value = region.get("value")
+    if not isinstance(value, str) or not value.strip():
+        raise WorldBankGeographyNotCountry("region value missing or empty")
+    if value.strip().lower() == _AGGREGATE_REGION_VALUE:
+        raise WorldBankGeographyNotCountry("aggregate geography")
+
+
 def parse_geography(raw: object, *, requested_code: str) -> MacroGeography:
     metadata, rows = split_response(raw)
     parse_page_info(metadata)
@@ -140,6 +167,7 @@ def parse_geography(raw: object, *, requested_code: str) -> MacroGeography:
     if not isinstance(country_id, str) or not country_id:
         raise WorldBankMalformedResponse("country id missing")
     region = row.get("region")
+    _reject_aggregate_geography(region)
     income = row.get("incomeLevel")
 
     def _name(value: object) -> str | None:
@@ -154,7 +182,7 @@ def parse_geography(raw: object, *, requested_code: str) -> MacroGeography:
         requested_code=requested_code,
         provider_country_id=country_id,
         iso2_code=str(row.get("iso2Code") or ""),
-        # World Bank 对真实国家，country id 即 ISO3（请求代码已排除聚合区域）。
+        # World Bank 对真实国家，country id 即 ISO3（聚合项已在上面拒绝）。
         iso3_code=country_id,
         name=str(row.get("name") or ""),
         region_name=_name(region),
@@ -238,9 +266,10 @@ def _parse_observation(
         external_indicator_id=query.indicator_code,
         geography_code=geography.iso3_code,
         period=date_str,
-        period_start=date(year, 1, 1),
+        normalized_period_start=date(year, 1, 1),
         frequency=MacroFrequency.ANNUAL,
         value=value,
         is_missing=is_missing,
+        period_semantics=MacroPeriodSemantics.PROVIDER_YEAR_LABEL,
         observation_status=obs_status,
     )

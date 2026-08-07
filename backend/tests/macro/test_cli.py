@@ -70,7 +70,8 @@ def test_decimal_serialized_as_string(capsys, monkeypatch, test_settings):
     payload = json.loads(capsys.readouterr().out)
     obs = payload["observations"][0]
     assert obs["period"] == "2020"
-    assert obs["period_start"] == "2020-01-01"
+    assert obs["normalized_period_start"] == "2020-01-01"
+    assert obs["period_semantics"] == "provider_year_label"
     assert isinstance(obs["value"], str)
     assert obs["decimal_scale"] == 0
 
@@ -93,6 +94,20 @@ def test_invalid_input_exit_2(capsys, test_settings):
     assert payload["error"] == "invalid_input"
 
 
+def test_top_level_source_id(capsys, monkeypatch, test_settings):
+    # §五：CLI 顶层 JSON 明确输出 source_id（固定 "2"）。
+    async def _fetch(query):
+        return sample_result()
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source_id"] == "2"
+    assert payload["provider_snapshot"]["source_id"] == "2"
+    assert payload["indicator"]["source_id"] == "2"
+
+
 def test_provider_not_ready_exit_3(capsys, monkeypatch, test_settings):
     async def _fetch(query):
         raise WorldBankProviderNotReady("provider not found in source registry")
@@ -113,6 +128,23 @@ def test_api_error_exit_4(capsys, monkeypatch, test_settings):
     assert code == 4
     payload = json.loads(capsys.readouterr().out)
     assert payload["error"] == "api_error"
+
+
+def test_request_failed_stable_message(capsys, monkeypatch, test_settings):
+    # 真实传输失败：stdout 只输出稳定非空错误，不输出 traceback / 底层细节。
+    from app.macro.world_bank.errors import WorldBankRequestFailed
+
+    async def _fetch(query):
+        raise WorldBankRequestFailed("World Bank API request failed")
+
+    _install_fake_provider(monkeypatch, _fetch, test_settings=test_settings)
+    code = cli._main(_ARGS)
+    assert code == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "request_failed"
+    assert payload["message"] == "World Bank API request failed"
+    assert "ConnectError" not in payload["message"]
+    assert "api.worldbank.org" not in payload["message"]
 
 
 def test_unexpected_error_exit_4(capsys, monkeypatch, test_settings):

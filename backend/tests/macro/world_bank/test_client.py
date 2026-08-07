@@ -257,8 +257,10 @@ async def test_read_timeout_maps_to_request_failed():
         raise httpx.ReadTimeout("timed out")
 
     client = _client(handler)
-    with pytest.raises(WorldBankRequestFailed):
+    with pytest.raises(WorldBankRequestFailed) as exc:
         await client.fetch_observations(QUERY, page=1)
+    # 稳定错误消息：不泄漏底层 hostname / query / TLS 细节。
+    assert str(exc.value) == "World Bank API request failed"
 
 
 async def test_connect_error_maps_to_request_failed():
@@ -266,8 +268,9 @@ async def test_connect_error_maps_to_request_failed():
         raise httpx.ConnectError("connection refused")
 
     client = _client(handler)
-    with pytest.raises(WorldBankRequestFailed):
+    with pytest.raises(WorldBankRequestFailed) as exc:
         await client.fetch_observations(QUERY, page=1)
+    assert str(exc.value) == "World Bank API request failed"
 
 
 async def test_json_numbers_parsed_as_decimal():
@@ -282,6 +285,19 @@ async def test_json_numbers_parsed_as_decimal():
     value = data[1][0]["value"]
     assert isinstance(value, Decimal)
     assert value == Decimal("123.45")
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+async def test_json_non_finite_literals_rejected(literal: str):
+    # parse_constant 显式拒绝 NaN / Infinity / -Infinity 字面量。
+    body = f'[{{"page":1,"pages":1,"per_page":50,"total":1}},[{{"value": {literal}}}]]'.encode()
+    client = _client(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "application/json"}
+        )
+    )
+    with pytest.raises(WorldBankInvalidJson):
+        await client.fetch_observations(QUERY, page=1)
 
 
 # --- security posture: no auth / cookies, trust_env false, request limit ---
@@ -334,6 +350,9 @@ class _RecordingLogger:
     def info(self, event: str, **kwargs: object) -> None:
         self.records.append((event, kwargs))
 
+    def error(self, event: str, **kwargs: object) -> None:
+        self.records.append((event, kwargs))
+
 
 async def test_log_redaction(monkeypatch):
     recorder = _RecordingLogger()
@@ -348,3 +367,60 @@ async def test_log_redaction(monkeypatch):
     assert kwargs["page"] == 1
     for key in ("url", "query", "body", "data"):
         assert key not in kwargs
+
+
+async def test_error_log_redaction(monkeypatch):
+    recorder = _RecordingLogger()
+    monkeypatch.setattr("app.macro.world_bank.client.get_logger", lambda name: recorder)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = _client(handler)
+    with pytest.raises(WorldBankRequestFailed):
+        await client.fetch_observations(QUERY, page=1)
+    assert recorder.records
+    event, kwargs = recorder.records[0]
+    assert event == "request_failed"
+    assert kwargs["error_type"] == "ConnectError"
+    assert kwargs["hostname"] == "api.worldbank.org"
+    assert kwargs["operation"] == "observations"
+    assert kwargs["page"] == 1
+    # 错误日志可含 error_type/operation/hostname，但不得含完整 URL / query。
+    for key in ("url", "query", "body"):
+        assert key not in kwargs
+
+
+async def test_client_construction_does_not_set_httpx_level(monkeypatch):
+    import logging
+
+    calls: list[tuple[str, int]] = []
+    original = logging.Logger.setLevel
+
+    def spy(self, level: int) -> None:
+        calls.append((self.name, level))
+        return original(self, level)
+
+    monkeypatch.setattr(logging.Logger, "setLevel", spy)
+    _client(_ok_router)
+    assert [name for name, _level in calls if name == "httpx"] == []
+
+
+async def test_configure_logging_sets_httpx_warning():
+    import logging
+
+    from app.core.logging import configure_logging
+
+    httpx_logger = logging.getLogger("httpx")
+    root = logging.getLogger()
+    previous_level = httpx_logger.level
+    previous_root_level = root.level
+    previous_handlers = list(root.handlers)
+    try:
+        configure_logging()
+        assert httpx_logger.level >= logging.WARNING
+    finally:
+        httpx_logger.setLevel(previous_level)
+        root.setLevel(previous_root_level)
+        root.handlers.clear()
+        root.handlers.extend(previous_handlers)

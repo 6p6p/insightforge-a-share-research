@@ -14,7 +14,6 @@
 """
 
 import json
-import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -39,6 +38,8 @@ API_BASE = "https://api.worldbank.org/v2"
 SOURCE_ID = "2"
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MiB
 REQUEST_LIMIT = 20  # 单次 MacroQuery 总请求上限
+METADATA_REQUEST_COUNT = 2  # indicator + country 元数据请求数
+MAX_OBSERVATION_PAGES = 18  # 观测分页上限：2 + 18 == REQUEST_LIMIT
 PER_PAGE = 1000
 _MAX_REDIRECTS = 3
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
@@ -99,8 +100,8 @@ class WorldBankClient:
         timeout: httpx.Timeout | None = None,
         request_limit: int = REQUEST_LIMIT,
     ) -> None:
-        # httpx 默认在 INFO 级记录完整请求 URL（含 query），与脱敏约束冲突；静默之。
-        logging.getLogger("httpx").setLevel(logging.WARNING)
+        # 注意：不在此处修改全局 logging state；httpx logger 的等级由
+        # app/core/logging.py 的 configure_logging 统一初始化。
         self._allowed_domains = list(allowed_domains)
         self._transport = transport
         self._timeout = timeout or _TIMEOUT
@@ -180,7 +181,18 @@ class WorldBankClient:
                         self._validate_content_type(response.headers.get("content-type"))
                         return self._parse_json(body, duration_ms)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise WorldBankRequestFailed(str(exc)) from exc
+            # 稳定错误消息：不把底层 ConnectError / hostname / query / TLS 细节泄漏给用户。
+            # 结构化日志走 stderr，只记录 error_type / operation / hostname / page。
+            hostname = httpx.URL(current).host or ""
+            get_logger("app.macro.world_bank").error(
+                "request_failed",
+                provider_key="world_bank",
+                hostname=hostname,
+                operation=operation,
+                page=page,
+                error_type=type(exc).__name__,
+            )
+            raise WorldBankRequestFailed("World Bank API request failed") from exc
 
     @staticmethod
     def _validate_content_type(content_type: str | None) -> None:
@@ -203,10 +215,20 @@ class WorldBankClient:
         return b"".join(chunks)
 
     @staticmethod
+    def _reject_constant(token: str) -> Decimal:
+        """拒绝 JSON 的 NaN / Infinity / -Infinity 字面量。"""
+        raise WorldBankInvalidJson(f"non-finite literal {token!r}")
+
+    @staticmethod
     def _parse_json(body: bytes, duration_ms: int) -> object:
         try:
-            # parse_float=Decimal：JSON number 直接构造 Decimal，禁止先转 float。
-            return json.loads(body.decode("utf-8-sig"), parse_float=Decimal)
+            # parse_float=Decimal：JSON number 直接构造 Decimal，禁止先转 float；
+            # parse_constant 显式拒绝 NaN / Infinity / -Infinity 字面量。
+            return json.loads(
+                body.decode("utf-8-sig"),
+                parse_float=Decimal,
+                parse_constant=WorldBankClient._reject_constant,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise WorldBankInvalidJson(f"invalid json after {duration_ms}ms") from exc
 

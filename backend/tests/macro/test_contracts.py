@@ -18,6 +18,7 @@ from app.macro.contracts import (
     MacroIndicator,
     MacroObservation,
     MacroPageInfo,
+    MacroPeriodSemantics,
     MacroQuery,
     current_macro_year,
     decimal_scale_of,
@@ -115,7 +116,7 @@ def _obs(period: str = "2020", value: Decimal | None = None, is_missing: bool | 
         external_indicator_id="SP.POP.TOTL",
         geography_code="CHN",
         period=period,
-        period_start=date(int(period), 1, 1),
+        normalized_period_start=date(int(period), 1, 1),
         frequency=MacroFrequency.ANNUAL,
         value=value,
         is_missing=is_missing,
@@ -153,18 +154,43 @@ def test_period_must_be_4_digit_year():
         _obs(period="abcd")
 
 
-def test_period_start_must_be_jan_1():
+def test_normalized_period_start_must_be_jan_1():
     with pytest.raises(ValueError):
         MacroObservation(
             provider_key="world_bank",
             external_indicator_id="SP.POP.TOTL",
             geography_code="CHN",
             period="2020",
-            period_start=date(2020, 7, 1),
+            normalized_period_start=date(2020, 7, 1),
             frequency=MacroFrequency.ANNUAL,
             value=None,
             is_missing=True,
         )
+
+
+def test_period_semantics_defaults_to_provider_year_label():
+    obs = _obs()
+    assert obs.period_semantics is MacroPeriodSemantics.PROVIDER_YEAR_LABEL
+    assert obs.normalized_period_start == date(2020, 1, 1)
+
+
+def test_period_semantics_rejects_other_values():
+    with pytest.raises(ValueError):
+        MacroObservation(
+            provider_key="world_bank",
+            external_indicator_id="SP.POP.TOTL",
+            geography_code="CHN",
+            period="2020",
+            normalized_period_start=date(2020, 1, 1),
+            frequency=MacroFrequency.ANNUAL,
+            value=None,
+            is_missing=True,
+            period_semantics="custom_semantics",  # type: ignore[arg-type]
+        )
+
+
+def test_period_semantics_enum_value():
+    assert MacroPeriodSemantics.PROVIDER_YEAR_LABEL.value == "provider_year_label"
 
 
 def test_decimal_scale():
@@ -272,6 +298,18 @@ def test_fetch_result_default_source_id():
 def test_fetch_result_rejects_wrong_source_id():
     with pytest.raises(ValueError):
         _result([_obs()], source_id="1")
+
+
+def test_fetch_result_indicator_source_id_must_match():
+    mismatch = _indicator()
+    object.__setattr__(mismatch, "source_id", "11")
+    with pytest.raises(ValueError):
+        _result([_obs()], indicator=mismatch)
+
+
+def test_fetch_result_indicator_source_id_consistent():
+    result = _result([_obs()])
+    assert result.indicator.source_id == result.source_id == "2"
 
 
 def test_fetch_result_requires_official_api():

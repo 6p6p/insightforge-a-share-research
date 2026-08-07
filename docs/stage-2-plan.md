@@ -33,12 +33,15 @@
   - 宏观领域契约（`MacroQuery` / `MacroIndicator` / `MacroGeography` / `MacroObservation` / `MacroPageInfo` / `MacroFetchResult`）：只描述"获取结果"，不含 page/per_page/format/source 等 Provider 内部参数；country 规范化大写且拒绝 `ALL`；年份闭区间 1960—当前年、最多 60 年；`value=None ⇔ is_missing=True`，缺失值保留、不补齐缺失年份；value 只能由 Decimal 构造（`parse_float=Decimal`），`decimal_scale` 从 exponent 推导。
   - `WorldBankProvider` 从 Source Registry 读取快照（短 Session，网络 I/O 不持有 AsyncSession），校验 enabled / `macro_data` / `official_api` / 无 API Key；`MacroFetchResult` 携带 authority_tier、critical_claim_eligible、provider_capabilities，`acquisition_method` 固定 `official_api`。
   - 受控 `WorldBankClient`：仅 https、固定 `api.worldbank.org/v2` + `source=2`（World Development Indicators）、URL 仍通过 Registry allowlist（子域匹配）、`trust_env=False`、无 Cookie/Auth/Header、手动重定向（同 allowlist ≤3 次、跨域拒绝）、不重试、单响应流式上限 5 MiB、Content-Type 必须 JSON、日志只记录 hostname 不记录 query。
-  - 分页：`per_page=1000`、单查询 ≤20 请求、pages ≤20、响应 page 必须匹配请求 page、跨页去重与冲突检测；观测按年份升序。
-  - 稳定错误分类：provider_not_ready / request_failed / response_too_large / invalid_content_type / invalid_json / api_error / malformed_response / response_conflict / request_limit_exceeded。
+  - 分页：`per_page=1000`、请求预算 `METADATA_REQUEST_COUNT=2` + 观测分页 ≤ 20、观测分页上限 `MAX_OBSERVATION_PAGES=18`、响应 page 必须匹配请求 page、跨页去重与冲突检测；观测按 `normalized_period_start` 升序。
+  - 单一国家约束：country metadata 的 `region.value` 规范化后等于 `Aggregates` 或缺失/无法确定时保守拒绝为 `geography_not_country`（不维护聚合代码黑名单）；拒绝后不继续获取 observations。
+  - 年度时间语义：`period` 为 Provider 年份标签，`normalized_period_start=date(int(period),1,1)` 仅用于排序/索引/统一时间轴，不表示真实统计周期起始日；`period_semantics` 固定 `provider_year_label`。
+  - 稳定错误分类：provider_not_ready / geography_not_country / request_failed / response_too_large / invalid_content_type / invalid_json / api_error / malformed_response / response_conflict / request_limit_exceeded；传输失败 stdout 只输出稳定非空消息（不泄漏 hostname/IP/query/TLS 细节）。
   - 本阶段只支持 `annual` 频率与 `country` 地理类型；不支持 FRED、NBS、月度/季度、多国家。
   - 开发期 CLI `fetch_world_bank_macro` 输出 JSON 报告到 stdout（日志走 stderr，Decimal→字符串），退出码 0/2/3/4，不写数据库、不写文件。
   - 决策记录：[docs/decisions/0011-macro-provider-and-world-bank.md](decisions/0011-macro-provider-and-world-bank.md)。
-  - **受控真实验收（§十一）待网络环境**：本机网络对 `worldbank.org` 域名级阻断（DNS 劫持到 28.0.0.x、TLS 握手被丢弃、`--resolve` 直连真实 IP 仍失败），CLI 按规范命令运行返回 `request_failed`（exit 4）；DB 前置条件已满足（`source_providers.world_bank` 已登记）。验收命令与断言不变量见 ADR-0011，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 视为"当前进行"。
+  - **2C.1.1 收口（2026-08-07）**：单一国家约束（`geography_not_country`）、年度时间语义（`normalized_period_start` + `period_semantics`）、请求预算（2+N≤20、N≤18）、`source_id` 契约、严格 JSON/数字解析（拒绝 bool/NaN/Infinity）、移除 Client 构造的全局日志副作用、稳定错误消息均已冻结并通过测试。
+  - **受控真实验收（§十一）待网络环境**：本机网络对 `worldbank.org` 域名级阻断（DNS 劫持到 28.0.0.x、TLS 握手被丢弃、`--resolve` 直连真实 IP 仍失败），CLI 按规范命令运行返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误）；DB 前置条件已满足（`source_providers.world_bank` 已登记）。验收命令与断言不变量见 ADR-0011，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 视为"当前进行"，2C.2 不开始。
 - **2C.2（尚未开始）**：宏观数据持久化、Provider 快照、原始 JSON 归档。
 - **2C.3（尚未开始）**：FRED Provider。
 - **2C.4（尚未开始）**：国内官方宏观数据接入（NBS 等）。

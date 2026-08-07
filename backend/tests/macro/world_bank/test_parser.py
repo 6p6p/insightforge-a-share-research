@@ -4,8 +4,18 @@ from decimal import Decimal
 
 import pytest
 
-from app.macro.contracts import MacroGeography, MacroGeographyType, MacroIndicator, MacroPageInfo
-from app.macro.world_bank.errors import WorldBankApiError, WorldBankMalformedResponse
+from app.macro.contracts import (
+    MacroGeography,
+    MacroGeographyType,
+    MacroIndicator,
+    MacroPageInfo,
+    MacroPeriodSemantics,
+)
+from app.macro.world_bank.errors import (
+    WorldBankApiError,
+    WorldBankGeographyNotCountry,
+    WorldBankMalformedResponse,
+)
 from app.macro.world_bank.parser import (
     parse_geography,
     parse_indicator,
@@ -94,6 +104,7 @@ def test_parse_page_info_last_updated():
         {"page": 1, "pages": 1, "per_page": 50, "total": -1},
         {"page": "abc", "pages": 1, "per_page": 50, "total": 0},
         {"page": True, "pages": 1, "per_page": 50, "total": 0},
+        {"page": 1, "pages": 1, "per_page": 50, "total": False},
     ],
 )
 def test_parse_page_info_invalid(metadata: dict):
@@ -163,6 +174,51 @@ def test_parse_geography_no_rows():
         parse_geography(raw, requested_code="CHN")
 
 
+def _aggregate_response(country_id: str, *, region: object) -> list:
+    row = {
+        "id": country_id,
+        "iso2Code": "CN",
+        "name": "Aggregate",
+        "region": region,
+        "incomeLevel": {"id": "", "value": ""},
+    }
+    return [page_header(total=1), [row]]
+
+
+@pytest.mark.parametrize("country_id", ["WLD", "LCN", "HIC"])
+def test_aggregate_geographies_rejected(country_id: str):
+    # 地区 / 收入组 / 贷款组：region.value == "Aggregates" → geography_not_country。
+    raw = _aggregate_response(
+        country_id,
+        region={"id": "NA", "value": "Aggregates"},
+    )
+    with pytest.raises(WorldBankGeographyNotCountry):
+        parse_geography(raw, requested_code=country_id)
+
+
+def test_aggregate_region_value_case_insensitive():
+    raw = _aggregate_response("WLD", region={"id": "NA", "value": "aggregates"})
+    with pytest.raises(WorldBankGeographyNotCountry):
+        parse_geography(raw, requested_code="WLD")
+
+
+def test_aggregate_region_value_empty_rejected():
+    # region 存在但 value 缺失/空：保守拒绝，不得错误标记为 country。
+    raw = _aggregate_response("WLD", region={"id": "NA", "value": ""})
+    with pytest.raises(WorldBankGeographyNotCountry):
+        parse_geography(raw, requested_code="WLD")
+    raw_missing = _aggregate_response("WLD", region={})
+    with pytest.raises(WorldBankGeographyNotCountry):
+        parse_geography(raw_missing, requested_code="WLD")
+
+
+def test_aggregate_region_missing_is_malformed():
+    # region 字段缺失/非 object：结构性 malformed response。
+    raw = _aggregate_response("WLD", region=None)
+    with pytest.raises(WorldBankMalformedResponse):
+        parse_geography(raw, requested_code="WLD")
+
+
 # --- parse_observations: value semantics ---
 
 
@@ -201,7 +257,8 @@ def test_parse_null_value_is_missing():
     assert obs[0].is_missing is True
     assert obs[0].decimal_scale is None
     assert obs[0].period == "2020"
-    assert obs[0].period_start.isoformat() == "2020-01-01"
+    assert obs[0].normalized_period_start.isoformat() == "2020-01-01"
+    assert obs[0].period_semantics is MacroPeriodSemantics.PROVIDER_YEAR_LABEL
     assert obs[0].frequency.value == "annual"
 
 

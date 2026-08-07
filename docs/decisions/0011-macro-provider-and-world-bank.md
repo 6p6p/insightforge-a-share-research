@@ -17,17 +17,17 @@
 3. **MacroDataProvider 契约只描述"获取结果"**。
    - `MacroQuery`（provider_key / indicator_code / country_code / start_year / end_year）描述一次查询；`MacroIndicator`、`MacroGeography` 为元数据；`MacroObservation` 为单条年度观测；`MacroPageInfo` 为分页；`MacroFetchResult` 为完整获取快照；
    - 契约不含 page/per_page/format/source 等 Provider 内部参数，天然禁止调用方控制请求细节；
-   - 契约校验强制：country 规范化大写且拒绝 `ALL`（本阶段只支持单一国家）；年份闭区间 1960—当前年、最多 60 年；period 固定四位年份、period_start 固定该年 1 月 1 日；value 只能由 Decimal 构造、`value=None ⇔ is_missing=True`。
+   - 契约校验强制：country 规范化大写且拒绝 `ALL`（本阶段只支持单一国家）；年份闭区间 1960—当前年、最多 60 年；period 固定四位年份、`normalized_period_start` 固定该年 1 月 1 日（**只用于排序/索引/统一时间轴，不表示 Provider 真实统计周期起始日**）、`period_semantics` 固定 `provider_year_label`；value 只能由 Decimal 构造、`value=None ⇔ is_missing=True`。
 4. **World Bank 作为第一个 Macro Provider**。
-   - 提供免费、无需认证、无频控的官方 Indicators API V2，适合验证"官方 API → 契约"的最小通路；
+   - 官方公开访问、当前不需要 API Key 或其他认证，适合验证"官方 API → 契约"的最小通路；**不假设不存在限流**，InsightForge 主动执行请求数上限且不自动重试；
    - `WorldBankProvider` 从 Source Registry 读取快照（authority_tier / critical_claim_eligible / provider_capabilities / allowed_domains），acquisition_method 固定 `official_api`；
-   - 只支持 `annual` 频率与 `country` 地理类型；不支持地区聚合、收入组或世界总量。
+   - 只支持 `annual` 频率与 `country` 地理类型；不支持地区聚合、收入组或世界总量——World Bank 允许 WLD/LCN/HIC 等聚合代码出现在 country 路径，解析 country metadata 时若 `region.value` 规范化后等于 `Aggregates` 或缺失/无法确定，保守拒绝为 `geography_not_country`，不使用容易过期的聚合代码黑名单。
 5. **固定 Indicators API V2（`api.worldbank.org/v2`）**。
    - 官方公开、稳定、长期维护；V2 是当前主流版本，分页/过滤语义明确；
    - 不调用任何非官方镜像、导出或内部数据服务接口。
 6. **固定 `source=2`（World Development Indicators）**。
    - WDI 是 World Bank 标准指标库，SP.POP.TOTL 等核心人口/经济指标均在此源下；
-   - `MacroFetchResult.source_id` 当前固定为 `"2"`，保证结果来源可追溯且单一。
+   - `MacroFetchResult.source_id` 与 `MacroIndicator.source_id` 当前固定为 `"2"` 且必须一致（不一致拒绝构造）；解析 indicator 元数据时若响应 `source.id != "2"` 报 `malformed_response`；CLI 顶层 JSON 明确输出 `source_id`；阶段 2C.2 用该字段建立数据集来源快照。
 7. **不允许调用方传任意 endpoint / query 参数**。
    - 客户端只暴露 `fetch_indicator_metadata` / `fetch_country_metadata` / `fetch_observations` 三个固定模板（URL 在代码内部构造），不接受任意 endpoint、任意 query；
    - format/source/date/page/per_page 全部由客户端固定，调用方无法通过 MacroQuery 之外的方式控制请求；
@@ -44,10 +44,10 @@
     - 只返回 Provider 实际给出的观测；对缺失年份不插值、不生成占位记录；
     - 补齐年份会在时间轴与原始来源之间引入推断信息，破坏证据可追溯性。
 11. **分页与请求上限**。
-    - 单次 MacroQuery 总请求 ≤ `REQUEST_LIMIT=20`（超出报 `request_limit_exceeded`）；
-    - `per_page=1000` 从 page=1 开始分页；响应 page 必须匹配请求 page；pages 不能跨请求增长/缩小；pages 上限 `MAX_PAGES=20`；
+    - 单次 MacroQuery 请求预算：`METADATA_REQUEST_COUNT=2`（indicator + country 元数据）+ 观测分页 `N`，`2 + N ≤ REQUEST_LIMIT=20` 且 `N ≤ MAX_OBSERVATION_PAGES=18`；第一页 `pages > 18` 立即报 `request_limit_exceeded`，不继续请求下一页；
+    - `per_page=1000` 从 page=1 开始分页；响应 page 必须匹配请求 page；pages 不能跨请求增长/缩小；
     - 跨页合并按 `(value, is_missing, observation_status)` 去重，同 period 冲突报 `response_conflict`；
-    - 保留首页 page_info（含 Provider total），合并结果按 period_start 升序稳定排序。
+    - 保留首页 page_info（含 Provider total），合并结果按 `normalized_period_start` 升序稳定排序。
 12. **Provider 策略快照**。
     - 第一次短 Session 只读 Source Registry 中 `world_bank` 配置并立即关闭；网络 I/O 期间不持有 AsyncSession；
     - 快照校验：Provider 存在、enabled、含 `macro_data` 能力、含 `official_api` 获取方式、不要求 API Key；任一不满足报 `provider_not_ready`；
@@ -57,8 +57,9 @@
     - 仅 https；host 固定 `api.worldbank.org`，且 URL 仍必须通过 Source Registry `is_url_allowed` allowlist 校验（子域匹配 `worldbank.org`）；
     - 固定 v2 + source=2；`trust_env=False`；不发送 Cookie / Authorization / API Key；不接受用户 Header；`follow_redirects=False`，同 allowlist 重定向最多 3 次、跨 allowlist 拒绝、循环拒绝；
     - 不自动重试；connect/read/write/pool 超时明确设置；单响应正文流式读取上限 5 MiB；Content-Type 必须为 `application/json`；
-    - 日志只记录 provider_key、hostname、status、duration_ms、operation、page，不记录完整 URL query 与响应正文；
-    - 错误分类稳定：`provider_not_ready` / `request_failed` / `response_too_large` / `invalid_content_type` / `invalid_json` / `api_error` / `malformed_response` / `response_conflict` / `request_limit_exceeded`。
+    - 日志只记录 provider_key、hostname、status、duration_ms、operation、page，不记录完整 URL query 与响应正文；httpx logger 等级统一在 `app/core/logging.py` 的 `configure_logging` 初始化（WorldBankClient 构造不修改全局 logging state）；
+    - 传输失败输出稳定消息 `{"error":"request_failed","message":"World Bank API request failed"}`，stdout 不返回底层 ConnectError 文本 / hostname / IP / query / TLS 细节；stderr 结构化日志可记录 error_type / operation / hostname，不记录完整 URL；
+    - 错误分类稳定：`provider_not_ready` / `geography_not_country` / `request_failed` / `response_too_large` / `invalid_content_type` / `invalid_json` / `api_error` / `malformed_response` / `response_conflict` / `request_limit_exceeded`。
 14. **开发期 CLI `fetch_world_bank_macro`**。
     - 从 Source Registry 读取 world_bank 快照，输出 JSON 报告到 stdout（日志走 stderr）；Decimal → 字符串、date/datetime → ISO；
     - 不写数据库、不保存响应正文、不写本地文件；失败输出稳定 error code；退出码：0 成功 / 2 输入错误 / 3 Provider 配置错误 / 4 API/网络/响应错误。
@@ -77,6 +78,14 @@
 ## 后果
 
 - 建立独立的宏观数据领域契约与受控客户端，与公司披露来源（SourceRecord / RawArtifact）解耦。
-- 单元测试 146 项（contracts / parser / client / pagination / provider / CLI 六层），全部使用 MockTransport，共享顶层网络 Guard（真实 sync/async 外网仍被禁止）。
-- **受控真实验收（§十一，2026-08-07）在本环境无法成功执行**：按规范命令运行 CLI `fetch_world_bank_macro --country CHN --indicator SP.POP.TOTL --start-year 2020 --end-year 2024` 返回 `{"error":"request_failed"}`（exit 4）。DB 前置条件已满足（`source_providers.world_bank` 存在：enabled / authority_tier=1 / requires_api_key=false / allowed_domains=['worldbank.org']，只读验证），唯一受阻点是本机网络对 `worldbank.org` 的域名级出口阻断：DNS 被劫持到合成地址（28.0.0.x）、TLS 握手被丢弃（curl schannel、openssl read 0 bytes、`--resolve` 直连真实 Cloudflare IP 172.64.145.25 仍失败）、明文 HTTP 空回复。验收命令、断言不变量与脚本已记录，可在具备 World Bank 出网的环境补跑；在跑通前 2C.1 视为"当前进行"而非"已完成"。
+- 单元测试 171 项（contracts / parser / client / pagination / provider / CLI 六层），全部使用 MockTransport，共享顶层网络 Guard（真实 sync/async 外网仍被禁止）。
+- **受控真实验收（§十一，2026-08-07）在本环境无法成功执行**：按规范命令运行 CLI `fetch_world_bank_macro --country CHN --indicator SP.POP.TOTL --start-year 2020 --end-year 2024` 返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误、不泄漏底层细节）。DB 前置条件已满足（`source_providers.world_bank` 存在：enabled / authority_tier=1 / requires_api_key=false / allowed_domains=['worldbank.org']，只读验证），唯一受阻点是本机网络对 `worldbank.org` 的域名级出口阻断：DNS 被劫持到合成地址（28.0.0.x）、TLS 握手被丢弃（curl schannel、openssl read 0 bytes、`--resolve` 直连真实 Cloudflare IP 172.64.145.25 仍失败）、明文 HTTP 空回复。验收命令、断言不变量与脚本已记录，可在具备 World Bank 出网的环境补跑；在跑通前 2C.1 视为"当前进行"而非"已完成"。
+- **2C.1.1 收口澄清（2026-08-07）**：
+  1. 聚合代码拒绝：WLD/LCN/HIC 等（`region.value=Aggregates`）→ `geography_not_country`，拒绝后不再获取 observations；
+  2. `normalized_period_start=date(int(period),1,1)` 只是规范化日期，不表示真实统计周期起始日；
+  3. 请求预算：观测分页最多 18 页、总请求（2 元数据 + 分页）最多 20；
+  4. `MacroFetchResult.source_id` 固定 `"2"`，供 2C.2 建数据集来源快照；
+  5. 当前真实验收仍未完成（网络阻断）；
+  6. 阶段 2C.1 仍为"当前进行"；
+  7. 阶段 2C.2 不开始（不建表、不写宏观数据、不扩展 RawArtifact）。
 - 遗留边界：2C.1 不写数据库、不创建表/migration；宏观数据不是 Evidence；FRED、NBS、月度/季度频率、多国家查询均未实现。

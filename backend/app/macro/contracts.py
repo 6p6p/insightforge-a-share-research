@@ -42,7 +42,8 @@ _ERROR_MSG = {
     "year_order": "start_year 必须不晚于 end_year",
     "year_span": f"年份闭区间最多 {_MAX_YEAR_SPAN} 年",
     "period_format": "period 必须为四位年份",
-    "period_start": "period_start 必须为该年 1 月 1 日",
+    "normalized_period_start": "normalized_period_start 必须为该年 1 月 1 日",
+    "period_semantics": "period_semantics 当前必须为 provider_year_label",
     "frequency": "frequency 必须是 MacroFrequency",
     "decimal_only": "value 必须由 Decimal 构造，禁止 float",
     "value_not_finite": "value 必须是有限 Decimal",
@@ -50,6 +51,7 @@ _ERROR_MSG = {
     "request_count": "request_count 不能为负",
     "acquisition_method": "acquisition_method 必须为 official_api",
     "source_id": "source_id 当前必须固定为 WDI 数据源 '2'",
+    "indicator_source_consistency": "indicator.source_id 必须与 source_id 一致",
 }
 
 
@@ -70,6 +72,17 @@ class MacroFrequency(StrEnum):
     """宏观数据频率。当前只支持年度；月度/季度由后续 FRED 阶段显式演进。"""
 
     ANNUAL = "annual"
+
+
+class MacroPeriodSemantics(StrEnum):
+    """period 标签的语义。
+
+    当前只有 provider_year_label：period 是 Provider 给出的年份标签，
+    normalized_period_start 只是为排序/索引而规范化的 1 月 1 日，
+    不表示 Provider 真实的统计周期起始日（如财政年度被归入的自然年份）。
+    """
+
+    PROVIDER_YEAR_LABEL = "provider_year_label"
 
 
 class MacroGeographyType(StrEnum):
@@ -166,7 +179,10 @@ class MacroGeography:
 class MacroObservation:
     """一条年度观测值。
 
-    - period 必须为四位年份；period_start 固定为该年 1 月 1 日；
+    - period 必须为四位年份（Provider 的年份标签）；
+    - normalized_period_start 固定为 date(int(period), 1, 1)，只用于排序/索引与统一时间轴，
+      不表示 Provider 真实统计周期起始日；
+    - period_semantics 当前固定为 MacroPeriodSemantics.PROVIDER_YEAR_LABEL；
     - value 只能由 Decimal 构造；value=None 时 is_missing=true；
     - decimal_scale：value 为空时为空；否则记录 Decimal 原始小数位数（自动推导）；
     - observation_status 只保存 Provider 原始状态。
@@ -176,10 +192,11 @@ class MacroObservation:
     external_indicator_id: str
     geography_code: str
     period: str
-    period_start: date
+    normalized_period_start: date
     frequency: MacroFrequency
     value: Decimal | None
     is_missing: bool
+    period_semantics: MacroPeriodSemantics = MacroPeriodSemantics.PROVIDER_YEAR_LABEL
     observation_status: str | None = None
     decimal_scale: int | None = None
 
@@ -194,8 +211,12 @@ class MacroObservation:
             raise ValueError(_ERROR_MSG["period_format"])
         year = int(self.period)
         expected_start = date(year, 1, 1)
-        if not isinstance(self.period_start, date) or self.period_start != expected_start:
-            raise ValueError(_ERROR_MSG["period_start"])
+        if not isinstance(self.normalized_period_start, date) or (
+            self.normalized_period_start != expected_start
+        ):
+            raise ValueError(_ERROR_MSG["normalized_period_start"])
+        if self.period_semantics != MacroPeriodSemantics.PROVIDER_YEAR_LABEL:
+            raise ValueError(_ERROR_MSG["period_semantics"])
         if not isinstance(self.frequency, MacroFrequency):
             raise ValueError(_ERROR_MSG["frequency"])
         if self.value is None:
@@ -227,7 +248,7 @@ class MacroPageInfo:
 class MacroFetchResult:
     """一次完整获取结果。
 
-    - observations 按 period_start 升序稳定排序；
+    - observations 按 normalized_period_start 升序稳定排序；
     - 包含 Provider 返回的缺失值记录（不插值）；
     - request_count 统计本次查询的全部请求（指标元数据 + 国家元数据 + 全部分页）；
     - provider_capabilities 稳定排序；
@@ -261,8 +282,12 @@ class MacroFetchResult:
             raise ValueError("authority_tier 必须是 SourceAuthorityTier")
         if self.source_id != _WDI_SOURCE_ID:
             raise ValueError(_ERROR_MSG["source_id"])
-        # 按 period_start 升序稳定排序（同一 period 的多条记录保持原相对顺序）。
-        ordered = tuple(sorted(self.observations, key=lambda o: (o.period_start, o.period)))
+        if self.indicator.source_id != self.source_id:
+            raise ValueError(_ERROR_MSG["indicator_source_consistency"])
+        # 按 normalized_period_start 升序稳定排序（同一 period 的多条记录保持原相对顺序）。
+        ordered = tuple(
+            sorted(self.observations, key=lambda o: (o.normalized_period_start, o.period))
+        )
         object.__setattr__(self, "observations", ordered)
         caps = tuple(sorted(self.provider_capabilities, key=lambda c: c.value))
         object.__setattr__(self, "provider_capabilities", caps)

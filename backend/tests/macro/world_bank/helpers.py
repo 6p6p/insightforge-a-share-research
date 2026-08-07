@@ -20,6 +20,7 @@ from app.macro.contracts import (
     MacroIndicator,
     MacroObservation,
     MacroPageInfo,
+    MacroPeriodSemantics,
     MacroQuery,
     MacroTopic,
 )
@@ -235,10 +236,11 @@ def sample_result(*, observations: tuple[MacroObservation, ...] | None = None) -
                 external_indicator_id=INDICATOR_ID,
                 geography_code="CHN",
                 period=str(year),
-                period_start=date(year, 1, 1),
+                normalized_period_start=date(year, 1, 1),
                 frequency=MacroFrequency.ANNUAL,
                 value=Decimal("1410000000"),
                 is_missing=False,
+                period_semantics=MacroPeriodSemantics.PROVIDER_YEAR_LABEL,
                 observation_status="",
             )
             for year in range(QUERY.start_year, QUERY.end_year + 1)

@@ -52,6 +52,10 @@ def configure_logging(log_level: str = "INFO") -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
+    # httpx 默认在 INFO 级记录完整请求 URL（含 query），与脱敏约束冲突；
+    # 统一在日志初始化阶段静默，避免每个 Client 实例修改全局 logging state。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)

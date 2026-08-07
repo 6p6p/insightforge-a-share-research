@@ -288,10 +288,10 @@ conda run -n insightforge python -m app.cli.probe_disclosure_sources \
 
 阶段 2C.1 建立宏观数据领域契约与第一个 Provider（World Bank Indicators API V2）。**当前只是"获取"层**：不写数据库、不创建表、结果不是 Evidence/Claim/Report，也不进入 LangGraph 编排；只有阶段 2C.2 完成持久化、Provider 快照与原始 JSON 归档后，宏观数据才能进入证据链。**尚未实现 FRED 与国内官方宏观数据（NBS 等）**。
 
-- 只支持 `annual` 频率与单一 `country` 地理类型（`country_code` 拒绝 `ALL`）；年份闭区间最多 60 年。
-- 固定官方 Indicators API V2（`api.worldbank.org/v2`）+ 数据源 `source=2`（World Development Indicators）；客户端固定接口模板，不接受任意 endpoint/query 参数。
-- 数值使用 Decimal 全程（`parse_float=Decimal`），不做单位换算或同比/环比；缺失年份保留为 `is_missing=true`，不补齐缺失年份。
-- 分页 `per_page=1000`、单次查询请求 ≤20、pages ≤20；受控客户端仅 https、URL 通过 Source Registry allowlist（子域匹配）、无 Cookie/Auth/Header、手动重定向（同 allowlist ≤3 次、跨域拒绝）、单响应上限 5 MiB。
+- 只支持 `annual` 频率与单一 `country` 地理类型（`country_code` 拒绝 `ALL`）；年份闭区间最多 60 年。World Bank 允许 WLD/LCN/HIC 等聚合代码出现在 country 路径，解析国家元数据时若 `region.value` 规范化后等于 `Aggregates` 或缺失/无法确定，保守拒绝为 `geography_not_country`。
+- 固定官方 Indicators API V2（`api.worldbank.org/v2`）+ 数据源 `source=2`（World Development Indicators）；客户端固定接口模板，不接受任意 endpoint/query 参数；`MacroFetchResult.source_id` 固定 `"2"`。
+- 数值使用 Decimal 全程（`parse_float=Decimal` + 显式拒绝 NaN/Infinity 字面量），不做单位换算或同比/环比；缺失年份保留为 `is_missing=true`，不补齐缺失年份；观测 `period` 为 Provider 年份标签，`normalized_period_start` 固定该年 1 月 1 日（仅用于排序/索引，不表示真实统计周期起始日）。
+- 请求预算 `per_page=1000`、2 次元数据请求 + 观测分页 ≤ 20、观测分页上限 18；受控客户端仅 https、URL 通过 Source Registry allowlist（子域匹配）、无 Cookie/Auth/Header、手动重定向（同 allowlist ≤3 次、跨域拒绝）、单响应上限 5 MiB。
 - 开发期 CLI `fetch_world_bank_macro`（需 Source Registry 已登记 `world_bank` Provider）：
 
 ```bash
@@ -305,7 +305,7 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
   - 输出 JSON 报告到 stdout（日志走 stderr），Decimal 输出为字符串，**不写数据库、不保存响应正文、不写本地文件**；
   - 退出码：0 成功 / 2 输入错误 / 3 Provider 配置错误 / 4 API/网络/响应错误。
 
-> **受控真实验收说明（2026-08-07）**：本机网络对 `worldbank.org` 存在域名级出口阻断（DNS 被劫持到合成地址、TLS 握手被丢弃），真实请求在本环境返回 `request_failed`（exit 4），CLI 未跑通成功路径。上述命令与断言不变量已记录在 [docs/decisions/0011-macro-provider-and-world-bank.md](docs/decisions/0011-macro-provider-and-world-bank.md)，可在具备 World Bank 出网的环境补跑。
+> **受控真实验收说明（2026-08-07，2C.1.1 收口）**：本机网络对 `worldbank.org` 存在域名级出口阻断（DNS 被劫持到合成地址、TLS 握手被丢弃），真实请求在本环境返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误、不泄漏底层细节），CLI 未跑通成功路径。上述命令与断言不变量已记录在 [docs/decisions/0011-macro-provider-and-world-bank.md](docs/decisions/0011-macro-provider-and-world-bank.md)，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 保持"当前进行"，阶段 2C.2 不开始。
 
 ## 完整系统（Docker Compose）
 

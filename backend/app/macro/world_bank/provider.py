@@ -22,10 +22,15 @@ from app.macro.contracts import (
     MacroPageInfo,
     MacroQuery,
 )
-from app.macro.world_bank.client import PER_PAGE, WorldBankClient
+from app.macro.world_bank.client import (
+    MAX_OBSERVATION_PAGES,
+    PER_PAGE,
+    WorldBankClient,
+)
 from app.macro.world_bank.errors import (
     WorldBankMalformedResponse,
     WorldBankProviderNotReady,
+    WorldBankRequestLimitExceeded,
     WorldBankResponseConflict,
 )
 from app.macro.world_bank.parser import (
@@ -35,7 +40,6 @@ from app.macro.world_bank.parser import (
 )
 from app.repositories.source_provider_repository import SourceProviderRepository
 
-MAX_PAGES = 20  # 不允许页面数超过 20
 _CAPABILITIES_BY_VALUE = {cap.value: cap for cap in SourceCapability}
 
 
@@ -149,8 +153,12 @@ class WorldBankProvider:
                 geography=geography,
                 provider_key=self.provider_key,
             )
-            if page_info.pages > MAX_PAGES:
-                raise WorldBankMalformedResponse(f"pages {page_info.pages} exceeds {MAX_PAGES}")
+            # 请求预算：2（indicator + country 元数据）+ N（观测分页）≤ 20，N ≤ 18；
+            # 第一页 pages 超上限立即拒绝，不继续请求下一页。
+            if page_info.pages > MAX_OBSERVATION_PAGES:
+                raise WorldBankRequestLimitExceeded(
+                    f"pages {page_info.pages} exceeds {MAX_OBSERVATION_PAGES}"
+                )
             if page_info.page != page:
                 raise WorldBankMalformedResponse("response page does not match requested page")
             if first_pages is None:

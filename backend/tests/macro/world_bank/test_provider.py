@@ -8,7 +8,8 @@ from app.domain.sources import (
     SourceAuthorityTier,
     SourceCapability,
 )
-from app.macro.world_bank.errors import WorldBankProviderNotReady
+from app.macro.contracts import MacroQuery
+from app.macro.world_bank.errors import WorldBankGeographyNotCountry, WorldBankProviderNotReady
 from tests.macro.world_bank.helpers import (
     QUERY,
     country_response,
@@ -17,6 +18,7 @@ from tests.macro.world_bank.helpers import (
     make_provider_row,
     observation_row,
     observations_response,
+    page_header,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -146,9 +148,82 @@ async def test_full_fetch_combo(world_bank_provider):
 async def test_observations_ascending(world_bank_provider):
     provider, _factory = world_bank_provider(transport=httpx.MockTransport(_ok_router))
     result = await provider.fetch(QUERY)
-    starts = [o.period_start for o in result.observations]
+    starts = [o.normalized_period_start for o in result.observations]
     assert starts == sorted(starts)
     assert all(
-        result.observations[i].period_start <= result.observations[i + 1].period_start
+        result.observations[i].normalized_period_start
+        <= result.observations[i + 1].normalized_period_start
         for i in range(len(result.observations) - 1)
     )
+
+
+async def test_observation_semantics_fields(world_bank_provider):
+    provider, _factory = world_bank_provider(transport=httpx.MockTransport(_ok_router))
+    result = await provider.fetch(QUERY)
+    for obs in result.observations:
+        assert obs.period_semantics.value == "provider_year_label"
+        assert obs.normalized_period_start.isoformat() == f"{obs.period}-01-01"
+
+
+# --- geography: single-country constraint ---
+
+
+async def test_country_two_letter_resolves(world_bank_provider):
+    # 两字母 ISO2 请求（CN）应解析到 CHN 国家：provider_country_id=CHN、iso2=CN、iso3=CHN。
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v2/indicator/SP.POP.TOTL":
+            return json_response(indicator_response())
+        if path == "/v2/country/CN":
+            return json_response(country_response())
+        if "/v2/country/CN/indicator/" in path:
+            return json_response(observations_response(rows=[]))
+        raise AssertionError(f"unexpected path {path}")
+
+    provider, _factory = world_bank_provider(transport=httpx.MockTransport(handler))
+    query = MacroQuery(
+        provider_key="world_bank",
+        indicator_code="SP.POP.TOTL",
+        country_code="CN",
+        start_year=2020,
+        end_year=2024,
+    )
+    result = await provider.fetch(query)
+    assert result.geography.requested_code == "CN"
+    assert result.geography.provider_country_id == "CHN"
+    assert result.geography.iso2_code == "CN"
+    assert result.geography.iso3_code == "CHN"
+
+
+async def test_aggregate_geography_rejected_before_observations(world_bank_provider):
+    # 聚合项（region.value=Aggregates）拒绝后不得继续获取 observations。
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v2/indicator/SP.POP.TOTL":
+            return json_response(indicator_response())
+        if path == "/v2/country/WLD":
+            row = {
+                "id": "WLD",
+                "iso2Code": "XW",
+                "name": "World",
+                "region": {"id": "NA", "value": "Aggregates"},
+                "incomeLevel": {"id": "", "value": ""},
+            }
+            return json_response([page_header(total=1), [row]])
+        requested_paths.append(path)
+        raise AssertionError(f"observations should not be fetched: {path}")
+
+    provider, _factory = world_bank_provider(transport=httpx.MockTransport(handler))
+    query = MacroQuery(
+        provider_key="world_bank",
+        indicator_code="SP.POP.TOTL",
+        country_code="WLD",
+        start_year=2020,
+        end_year=2024,
+    )
+    with pytest.raises(WorldBankGeographyNotCountry) as exc:
+        await provider.fetch(query)
+    assert exc.value.code == "geography_not_country"
+    assert requested_paths == []
