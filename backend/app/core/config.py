@@ -16,6 +16,10 @@ _DATABASE_URL_PREFIX = "postgresql+psycopg://"
 _MAX_PORT = 65535
 _MAX_TIMEOUT_SECONDS = 60
 
+_MIN_SOURCE_FILE_SIZE_BYTES = 1024 * 1024  # 1 MiB
+_MAX_SOURCE_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MiB
+_DEFAULT_SOURCE_MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -44,6 +48,10 @@ class Settings(BaseSettings):
 
     workflow_shutdown_timeout_seconds: int = 10
     workflow_reconcile_timeout_seconds: int = 5
+
+    # 本地不可变原始文件存储（开发环境本地磁盘；未来可替换为 S3/MinIO）
+    raw_storage_root: Path = PROJECT_ROOT / ".data" / "raw"
+    source_max_file_size_bytes: int = _DEFAULT_SOURCE_MAX_FILE_SIZE_BYTES
 
     @field_validator("app_port", "chroma_port")
     @classmethod
@@ -75,6 +83,13 @@ class Settings(BaseSettings):
     def _validate_reconcile_timeout(cls, value: int) -> int:
         if not 1 <= value <= 30:
             raise ValueError("workflow_reconcile_timeout_seconds must be between 1 and 30")
+        return value
+
+    @field_validator("source_max_file_size_bytes")
+    @classmethod
+    def _validate_source_max_file_size(cls, value: int) -> int:
+        if not _MIN_SOURCE_FILE_SIZE_BYTES <= value <= _MAX_SOURCE_FILE_SIZE_BYTES:
+            raise ValueError("source_max_file_size_bytes must be between 1 MiB and 500 MiB")
         return value
 
     @field_validator("log_level")

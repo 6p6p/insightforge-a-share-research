@@ -46,9 +46,7 @@ class CompanyIdentityService:
                     if parsed.explicit_symbol
                     else CompanyMatchType.IDENTITY_KEY
                 )
-                matched_value = (
-                    parsed.normalized if parsed.explicit_symbol else parsed.identity_key
-                )
+                matched_value = parsed.normalized if parsed.explicit_symbol else parsed.identity_key
                 return self._response(company, match_type, matched_value)
             if parsed.security_code is not None:
                 companies = await repo.find_by_security_code(parsed.security_code)

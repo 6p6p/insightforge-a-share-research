@@ -16,6 +16,11 @@ RUN pip install --no-cache-dir .
 
 # 非 root 用户运行
 RUN useradd --create-home --uid 10001 appuser
+
+# 原始归档挂载点：预创建并授予 appuser。
+# named volume 首次挂载时复制目录内容并继承所有权，否则 volume 归 root，应用无写权限。
+RUN mkdir -p /app/data/raw && chown -R appuser:appuser /app/data
+
 USER appuser
 
 EXPOSE 8000

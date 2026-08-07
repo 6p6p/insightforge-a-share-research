@@ -83,3 +83,57 @@ class SourceUrlNotAllowed(DomainError):
     code = "source_url_not_allowed"
     http_status = 400
     message = "来源 URL 不在允许域名范围内"
+
+
+class RawArtifactNotFound(DomainError):
+    code = "raw_artifact_not_found"
+    http_status = 404
+    message = "原始文件不存在"
+
+
+class SourceRecordNotFound(DomainError):
+    code = "source_record_not_found"
+    http_status = 404
+    message = "来源记录不存在"
+
+
+class SourceFileTooLarge(DomainError):
+    code = "source_file_too_large"
+    http_status = 413
+    message = "文件大小超过限制"
+
+
+class InvalidPdfFile(DomainError):
+    code = "invalid_pdf_file"
+    http_status = 400
+    message = "不是有效的 PDF 文件"
+
+
+class SourceProviderDisabled(DomainError):
+    code = "source_provider_disabled"
+    http_status = 409
+    message = "来源 Provider 未启用"
+
+
+class SourceCapabilityNotAllowed(DomainError):
+    code = "source_capability_not_allowed"
+    http_status = 400
+    message = "来源 Provider 不支持公司文件能力"
+
+
+class SourceDownloadFailed(DomainError):
+    code = "source_download_failed"
+    http_status = 502
+    message = "来源下载失败"
+
+
+class SourceRedirectNotAllowed(DomainError):
+    code = "source_redirect_not_allowed"
+    http_status = 400
+    message = "来源重定向不符合安全策略"
+
+
+class SourceStorageUnavailable(DomainError):
+    code = "source_storage_unavailable"
+    http_status = 503
+    message = "原始文件存储不可用"

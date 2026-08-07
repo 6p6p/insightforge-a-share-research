@@ -9,8 +9,12 @@
 
 ## 2B：官方公司披露文件 MVP、用户上传和 URL 导入
 
-- 官方披露文件获取、用户上传、URL 导入。
-- 不做通用爬虫；获取方式严格限定为官方 API / 官方下载 / 官方页面。
+- **2B.1（进行中，2026-08-07；收口验证并提交后标记为已完成）**：原始文件归档与来源登记。
+  - RawArtifact（SHA-256 内容寻址不可变字节归档）与 SourceRecord（一次来源登记，引用 artifact_id）两个独立表。
+  - 用户上传（multipart）与安全 URL 导入（SafePdfFetcher，重定向重校验域名、双重大小上限、MockTransport 测试）。
+  - 决策记录：[docs/decisions/0009-source-ingestion-and-raw-artifacts.md](decisions/0009-source-ingestion-and-raw-artifacts.md)。
+- 2B.2（后续）：官方公司披露文件自动获取。
+- 不做通用爬虫；获取方式严格限定为官方 API / 官方下载 / 官方页面。阶段 2B.1 不执行外网请求、不解析 PDF 正文。
 
 ## 2C：宏观数据 Provider
 

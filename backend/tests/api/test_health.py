@@ -1,10 +1,13 @@
 """Tests for the health check endpoints."""
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.db.session import DatabaseManager
 from app.main import create_app
 from app.schemas.health import ReadyHealthResponse
+from app.storage.raw_store import LocalRawArtifactStore
 
 
 def test_live_returns_ok(client) -> None:
@@ -26,6 +29,7 @@ def test_ready_matches_structured_model(client) -> None:
     assert payload.checks.database == "ok"
     assert payload.checks.chroma == "ok"
     assert payload.checks.checkpoint == "ok"
+    assert payload.checks.raw_storage == "ok"
 
 
 def test_ready_environment_from_test_settings(client) -> None:
@@ -46,6 +50,7 @@ def test_ready_database_failure_returns_503(client, fake_database) -> None:
     assert body["checks"]["database"] == "error"
     assert body["checks"]["chroma"] == "ok"
     assert body["checks"]["checkpoint"] == "ok"
+    assert body["checks"]["raw_storage"] == "ok"
 
 
 def test_ready_checkpoint_failure_returns_503(client, fake_langgraph) -> None:
@@ -60,6 +65,16 @@ def test_ready_chroma_failure_returns_503(client, fake_chroma) -> None:
     response = client.get("/api/v1/health/ready")
     assert response.status_code == 503
     assert response.json()["checks"]["chroma"] == "error"
+
+
+def test_ready_raw_storage_failure_returns_503(client, fake_raw_store) -> None:
+    fake_raw_store.healthy = False
+    response = client.get("/api/v1/health/ready")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert body["checks"]["raw_storage"] == "error"
+    assert body["checks"]["database"] == "ok"
 
 
 def test_ready_both_failures_returns_503(client, fake_database, fake_chroma) -> None:
@@ -83,10 +98,13 @@ def test_ready_response_hides_exception_details(client, fake_database) -> None:
     assert "postgresql+psycopg" not in text
 
 
-def test_live_does_not_probe_dependencies(client, fake_database, fake_chroma) -> None:
+def test_live_does_not_probe_dependencies(
+    client, fake_database, fake_chroma, fake_raw_store
+) -> None:
     client.get("/api/v1/health/live")
     assert fake_database.ping_calls == 0
     assert fake_chroma.heartbeat_calls == 0
+    assert fake_raw_store.check_calls == 0
 
 
 def test_lifespan_creates_resources(test_settings) -> None:
@@ -96,6 +114,8 @@ def test_lifespan_creates_resources(test_settings) -> None:
         assert resources is not None
         assert isinstance(resources.database, DatabaseManager)
         assert resources.chroma is not None
+        assert isinstance(resources.raw_storage, LocalRawArtifactStore)
+        assert resources.raw_storage._root == Path(test_settings.raw_storage_root)
     assert application.state.resources is None
 
 

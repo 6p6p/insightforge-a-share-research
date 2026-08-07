@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.dependencies import get_db_session
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.services.company_identity_service import CompanyIdentityService
+from app.services.source_ingestion_service import SourceIngestionService
 from app.services.source_registry_service import SourceRegistryService
 from app.services.task_service import TaskService
 from app.services.workflow_service import WorkflowService
+from app.storage.raw_store import LocalRawArtifactStore
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from app.workflows.execution_manager import WorkflowExecutionManager
 
@@ -55,3 +57,22 @@ def get_source_registry_service(request: Request) -> SourceRegistryService:
     if resources is None or resources.database is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
     return SourceRegistryService(resources.database.session_factory())
+
+
+def get_raw_storage(request: Request) -> LocalRawArtifactStore:
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.raw_storage is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    return resources.raw_storage
+
+
+def get_source_ingestion_service(request: Request) -> SourceIngestionService:
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.database is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    settings = request.app.state.settings
+    return SourceIngestionService(
+        sessionmaker=resources.database.session_factory(),
+        raw_store=resources.raw_storage,
+        max_bytes=settings.source_max_file_size_bytes,
+    )

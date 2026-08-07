@@ -1,0 +1,1 @@
+"""Immutable raw artifact storage."""

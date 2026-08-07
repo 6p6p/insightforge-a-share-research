@@ -1,0 +1,1 @@
+"""Official document acquisition."""

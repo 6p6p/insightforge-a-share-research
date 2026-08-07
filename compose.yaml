@@ -38,6 +38,10 @@ services:
       CHROMA_PORT: "8000"
       CHROMA_SSL: "false"
       CHROMA_TIMEOUT_SECONDS: "5"
+      RAW_STORAGE_ROOT: /app/data/raw
+      SOURCE_MAX_FILE_SIZE_BYTES: "104857600"
+    volumes:
+      - raw_data:/app/data/raw
     ports:
       - "8001:8000"
     depends_on:
@@ -55,3 +59,4 @@ services:
 volumes:
   postgres_data:
   chroma_data:
+  raw_data:

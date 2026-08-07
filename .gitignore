@@ -47,6 +47,7 @@ logs/
 
 # --- 运行时存储 / 导出 / 临时数据 ---
 data/
+.data/
 exports/
 *.tmp
 *.temp

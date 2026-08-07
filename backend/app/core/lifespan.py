@@ -11,6 +11,7 @@ from app.core.resources import ApplicationResources
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
 from app.services.workflow_recovery_service import WorkflowRecoveryService
+from app.storage.raw_store import LocalRawArtifactStore
 from app.vectorstore.client import ChromaManager
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from app.workflows.execution_manager import WorkflowExecutionManager
@@ -42,11 +43,16 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         shutdown_timeout_seconds=settings.workflow_shutdown_timeout_seconds,
         sessionmaker=sessionmaker,
     )
+    raw_storage = LocalRawArtifactStore(
+        root=settings.raw_storage_root,
+        max_bytes=settings.source_max_file_size_bytes,
+    )
     resources = ApplicationResources(
         database=database,
         chroma=chroma,
         langgraph=langgraph,
         workflow_execution=workflow_execution,
+        raw_storage=raw_storage,
     )
     application.state.resources = resources
     logger.info("application_startup", environment=settings.app_env)
