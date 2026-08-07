@@ -4,6 +4,8 @@
 同域重定向、跨域拒绝、错误响应、超时、请求限额、无 Cookie/Auth、无正文落盘。
 """
 
+from urllib.parse import urljoin
+
 import httpx
 import pytest
 
@@ -14,6 +16,7 @@ from app.disclosures.probe_client import (
     ProbeRedirectLoop,
     ProbeResponseTooLarge,
     ProbeUrlNotAllowed,
+    extract_links,
 )
 
 
@@ -192,3 +195,93 @@ async def test_fetch_pdf_head_uses_head_semantics() -> None:
     assert response.response_type == "pdf"
     assert response.length == 2048
     assert response.body == b""
+
+
+@pytest.mark.asyncio
+async def test_fetch_pdf_head_same_domain_redirect_revalidated() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/old.pdf":
+            return httpx.Response(302, headers={"location": "/new.pdf"})
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    response = await client.fetch_pdf_head("https://www.sse.com.cn/old.pdf")
+    assert response.status_code == 200
+    assert response.content_type == "application/pdf"
+    assert response.final_url == "https://www.sse.com.cn/new.pdf"
+    assert response.redirects == 1
+    assert client.request_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_pdf_head_cross_domain_redirect_rejected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://evil.example.com/new.pdf"})
+
+    client = _client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProbeUrlNotAllowed):
+        await client.fetch_pdf_head("https://www.sse.com.cn/old.pdf")
+    assert client.request_count == 1
+
+
+def test_extract_links_absolute_relative_and_query() -> None:
+    base = "https://www.sse.com.cn/disclosure/listedinfo/announcement/"
+    body = (
+        '<a href="https://www.sse.com.cn/2026/600519.pdf">绝对链接</a>'
+        '<a href="c/2026-04-30/600519.pdf">相对链接</a>'
+        '<a href="detail?id=123">详情页</a>'
+    ).encode()
+    links = extract_links(body, base)
+    assert [urljoin(base, link.href) for link in links] == [
+        "https://www.sse.com.cn/2026/600519.pdf",
+        "https://www.sse.com.cn/disclosure/listedinfo/announcement/c/2026-04-30/600519.pdf",
+        "https://www.sse.com.cn/disclosure/listedinfo/announcement/detail?id=123",
+    ]
+
+
+def test_extract_links_skips_javascript_fragment_and_empty() -> None:
+    body = (
+        b'<a href="javascript:void(0)">js</a>'
+        b'<a href="#">frag</a>'
+        b'<a href="">empty</a>'
+        b'<a href="https://www.sse.com.cn/real.pdf">real</a>'
+    )
+    links = extract_links(body, "https://www.sse.com.cn/")
+    assert len(links) == 1
+    assert links[0].href == "https://www.sse.com.cn/real.pdf"
+
+
+def test_extract_links_decodes_html_entities() -> None:
+    body = '<a href="https://www.sse.com.cn/a.pdf">2025 &amp; 年度报告</a>'.encode()
+    links = extract_links(body, "https://www.sse.com.cn/")
+    assert links[0].text == "2025 & 年度报告"
+
+
+def test_extract_links_ignores_script_and_style_text() -> None:
+    body = (
+        "<script>var x = '600519';</script>"
+        "<style>.announcement { display: none; }</style>"
+        "<a href='https://www.sse.com.cn/b.pdf'>下载</a>"
+    ).encode()
+    links = extract_links(body, "https://www.sse.com.cn/")
+    assert len(links) == 1
+    assert "600519" not in links[0].context
+    assert links[0].text == "下载"
+
+
+def test_link_context_builds_row_text() -> None:
+    body = (
+        "<tr><td>600519</td><td>贵州茅台：2025 年年度报告</td><td>2026-04-30</td>"
+        '<td><a href="2026/600519.pdf">查看</a></td></tr>'
+    ).encode()
+    base = "https://www.sse.com.cn/disclosure/listedinfo/announcement/"
+    links = extract_links(body, base)
+    assert len(links) == 1
+    link = links[0]
+    assert "600519" in link.context
+    assert "贵州茅台" in link.context
+    assert "2026-04-30" in link.context
+    assert link.href == "2026/600519.pdf"

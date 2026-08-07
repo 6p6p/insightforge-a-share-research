@@ -25,7 +25,7 @@ _SECURITY_CODE_RE = re.compile(r"^\d{6}$")
 _ERROR_MSG = {
     "code_pattern": "security_code 必须是六位数字",
     "date_order": "start_date 必须不晚于 end_date",
-    "date_range": "日期范围最多 366 天",
+    "date_range": "日期范围必须为 1—366 个自然日（含首尾）",
     "doc_types": "document_types 不能为空",
     "limit_range": "limit 必须在 1—100 之间",
     "keyword_length": "keyword 单项最长 100 字符",
@@ -43,7 +43,9 @@ def _validate_security_code(security_code: str) -> None:
 def _validate_date_range(start_date: date, end_date: date) -> None:
     if start_date > end_date:
         raise ValueError(_ERROR_MSG["date_order"])
-    if (end_date - start_date).days > _MAX_DATE_RANGE_DAYS:
+    # 区间为闭区间：inclusive_days = (end - start).days + 1，必须落在 1—366 内。
+    inclusive_days = (end_date - start_date).days + 1
+    if not (1 <= inclusive_days <= _MAX_DATE_RANGE_DAYS):
         raise ValueError(_ERROR_MSG["date_range"])
 
 
@@ -52,7 +54,7 @@ class DisclosureSearchRequest:
     """一次官方披露发现查询。
 
     - company_id / exchange / security_code 锁定目标公司；
-    - start_date / end_date 限定披露窗口（最多 366 天）；
+    - start_date / end_date 限定披露窗口（闭区间，1—366 个自然日）；
     - document_types 必填；keywords 与 limit 为可选过滤。
     """
 
@@ -85,6 +87,23 @@ class DisclosureSearchRequest:
             raise ValueError("company_id 必须是 UUID")
         if not isinstance(self.start_date, date) or not isinstance(self.end_date, date):
             raise ValueError("start_date/end_date 必须是 date")
+
+
+@dataclass(frozen=True)
+class DisclosureProbeContext:
+    """探测目标上下文：只用公司代码与披露窗口，不伪造 company_id。
+
+    探测阶段不落库、不经过企业身份解析，因此不要求 company_id；
+    与 DisclosureSearchRequest 的日期范围语义保持一致（闭区间 1—366 天）。
+    """
+
+    security_code: str
+    start_date: date
+    end_date: date
+
+    def __post_init__(self) -> None:
+        _validate_security_code(self.security_code)
+        _validate_date_range(self.start_date, self.end_date)
 
 
 def _validate_candidate_url(url: str) -> None:

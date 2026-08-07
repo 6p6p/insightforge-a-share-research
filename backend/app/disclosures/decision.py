@@ -1,13 +1,21 @@
 """Decision logic: turn probe results into an access-mode verdict.
 
-决策规则（与阶段文档一致）：
-1. 有正式公开文档 API → documented_api；
-2. 搜索结果存在于首次返回的公开 HTML 且含可验证 PDF 链接 → public_server_rendered_html；
-3. 只能确认公开 PDF 下载、但无法通过合规页面发现 → public_direct_pdf_only；
-4. 需要注册/授权/合同/API Key → requires_auth_or_contract；
-5. 页面只有搜索外壳、结果需 JS 或未公开接口 → requires_javascript_or_internal_endpoint；
-6. 不得因为发现浏览器内部 JSON 请求就标记 documented_api；
-7. 全部不可用 → unavailable。
+优先级（1—6，带显式不变量）：
+1. 确认官方 API 文档入口且明确出现 API Key/App ID/access token/合同/订阅/申请权限
+   → requires_auth_or_contract（只允许 documented_api_found=True 时触发认证判定）。
+2. 确认官方 API 文档入口且无需认证 → documented_api。
+3. 页面可达、按公司/日期匹配到候选行、且首个候选直接解析为官方 PDF
+   → public_server_rendered_html（不变量：matching_candidate_count >= 1）。
+4. 能确认官方 PDF 可公开下载、但无法按公司匹配到候选行
+   → public_direct_pdf_only（不变量：direct_pdf_verified 必须为 True）。
+5. 页面可达但候选行不可识别 / 需要 JS 或未公开接口 → requires_javascript_or_internal_endpoint
+   （不变量：matching_candidate_count == 0）。
+6. 其余（页面不可达且无任何通路证据）→ unavailable。
+
+绝对禁止：
+- direct_pdf_verified=False 时返回 public_direct_pdf_only；
+- matching_candidate_count=0 时返回 public_server_rendered_html；
+- 仅凭页面出现"登录/注册"就返回 requires_auth_or_contract。
 """
 
 from app.disclosures.probe import DisclosureAccessMode, DisclosureProbeResult
@@ -16,20 +24,23 @@ from app.disclosures.probe import DisclosureAccessMode, DisclosureProbeResult
 def decide_access_mode(result: DisclosureProbeResult) -> DisclosureAccessMode:
     """根据单个 Provider 的探测结果给出接入形态结论。"""
     if result.documented_api_found:
+        # 不变量：认证判定只允许在确认官方 API 文档入口后触发，
+        # 且 authentication_required=True 时必须返回认证形态。
         if result.authentication_required:
             return DisclosureAccessMode.REQUIRES_AUTH_OR_CONTRACT
         return DisclosureAccessMode.DOCUMENTED_API
-    if result.listing_page_reachable and result.listing_results_visible_in_html:
+    if result.listing_page_reachable and result.matching_candidate_count >= 1:
         if result.direct_pdf_verified:
             return DisclosureAccessMode.PUBLIC_SERVER_RENDERED_HTML
-        # 页面有结果行但没有可验证的官方 PDF 链接：不能自动发现
-        return DisclosureAccessMode.PUBLIC_DIRECT_PDF_ONLY
-    if result.listing_page_reachable and not result.listing_results_visible_in_html:
-        if result.direct_pdf_verified:
-            return DisclosureAccessMode.PUBLIC_DIRECT_PDF_ONLY
+        # 有候选行但文件链接不是可直接验证的 PDF：仍需详情页/JS/内部接口。
         return DisclosureAccessMode.REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT
-    if result.authentication_required:
-        return DisclosureAccessMode.REQUIRES_AUTH_OR_CONTRACT
+    if result.direct_pdf_verified:
+        # 能确认官方 PDF 公开下载、但未进入 server-rendered-html 分支
+        # （候选行不可识别等）：只能确认公开下载，不能自动发现。
+        return DisclosureAccessMode.PUBLIC_DIRECT_PDF_ONLY
+    if result.listing_page_reachable:
+        # 页面可达但候选行不可识别（matching_candidate_count == 0），且无 PDF 证据。
+        return DisclosureAccessMode.REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT
     return DisclosureAccessMode.UNAVAILABLE
 
 

@@ -13,10 +13,12 @@
   - RawArtifact（SHA-256 内容寻址不可变字节归档）与 SourceRecord（一次来源登记，引用 artifact_id）两个独立表。
   - 用户上传（multipart）与安全 URL 导入（SafePdfFetcher，重定向重校验域名、双重大小上限、MockTransport 测试）。
   - 决策记录：[docs/decisions/0009-source-ingestion-and-raw-artifacts.md](decisions/0009-source-ingestion-and-raw-artifacts.md)。
-- **2B.2A（当前，2026-08-07）**：官方披露来源可行性探测与 Discovery 契约。
+- **2B.2A（收口中，2026-08-07）**：官方披露来源可行性探测与 Discovery 契约。
   - Discovery 契约（SearchRequest / Candidate / Provider Protocol）只做发现候选，不下载、不落库、不解析 PDF。
-  - 受控 ProbeClient + Probe CLI：只探测 sse/cninfo，单 Provider ≤6 请求、整次 ≤12，仅访问 Source Registry allowlist 内的 https URL，无 Cookie/Auth、不执行 JS、不逆向内部 API。
-  - 决策规则把探测结果归入 6 种接入形态；仅 `documented_api` 与 `public_server_rendered_html` 可自动发现。
+  - 受控 ProbeClient + Probe CLI：只探测 sse/cninfo，单 Provider ≤6 请求、整次 ≤12，仅访问 Source Registry allowlist 内的 https URL，无 Cookie/Auth、不执行 JS、不逆向内部 API、不调用内部数据服务接口。
+  - 候选识别基于页面真实链接（security_code + 非空标题 + 日期文本 + urljoin 后 allowlist），不采用通用关键词；日期范围语义固定为闭区间 1—366 天。
+  - 接入形态决策采用严格不变量（6 条优先级）；`documented_api` 与 `public_server_rendered_html` 可自动发现。
+  - CNINFO 只从官方首页开始，不进入 `/new/disclosure`；发现 `webapi.cninfo.com.cn` 只记录、不调用。
   - 决策记录：[docs/decisions/0010-official-disclosure-discovery-policy.md](decisions/0010-official-disclosure-discovery-policy.md)。
 - 2B.2B（后续）：官方公司披露文件自动获取。
   - 前置门槛：探测得出 `documented_api` 或 `public_server_rendered_html` 且通过人工验收；否则记录停止原因，继续依赖用户上传与 URL 导入。

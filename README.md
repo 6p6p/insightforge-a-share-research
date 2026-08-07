@@ -266,7 +266,7 @@ curl -o source.pdf http://127.0.0.1:8001/api/v1/source-records/替换为source_i
 
 ## 官方披露发现契约与探测 CLI（阶段 2B.2A）
 
-阶段 2B.2A 建立了官方公告"发现"契约与受控可行性探测工具。**探测 CLI 是开发期诊断工具，不代表自动公告采集已实现**；也不承诺任何第三方 API 免费或稳定。探测只访问 Source Registry 已登记且启用的 Provider（当前仅 sse、cninfo），受控请求数（单 Provider ≤6、整次 ≤12），仅访问官方 allowlist 内的 https URL，不使用 Cookie/Auth、不执行 JS、不逆向内部接口。
+阶段 2B.2A 建立了官方公告"发现"契约与受控可行性探测工具。**探测 CLI 是保守的开发期诊断工具**：只访问 Source Registry 已登记且启用的 Provider（当前仅 sse、cninfo），受控请求数（单 Provider ≤6、整次 ≤12），仅访问官方 allowlist 内的 https URL，不使用 Cookie/Auth、不执行 JS、不逆向内部接口、不调用内部数据服务接口（如 webapi.cninfo.com.cn）。探测结果只反映探测当时的公开通路形态，**不宣称已实现自动公告采集，也不宣称 SSE / CNINFO 不可用**——只说明"尚未确认合规自动通路"。
 
 ```bash
 conda run -n insightforge python -m app.cli.probe_disclosure_sources \
@@ -276,8 +276,10 @@ conda run -n insightforge python -m app.cli.probe_disclosure_sources \
   --end-date 2026-08-07
 ```
 
-- 输出 JSON 到 stdout，不写数据库、不下载/保留响应正文。
-- 自动发现仅限 `documented_api` 与 `public_server_rendered_html` 两种接入形态；探测不得出的形态不实现生产 Adapter。
+- 输出 JSON 到 stdout，不写数据库、不下载/保留响应正文；`request` 字段如实记录探测目标（security_code / 日期窗口）。
+- 候选识别基于页面真实链接（security_code + 非空标题 + 日期文本 + urljoin 后 allowlist 校验）；日期/公司筛选未送入合规查询入口时 `search_request_applied=false`，不伪造候选。
+- 接入形态决策采用严格不变量：`direct_pdf_verified=false` 不得判为 `public_direct_pdf_only`；`matching_candidate_count=0` 不得判为 `public_server_rendered_html`；仅出现"登录/注册"不得判为需要认证。
+- 自动发现仅限 `documented_api` 与 `public_server_rendered_html` 两种接入形态；未确认合规通路的形态不实现生产 Adapter。
 - 探测边界、决策规则与人工验收门槛见 [docs/decisions/0010-official-disclosure-discovery-policy.md](docs/decisions/0010-official-disclosure-discovery-policy.md)。
 
 ## 完整系统（Docker Compose）

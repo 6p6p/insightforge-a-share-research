@@ -1,8 +1,9 @@
 """Shared network-isolation guard tests.
 
 验证顶层 conftest 的 autouse `_forbid_real_http` fixture：
-- 真实外部 httpx transport 请求被阻止；
+- 真实外部 httpx transport 请求（异步与同步）都被阻止；
 - 本地回环地址（127.0.0.1）放行，不影响 PostgreSQL / Docker Chroma；
+- 0.0.0.0 不放行；
 - MockTransport 不受影响；
 - FastAPI TestClient（ASGI transport）不受影响。
 """
@@ -29,6 +30,15 @@ def test_real_transport_external_host_is_blocked() -> None:
     asyncio.run(probe())
 
 
+def test_real_transport_sync_external_host_is_blocked() -> None:
+    transport = httpx.HTTPTransport()
+    try:
+        with pytest.raises(AssertionError, match="real external HTTP is forbidden in tests"):
+            transport.handle_request(_request("https://evil.example.com/x.pdf"))
+    finally:
+        transport.close()
+
+
 def test_real_transport_loopback_is_not_blocked() -> None:
     """回环地址放行给真实 transport：结果不是 AssertionError（连接失败或成功）。"""
 
@@ -41,6 +51,20 @@ def test_real_transport_loopback_is_not_blocked() -> None:
                 pytest.fail(f"loopback request must not be blocked: {exc}")
             except httpx.ConnectError:
                 pass  # 端口未监听 → 连接失败，属预期，说明 guard 放行了
+        finally:
+            await transport.aclose()
+
+    asyncio.run(probe())
+
+
+def test_real_transport_zero_zero_zero_zero_is_blocked() -> None:
+    """0.0.0.0 不是回环放行地址：guard 把它当外部地址拦截。"""
+
+    async def probe() -> None:
+        transport = httpx.AsyncHTTPTransport()
+        try:
+            with pytest.raises(AssertionError, match="real external HTTP is forbidden in tests"):
+                await transport.handle_async_request(_request("http://0.0.0.0:1/x"))
         finally:
             await transport.aclose()
 

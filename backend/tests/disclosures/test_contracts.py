@@ -54,14 +54,20 @@ def test_date_order_invalid() -> None:
         _request(start_date=date(2026, 8, 7), end_date=date(2026, 1, 1))
 
 
+def test_date_range_single_day_ok() -> None:
+    # 2026-01-01 至 2026-01-01：1 个自然日（含首尾），合法
+    _request(start_date=date(2026, 1, 1), end_date=date(2026, 1, 1))
+
+
 def test_date_range_ok_at_366_days() -> None:
-    # 2026-01-01 + 366 天 = 2027-01-02，恰好在边界内
-    _request(start_date=date(2026, 1, 1), end_date=date(2027, 1, 2))
+    # 2026-01-01 至 2027-01-01：闭区间 366 个自然日，恰好在边界内
+    _request(start_date=date(2026, 1, 1), end_date=date(2027, 1, 1))
 
 
 def test_date_range_over_366_days_invalid() -> None:
+    # 2026-01-01 至 2027-01-02：闭区间 367 个自然日，超出边界
     with pytest.raises(ValueError):
-        _request(start_date=date(2026, 1, 1), end_date=date(2027, 1, 3))
+        _request(start_date=date(2026, 1, 1), end_date=date(2027, 1, 2))
 
 
 def test_empty_document_types_invalid() -> None:

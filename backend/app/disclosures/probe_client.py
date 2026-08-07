@@ -14,6 +14,7 @@
 
 import time
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import httpx
@@ -40,6 +41,100 @@ class ProbeResponse:
     response_type: str  # "html" | "pdf" | "other"
     redirects: int
     length: int | None = None  # PDF 探测的 Content-Length；HTML 探测为 None
+
+
+@dataclass(frozen=True)
+class Link:
+    """页面中提取出的一个 <a href> 链接及其上下文文本。
+
+    - text：锚点文本（HTML entity 已解码、空白已归一化）；
+    - href：原始 href 属性值（可能是相对 URL）；
+    - base_url：页面最终 URL，供 urljoin 解析相对链接；
+    - context：链接前到上一个链接之间的文本 + 锚点文本，供公司/日期匹配。
+    """
+
+    text: str
+    href: str
+    base_url: str
+    context: str
+
+
+class LinkExtractor(HTMLParser):
+    """轻量 HTML 链接提取器：只处理 <a href>，不执行 JS、不解析 onclick。
+
+    - 忽略 script/style 内的文本与链接；
+    - 忽略 javascript:、空 href、纯 # 锚点；
+    - 相对 URL 原样保留，由调用方 urljoin 后重新执行 allowlist 校验。
+    """
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self._base_url = base_url
+        self.links: list[Link] = []
+        self._href: str | None = None
+        self._anchor: list[str] = []
+        self._buffer: list[str] = []
+        self._script_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in ("script", "style"):
+            self._script_depth += 1
+            return
+        if tag == "a" and self._script_depth == 0:
+            href = dict(attrs).get("href")
+            if href is not None and self._usable_href(href):
+                self._href = href
+                self._anchor = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style"):
+            if self._script_depth > 0:
+                self._script_depth -= 1
+            return
+        if tag == "a" and self._href is not None and self._script_depth == 0:
+            anchor = self._clean("".join(self._anchor))
+            context = self._clean("".join(self._buffer) + "".join(self._anchor))
+            self.links.append(
+                Link(
+                    text=anchor,
+                    href=self._href,
+                    base_url=self._base_url,
+                    context=context,
+                )
+            )
+            self._buffer = [anchor] if anchor else []
+            self._href = None
+            self._anchor = []
+
+    def handle_data(self, data: str) -> None:
+        if self._script_depth > 0:
+            return
+        if self._href is not None:
+            self._anchor.append(data)
+        else:
+            self._buffer.append(data)
+
+    @staticmethod
+    def _usable_href(href: str) -> bool:
+        href = href.strip()
+        if not href:
+            return False
+        if href.startswith("javascript:"):
+            return False
+        if href.startswith("#"):
+            return False
+        return True
+
+    @staticmethod
+    def _clean(value: str) -> str:
+        return " ".join(value.split())
+
+
+def extract_links(body: bytes, base_url: str) -> list[Link]:
+    """从响应正文中提取全部合规候选 <a href> 链接。"""
+    parser = LinkExtractor(base_url)
+    parser.feed(body.decode("utf-8", errors="replace"))
+    return parser.links
 
 
 class ProbeLimitExceeded(Exception):
@@ -77,6 +172,10 @@ class ProbeClient:
     def request_count(self) -> int:
         return self._request_count
 
+    @property
+    def allowed_domains(self) -> list[str]:
+        return list(self._allowed_domains)
+
     def _next_request(self) -> None:
         if self._request_count >= self._provider_request_limit:
             raise ProbeLimitExceeded(
@@ -105,6 +204,34 @@ class ProbeClient:
         response_type: str = "html",
     ) -> ProbeResponse:
         """GET 一个页面（HTML 或 PDF 探测）；不跟随跨域重定向。"""
+        return await self._fetch(
+            url,
+            max_bytes=max_bytes,
+            response_type=response_type,
+            accept="*/*",
+        )
+
+    async def fetch_pdf_head(self, url: str) -> ProbeResponse:
+        """PDF 探测：不拉取正文，仅确认可达性与 Content-Type。
+
+        重定向重新执行 allowlist 校验；Content-Type 以响应头为准，
+        由调用方比对 application/pdf。
+        """
+        return await self._fetch(
+            url,
+            max_bytes=0,
+            response_type="pdf",
+            accept="application/pdf",
+        )
+
+    async def _fetch(
+        self,
+        url: str,
+        *,
+        max_bytes: int,
+        response_type: str,
+        accept: str,
+    ) -> ProbeResponse:
         self._validate_url(url)
         current = url
         redirects = 0
@@ -116,7 +243,7 @@ class ProbeClient:
                     response = await client.get(
                         current,
                         follow_redirects=False,
-                        headers={"accept": "*/*"},
+                        headers={"accept": accept},
                     )
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     raise ProbeFetchError(self._provider_key, str(exc)) from exc
@@ -150,6 +277,31 @@ class ProbeClient:
                     redirects=redirects,
                 )
 
+            if response_type == "pdf":
+                # PDF 探测只确认可达性与 Content-Type，不读取正文。
+                content_length = response.headers.get("content-length")
+                length = (
+                    int(content_length) if content_length and content_length.isdigit() else None
+                )
+                self._log(
+                    "probe_pdf",
+                    current,
+                    response.status_code,
+                    duration_ms,
+                    response.headers.get("content-type"),
+                )
+                await response.aclose()
+                return ProbeResponse(
+                    status_code=response.status_code,
+                    content_type=response.headers.get("content-type"),
+                    body=b"",
+                    final_url=str(response.url),
+                    duration_ms=duration_ms,
+                    response_type="pdf",
+                    redirects=redirects,
+                    length=length,
+                )
+
             body = await self._read_limited(response, max_bytes)
             self._log(
                 "probe_ok",
@@ -167,36 +319,6 @@ class ProbeClient:
                 response_type=response_type,
                 redirects=redirects,
             )
-
-    async def fetch_pdf_head(self, url: str) -> ProbeResponse:
-        """PDF 探测：请求头不拉取正文，仅确认可达性与 Content-Type。"""
-        self._validate_url(url)
-        self._next_request()
-        started = time.monotonic()
-        async with self._new_client() as client:
-            try:
-                response = await client.get(
-                    url,
-                    follow_redirects=False,
-                    headers={"accept": "application/pdf"},
-                )
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                raise ProbeFetchError(self._provider_key, str(exc)) from exc
-        duration_ms = int((time.monotonic() - started) * 1000)
-        self._log("probe_pdf", url, response.status_code, duration_ms)
-        content_length = response.headers.get("content-length")
-        length = int(content_length) if content_length and content_length.isdigit() else -1
-        await response.aclose()
-        return ProbeResponse(
-            status_code=response.status_code,
-            content_type=response.headers.get("content-type"),
-            body=b"",
-            final_url=str(response.url),
-            duration_ms=duration_ms,
-            response_type="pdf",
-            redirects=0,
-            length=length,
-        )
 
     def _new_client(self) -> httpx.AsyncClient:
         kwargs: dict = {
