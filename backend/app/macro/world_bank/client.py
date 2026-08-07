@@ -16,12 +16,15 @@
 import json
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import quote
 
 import httpx
 
 from app.core.logging import get_logger
+from app.domain.macro_persistence import MacroSnapshotArtifactRole
+from app.macro.capture import MacroRawJsonResponse
 from app.macro.contracts import MacroQuery
 from app.macro.world_bank.errors import (
     WorldBankApiError,
@@ -86,6 +89,14 @@ class WorldBankHttpResult:
     page: int | None
 
 
+@dataclass(frozen=True)
+class CapturedJsonPayload:
+    """一次成功 JSON 响应：解析后的 payload + 原始字节捕获（同一份 HTTP 响应）。"""
+
+    payload: object
+    raw_response: MacroRawJsonResponse
+
+
 class WorldBankClient:
     """World Bank Indicators API V2 安全客户端。
 
@@ -124,12 +135,12 @@ class WorldBankClient:
             raise WorldBankRequestFailed("url not allowed")
 
     async def fetch_indicator_metadata(self, indicator_code: str) -> object:
-        url = _build_indicator_url(indicator_code) + f"?format=json&source={SOURCE_ID}"
-        return await self._request_json(url, operation="indicator")
+        captured = await self.fetch_indicator_metadata_captured(indicator_code)
+        return captured.payload
 
     async def fetch_country_metadata(self, country_code: str) -> object:
-        url = _build_country_url(country_code) + "?format=json"
-        return await self._request_json(url, operation="country")
+        captured = await self.fetch_country_metadata_captured(country_code)
+        return captured.payload
 
     async def fetch_observations(
         self,
@@ -138,8 +149,45 @@ class WorldBankClient:
         page: int,
         per_page: int = PER_PAGE,
     ) -> object:
+        captured = await self.fetch_observations_captured(query, page=page, per_page=per_page)
+        return captured.payload
+
+    async def fetch_indicator_metadata_captured(
+        self,
+        indicator_code: str,
+    ) -> CapturedJsonPayload:
+        url = _build_indicator_url(indicator_code) + f"?format=json&source={SOURCE_ID}"
+        return await self._request_json_captured(
+            url,
+            operation="indicator",
+            role=MacroSnapshotArtifactRole.INDICATOR_METADATA,
+        )
+
+    async def fetch_country_metadata_captured(
+        self,
+        country_code: str,
+    ) -> CapturedJsonPayload:
+        url = _build_country_url(country_code) + "?format=json"
+        return await self._request_json_captured(
+            url,
+            operation="country",
+            role=MacroSnapshotArtifactRole.COUNTRY_METADATA,
+        )
+
+    async def fetch_observations_captured(
+        self,
+        query: MacroQuery,
+        *,
+        page: int,
+        per_page: int = PER_PAGE,
+    ) -> CapturedJsonPayload:
         url = _build_observations_url(query, page=page, per_page=per_page)
-        return await self._request_json(url, operation="observations", page=page)
+        return await self._request_json_captured(
+            url,
+            operation="observations",
+            page=page,
+            role=MacroSnapshotArtifactRole.OBSERVATIONS_PAGE,
+        )
 
     async def _request_json(
         self,
@@ -148,6 +196,28 @@ class WorldBankClient:
         operation: str,
         page: int | None = None,
     ) -> object:
+        captured = await self._request_json_captured(
+            url,
+            operation=operation,
+            page=page,
+            role=(
+                MacroSnapshotArtifactRole.INDICATOR_METADATA
+                if operation == "indicator"
+                else MacroSnapshotArtifactRole.COUNTRY_METADATA
+                if operation == "country"
+                else MacroSnapshotArtifactRole.OBSERVATIONS_PAGE
+            ),
+        )
+        return captured.payload
+
+    async def _request_json_captured(
+        self,
+        url: str,
+        *,
+        operation: str,
+        role: MacroSnapshotArtifactRole,
+        page: int | None = None,
+    ) -> CapturedJsonPayload:
         self._validate_url(url)
         current = url
         redirects = 0
@@ -179,7 +249,17 @@ class WorldBankClient:
                         if not 200 <= status < 300:
                             raise WorldBankApiError(f"http status {status}")
                         self._validate_content_type(response.headers.get("content-type"))
-                        return self._parse_json(body, duration_ms)
+                        payload = self._parse_json(body, duration_ms)
+                        raw_response = MacroRawJsonResponse(
+                            role=role,
+                            page=page,
+                            response_status=status,
+                            final_hostname=httpx.URL(current).host or "",
+                            content_type=response.headers.get("content-type") or "",
+                            fetched_at=datetime.now(UTC),
+                            raw_bytes=body,
+                        )
+                        return CapturedJsonPayload(payload=payload, raw_response=raw_response)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             # 稳定错误消息：不把底层 ConnectError / hostname / query / TLS 细节泄漏给用户。
             # 结构化日志走 stderr，只记录 error_type / operation / hostname / page。

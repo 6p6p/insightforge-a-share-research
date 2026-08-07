@@ -3,6 +3,7 @@
 - 状态：已接受
 - 日期：2026-08-07
 - 决策人：InsightForge 项目
+- **状态更新（2026-08-07）**：阶段 2C.2B（Macro 原始响应捕获、Snapshot Fingerprint v1 与 `MacroPersistenceService`）已完成并通过测试，本文第 16/18 点的"2C.2B 将实现"已落地；`snapshot_fingerprint` 正式算法、写入顺序 A-K、并发幂等与 replay 完整性检查由 [ADR-0013](0013-macro-captured-persistence-service.md) 冻结。
 
 ## 决策
 

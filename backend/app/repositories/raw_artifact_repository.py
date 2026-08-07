@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import RawArtifactNotFound
 from app.db.models.raw_artifact import RawArtifactModel
 
 
@@ -46,3 +47,16 @@ class RawArtifactRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_or_create(
+        self,
+        artifact: RawArtifactModel,
+    ) -> tuple[RawArtifactModel, bool]:
+        """并发安全插入：冲突返回既有行。created=True 表示本次插入成功。"""
+        created = await self.create(artifact)
+        if created is not None:
+            return created, True
+        existing = await self.get_by_sha256(artifact.content_sha256)
+        if existing is None:
+            raise RawArtifactNotFound()
+        return existing, False

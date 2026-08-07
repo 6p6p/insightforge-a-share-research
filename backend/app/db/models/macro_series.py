@@ -18,8 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
-# 只保存稳定身份：指标-国家-频率五元组；名称/单位/地区名/收入水平等可变
-# 属性存到 MacroDatasetSnapshot，不放在 Series。
+# 只保存稳定身份：provider_key/source_id/external_indicator_id/geography_type/
+# geography_code/frequency 六字段；名称/单位/地区名/收入水平等可变属性存到
+# MacroDatasetSnapshot，不放在 Series。
 _SOURCE_ID_CHECK = "btrim(source_id) <> ''"
 _EXTERNAL_INDICATOR_ID_CHECK = "external_indicator_id ~ '^[A-Z0-9._-]{1,64}$'"
 _GEOGRAPHY_TYPE_CHECK = "geography_type IN ('country')"

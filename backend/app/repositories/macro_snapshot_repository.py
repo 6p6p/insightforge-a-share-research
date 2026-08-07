@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
@@ -36,10 +37,44 @@ class MacroSnapshotRepository:
 
     async def create(self, snapshot: MacroDatasetSnapshotModel) -> MacroDatasetSnapshotModel:
         # 快照不可变：仅插入。snapshot_fingerprint 唯一约束在并发重复时抛
-        # IntegrityError，由调用方（后续 2C.2B Service）决定处理。
+        # IntegrityError，由调用方决定处理。
         self._session.add(snapshot)
         await self._session.flush()
         return snapshot
+
+    async def create_or_get_by_fingerprint(
+        self,
+        snapshot: MacroDatasetSnapshotModel,
+    ) -> tuple[MacroDatasetSnapshotModel, bool]:
+        """INSERT ... ON CONFLICT(snapshot_fingerprint) DO NOTHING RETURNING。
+
+        并发下只有赢得 insert 的事务会返回行（created=True）；输掉的一方
+        回查既有行（created=False），且**不得**再插入 Links/Observations
+        （由 Service 依据 created 标志决定）。created_at 依赖 server_default，
+        不在 values 中显式赋值。
+        """
+        excluded = {"created_at"}
+        values = {
+            column.key: getattr(snapshot, column.key)
+            for column in MacroDatasetSnapshotModel.__table__.columns
+            if column.key not in excluded
+        }
+        stmt = (
+            insert(MacroDatasetSnapshotModel)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[MacroDatasetSnapshotModel.snapshot_fingerprint]
+            )
+            .returning(MacroDatasetSnapshotModel)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is not None:
+            return row, True
+        existing = await self.get_by_fingerprint(snapshot.snapshot_fingerprint)
+        if existing is None:
+            raise RuntimeError("fingerprint conflict without existing row")
+        return existing, False
 
     async def list_for_series(
         self,
@@ -101,3 +136,11 @@ class MacroSnapshotRepository:
             )
         )
         return list(result.scalars().all())
+
+    async def count_artifact_links(self, snapshot_id: UUID) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(MacroSnapshotArtifactModel)
+            .where(MacroSnapshotArtifactModel.snapshot_id == snapshot_id)
+        )
+        return int(result.scalar_one())

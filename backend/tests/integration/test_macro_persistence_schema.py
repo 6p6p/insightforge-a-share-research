@@ -337,7 +337,7 @@ async def test_macro_series_requires_existing_provider(macro_env) -> None:
 async def test_macro_series_identity_unique(macro_env) -> None:
     env = macro_env
     created = await _create_series(env)
-    # 相同五元组、不同 series_id → 唯一约束
+    # 相同六字段身份、不同 series_id → 唯一约束
     async with env["sessionmaker"]() as session:
         await _assert_violation(session, _series(series_id=uuid4()))
     assert created.series_id is not None

@@ -49,6 +49,8 @@ _AUTHORITY_TIER_CHECK = "authority_tier_snapshot BETWEEN 1 AND 4"
 _TOPICS_ARRAY_CHECK = "jsonb_typeof(topics_snapshot) = 'array'"
 _CAPABILITIES_ARRAY_CHECK = "jsonb_typeof(provider_capabilities_snapshot) = 'array'"
 _STATUS_CHECK = "status = 'available'"
+_FINGERPRINT_VERSION_CHECK = "fingerprint_version = 1"
+_NORMALIZATION_VERSION_CHECK = "length(trim(normalization_version)) > 0"
 
 
 class MacroDatasetSnapshotModel(Base):
@@ -99,6 +101,14 @@ class MacroDatasetSnapshotModel(Base):
             name="ck_macro_dataset_snapshots_provider_capabilities_array",
         ),
         CheckConstraint(_STATUS_CHECK, name="ck_macro_dataset_snapshots_status"),
+        CheckConstraint(
+            _FINGERPRINT_VERSION_CHECK,
+            name="ck_macro_dataset_snapshots_fingerprint_version",
+        ),
+        CheckConstraint(
+            _NORMALIZATION_VERSION_CHECK,
+            name="ck_macro_dataset_snapshots_normalization_version",
+        ),
         UniqueConstraint(
             "snapshot_fingerprint",
             name="uq_macro_dataset_snapshots_fingerprint",
@@ -117,6 +127,16 @@ class MacroDatasetSnapshotModel(Base):
         nullable=False,
     )
     snapshot_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 版本信息：fingerprint_version=1 定义 SHA-256 canonical payload 算法；
+    # normalization_version 定义原始响应→结构化数据（indicator/geography/
+    # observation）的解析规范版本。Python 创建时显式赋值（不长期依赖
+    # server default，migration 0010 仅用 default 回填既有行）。
+    fingerprint_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("1")
+    )
+    normalization_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default=text("'world_bank_v1'")
+    )
     requested_country_code: Mapped[str] = mapped_column(String(3), nullable=False)
     query_start_year: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     query_end_year: Mapped[int] = mapped_column(SmallInteger, nullable=False)

@@ -16,6 +16,7 @@ from app.domain.sources import (
     SourceAuthorityTier,
     SourceCapability,
 )
+from app.macro.capture import CapturedMacroFetch
 from app.macro.contracts import (
     MacroFetchResult,
     MacroObservation,
@@ -103,23 +104,36 @@ class WorldBankProvider:
         }
 
     async def fetch(self, query: MacroQuery) -> MacroFetchResult:
+        captured = await self.fetch_with_capture(query)
+        return captured.result
+
+    async def fetch_with_capture(self, query: MacroQuery) -> CapturedMacroFetch:
+        """一次完整获取 + 每个成功 JSON 响应的原始字节捕获。
+
+        responses 顺序固定：indicator_metadata、country_metadata、
+        observations_page(page=1..pages)。Fingerprint 计算不依赖此顺序。
+        """
         snapshot = await self._load_provider_snapshot()
         client = WorldBankClient(allowed_domains=snapshot["allowed_domains"])
         fetched_at = datetime.now(UTC)
 
-        indicator_raw = await client.fetch_indicator_metadata(query.indicator_code)
+        indicator_captured = await client.fetch_indicator_metadata_captured(query.indicator_code)
         indicator = parse_indicator(
-            indicator_raw,
+            indicator_captured.payload,
             indicator_code=query.indicator_code,
             provider_key=self.provider_key,
         )
 
-        country_raw = await client.fetch_country_metadata(query.country_code)
-        geography = parse_geography(country_raw, requested_code=query.country_code)
+        country_captured = await client.fetch_country_metadata_captured(query.country_code)
+        geography = parse_geography(country_captured.payload, requested_code=query.country_code)
 
-        observations, page_info = await self._fetch_all_observations(client, query, geography)
+        observations, page_info, page_responses = await self._fetch_all_observations_captured(
+            client,
+            query,
+            geography,
+        )
 
-        return MacroFetchResult(
+        result = MacroFetchResult(
             provider_key=self.provider_key,
             query=query,
             indicator=indicator,
@@ -133,22 +147,33 @@ class WorldBankProvider:
             critical_claim_eligible=snapshot["critical_claim_eligible"],
             provider_capabilities=snapshot["capabilities"],
         )
+        responses = (
+            indicator_captured.raw_response,
+            country_captured.raw_response,
+            *page_responses,
+        )
+        return CapturedMacroFetch(result=result, responses=responses)
 
-    async def _fetch_all_observations(
+    async def _fetch_all_observations_captured(
         self,
         client: WorldBankClient,
         query: MacroQuery,
         geography,
-    ) -> tuple[list[MacroObservation], MacroPageInfo]:
-        """从 page=1 开始分页；合并全部观测；保留首页 page_info（含 Provider total）。"""
+    ) -> tuple[list[MacroObservation], MacroPageInfo, tuple]:
+        """从 page=1 开始分页；合并全部观测；保留首页 page_info 与逐页 raw_response。"""
         page = 1
         merged: list[MacroObservation] = []
+        page_responses: list = []
         first_page_info: MacroPageInfo | None = None
         first_pages: int | None = None
         while True:
-            raw = await client.fetch_observations(query, page=page, per_page=PER_PAGE)
+            captured = await client.fetch_observations_captured(
+                query,
+                page=page,
+                per_page=PER_PAGE,
+            )
             page_info, rows = parse_observations(
-                raw,
+                captured.payload,
                 query=query,
                 geography=geography,
                 provider_key=self.provider_key,
@@ -170,9 +195,10 @@ class WorldBankProvider:
             if first_page_info is None:
                 first_page_info = page_info
             merged.extend(rows)
+            page_responses.append(captured.raw_response)
             if page >= page_info.pages:
                 break
             page += 1
         if first_page_info is None:
             raise WorldBankMalformedResponse("no page info received")
-        return _dedupe(merged), first_page_info
+        return _dedupe(merged), first_page_info, tuple(page_responses)

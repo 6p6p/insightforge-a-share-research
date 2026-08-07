@@ -53,7 +53,17 @@
   - 本阶段不实现 MacroPersistenceService、不创建 Macro API、不把 Macro 数据接入 Evidence/Claim、不接入 LangGraph/LLM/Agent/RAG/Chroma；没有已持久化的真实 World Bank 数据。
   - 测试：新增 61 项单元测试 + 29 项集成测试（`test_macro_persistence_schema.py`）；全部集成测试（61 既有 + 29 新增 = 90）通过。
   - 决策记录：[docs/decisions/0012-macro-snapshot-persistence-model.md](decisions/0012-macro-snapshot-persistence-model.md)。
-- **2C.2B（尚未开始）**：MacroPersistenceService、真实 Snapshot 写入、Provider 策略快照应用与 snapshot_fingerprint 正式算法。
+- **2C.2B（实现与自动化测试已完成，2026-08-07）**：Macro 原始响应捕获、Snapshot Fingerprint 与事务化持久化 Service。
+  - `MacroRawJsonResponse` 冻结原始响应（role/page/2xx 状态/裸 hostname/`application/json`/非空且 ≤ 5 MiB/时区感知，构造时 8 项校验）；`fetch_with_capture` 响应顺序固定 indicator → country → observations pages，逐份捕获原始字节。
+  - `validate_captured_macro_fetch` 11 项完整性校验（元数据各恰一条、分页完整 1..pages、总数 = 2+pages、hostname/content-type/source_id/provider_key），失败在文件/DB 写入前拦截。
+  - 原始响应先内容寻址归档（`put_json_bytes`，文件 I/O 先于 DB transaction）；孤儿文件保留等待后续 GC。
+  - Snapshot Fingerprint v1：canonical JSON + SHA-256，golden vector 固定；排除 fetched_at/request_count（可重放）、输入顺序无关、基于归档 artifact 的 content SHA-256。
+  - `MacroPersistenceService`（`persist_captured_fetch` / `fetch_and_persist`）严格写入顺序 A-K：网络 I/O 不持有 AsyncSession；并发幂等（ON CONFLICT DO NOTHING，仅赢家写 Links/Observations）；replay 完整性检查失败抛 `MacroSnapshotIntegrityError`，不自动修复。
+  - 4 类稳定错误（`macro_capture_invalid` / `macro_artifact_conflict` / `macro_snapshot_integrity_error` / `macro_persistence_failed`），消息不含 raw body / storage 路径 / DB URL / 完整 URL / allowed_domains 全集。
+  - migration 0010 新增 `fingerprint_version` / `normalization_version` + CHECK（已应用，`alembic current` = 0010 head）；**不创建 RetrievalAttempt 表**（设计决策见 ADR-0013）。
+  - 本阶段不创建 Macro API、不把 Macro 数据接入 Evidence/Claim、不接 LangGraph/LLM/Agent/RAG/Chroma；没有持久化的真实 World Bank 数据。
+  - 测试：新增 28 项单元测试（capture 19 + fingerprint 9）+ 8 项 MockTransport E2E 集成测试。
+  - 决策记录：[docs/decisions/0013-macro-captured-persistence-service.md](decisions/0013-macro-captured-persistence-service.md)。
 - **2C.3（尚未开始）**：FRED Provider。
 - **2C.4（尚未开始）**：国内官方宏观数据接入（NBS 等）。
 

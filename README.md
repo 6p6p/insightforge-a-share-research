@@ -310,11 +310,11 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 
 ## 宏观数据持久化数据模型（阶段 2C.2A）
 
-阶段 2C.2A 已建立宏观数据持久化的数据模型与原始 JSON 归档路径，为 2C.2B（MacroPersistenceService 真实写入）做准备。**本阶段不实现 MacroPersistenceService、不创建 Macro API、不把 Macro 数据接入 Evidence/Claim，不接入 LangGraph/LLM/Agent/RAG/Chroma；没有已持久化的真实 World Bank 数据**。
+阶段 2C.2A 建立了宏观数据持久化的数据模型与原始 JSON 归档路径，为 2C.2B 提供表结构与 Repository 契约（2C.2B 捕获/指纹/Service 见下节）。**2C.2A 本身不实现 MacroPersistenceService、不创建 Macro API、不把 Macro 数据接入 Evidence/Claim，不接入 LangGraph/LLM/Agent/RAG/Chroma；没有已持久化的真实 World Bank 数据**。
 
 - RawArtifact 媒体类型从 PDF-only 泛化为 PDF+JSON：既有 PDF 行为、storage_key（`sha256/ab/cd/<hash>.pdf`）与全部 PDF 测试保持不变；`application/json` 仅用于 Macro 原始响应归档，不包装成 SourceRecord（SourceRecord 仍保持 company-bound、PDF-only 语义）。
 - `LocalRawArtifactStore` 新增 JSON 原始字节归档（`sha256/ab/cd/<hash>.json`）：非空、上限 `MACRO_MAX_JSON_RESPONSE_BYTES`（默认 5 MiB）、UTF-8（允许 BOM）、合法 JSON、`parse_float=Decimal`、拒绝 NaN/Infinity 字面量、保存原始字节（不重新序列化/不格式化/不改键序）、SHA-256 基于原始字节、随机临时文件 + flush/fsync + 原子移动、相同内容复用。
-- 四张 Macro 业务表（migration 0009）：`macro_series`（指标-国家稳定身份，UNIQUE 五元组）、`macro_dataset_snapshots`（一次获取快照，`snapshot_fingerprint` 唯一）、`macro_snapshot_artifacts`（原始响应与快照的关联，role/page 语义）、`macro_observations`（NUMERIC 值 + 缺失语义）；对应 Repository 使用 PostgreSQL ON CONFLICT 并发去重、稳定排序、不 commit。
+- 四张 Macro 业务表（migration 0009）：`macro_series`（provider_key/source_id/external_indicator_id/geography_type/geography_code/frequency 六字段稳定身份，UNIQUE）、`macro_dataset_snapshots`（一次获取快照，`snapshot_fingerprint` 唯一）、`macro_snapshot_artifacts`（原始响应与快照的关联，role/page 语义）、`macro_observations`（NUMERIC 值 + 缺失语义）；对应 Repository 使用 PostgreSQL ON CONFLICT 并发去重、稳定排序、不 commit。
 - 决策记录：[docs/decisions/0012-macro-snapshot-persistence-model.md](docs/decisions/0012-macro-snapshot-persistence-model.md)。
 
 环境变量（新增）：
@@ -322,6 +322,18 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `MACRO_MAX_JSON_RESPONSE_BYTES` | `5242880` | Macro 原始 JSON 响应单文件字节上限（1 KiB—20 MiB） |
+
+## 宏观数据捕获、指纹与持久化 Service（阶段 2C.2B）
+
+阶段 2C.2B 已实现"原始响应捕获 → 内容寻址归档 → Snapshot Fingerprint → 事务化持久化 → 并发幂等 → replay 完整性检查"的完整链路。**本阶段不创建 Macro API、不把 Macro 数据接入 Evidence/Claim、不接入 LangGraph/LLM/Agent/RAG/Chroma；没有持久化的真实 World Bank 数据**。
+
+- `MacroRawJsonResponse` 冻结原始响应（role/page/2xx 状态/裸 hostname/`application/json`/非空且 ≤ 5 MiB/时区感知，构造时 8 项校验）；`fetch_with_capture` 响应顺序固定 indicator → country → observations pages。
+- `validate_captured_macro_fetch` 11 项完整性校验（元数据各恰一条、分页完整 1..pages、总数 = 2+pages、hostname/content-type/source_id/provider_key），失败在文件/DB 写入前拦截。
+- 原始响应先内容寻址归档（`LocalRawArtifactStore.put_json_bytes`，文件 I/O 先于 DB transaction）；孤儿文件保留等待后续 GC。
+- Snapshot Fingerprint v1：canonical JSON + SHA-256（golden vector 固定），排除 `fetched_at`/`request_count`（重复获取可 replay）、输入顺序无关、基于归档 artifact 的 content SHA-256。
+- `MacroPersistenceService`（`persist_captured_fetch` / `fetch_and_persist`）严格写入顺序 A-K：网络 I/O 不持有 AsyncSession；并发幂等（`ON CONFLICT DO NOTHING`，仅赢家写 Links/Observations）；replay 完整性检查失败抛 `MacroSnapshotIntegrityError`，不自动修复。
+- migration 0010 新增 `fingerprint_version` / `normalization_version` + CHECK（已应用，`alembic current` = 0010 head）；**不创建 RetrievalAttempt 表**（设计决策见 ADR-0013）。
+- 决策记录：[docs/decisions/0013-macro-captured-persistence-service.md](docs/decisions/0013-macro-captured-persistence-service.md)。
 
 ## 完整系统（Docker Compose）
 
