@@ -19,3 +19,4 @@ class SourceRecordStatus(StrEnum):
 
 class RawArtifactMediaType(StrEnum):
     PDF = "application/pdf"
+    JSON = "application/json"

@@ -1,17 +1,25 @@
 """Content-addressed immutable raw artifact storage on the local filesystem.
 
-存储布局：<root>/sha256/<ab>/<cd>/<64位hash>.pdf
+存储布局：
+- PDF：<root>/sha256/<ab>/<cd>/<64位hash>.pdf
+- JSON：<root>/sha256/<ab>/<cd>/<64位hash>.json
 文件一旦写入内容寻址路径后不可覆盖；相同 SHA-256 内容只保留一份。
+
+JSON 归档只保存收到的原始字节（不重新序列化、不格式化、不改键序），
+SHA-256 基于原始字节计算；内容寻址保证同一原始响应只有一份。
 """
 
 import hashlib
+import json
 import os
 import tempfile
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import BinaryIO
 
 from app.core.errors import (
+    InvalidJsonFile,
     InvalidPdfFile,
     RawArtifactNotFound,
     SourceFileTooLarge,
@@ -23,6 +31,13 @@ _CHUNK_SIZE = 1024 * 1024
 _HEAD_SCAN_BYTES = 1024
 _ASCII_WHITESPACE = b"\t\n\r\x20"
 _MEDIA_TYPE_PDF = "application/pdf"
+_MEDIA_TYPE_JSON = "application/json"
+_DEFAULT_MAX_JSON_BYTES = 5 * 1024 * 1024  # 5 MiB
+
+
+def _reject_json_constant(value: str) -> None:
+    """json.loads 的 parse_constant：显式拒绝 NaN/Infinity/-Infinity 字面量。"""
+    raise InvalidJsonFile()
 
 
 class InvalidStorageKey(Exception):
@@ -39,9 +54,16 @@ class StoredRawArtifact:
 
 
 class LocalRawArtifactStore:
-    def __init__(self, root: Path, max_bytes: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        max_bytes: int,
+        *,
+        max_json_bytes: int = _DEFAULT_MAX_JSON_BYTES,
+    ) -> None:
         self._root = root
         self._max_bytes = max_bytes
+        self._max_json_bytes = max_json_bytes
 
     def put_pdf_stream(self, stream: BinaryIO) -> StoredRawArtifact:
         """Stream a PDF into the content-addressed store.
@@ -96,6 +118,69 @@ class LocalRawArtifactStore:
                 except OSError:
                     pass
 
+    def put_json_bytes(self, data: bytes) -> StoredRawArtifact:
+        """Store a raw JSON byte string into the content-addressed store.
+
+        严格校验：非空、单文件字节上限、UTF-8（允许 UTF-8 BOM）、合法 JSON、
+        数值用 parse_float=Decimal 解析、显式拒绝 NaN/Infinity/-Infinity 字面量；
+        保存收到的原始字节（不重新序列化、不格式化、不改键序），SHA-256 基于
+        原始字节计算。先写随机临时文件并 flush+fsync，校验成功后原子移动到
+        内容寻址路径；相同内容复用（newly_created=False）。任何日志不输出
+        绝对路径或 JSON 正文。
+        """
+        self._root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = self._root / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        if len(data) > self._max_json_bytes:
+            raise SourceFileTooLarge()
+        self._validate_json(data)
+        content_sha256 = hashlib.sha256(data).hexdigest()
+        storage_key = self._storage_key_for_json(content_sha256)
+        final_path = self._resolve(storage_key)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if final_path.exists():
+            return StoredRawArtifact(
+                content_sha256=content_sha256,
+                storage_key=storage_key,
+                byte_size=len(data),
+                media_type=_MEDIA_TYPE_JSON,
+                newly_created=False,
+            )
+        fd, tmp_path = tempfile.mkstemp(dir=tmp_dir, prefix="upload-json-")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, final_path)
+            return StoredRawArtifact(
+                content_sha256=content_sha256,
+                storage_key=storage_key,
+                byte_size=len(data),
+                media_type=_MEDIA_TYPE_JSON,
+                newly_created=True,
+            )
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _validate_json(data: bytes) -> None:
+        """非空、UTF-8（允许 BOM）、合法 JSON、Decimal 数值、拒绝非有限字面量。"""
+        if not data:
+            raise InvalidJsonFile()
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise InvalidJsonFile() from None
+        try:
+            json.loads(text, parse_float=Decimal, parse_constant=_reject_json_constant)
+        except json.JSONDecodeError:
+            raise InvalidJsonFile() from None
+
     def open(self, storage_key: str) -> BinaryIO:
         """Open a stored file for reading; never exposes absolute host paths."""
         try:
@@ -149,6 +234,10 @@ class LocalRawArtifactStore:
     @staticmethod
     def _storage_key_for(content_sha256: str) -> str:
         return f"sha256/{content_sha256[:2]}/{content_sha256[2:4]}/{content_sha256}.pdf"
+
+    @staticmethod
+    def _storage_key_for_json(content_sha256: str) -> str:
+        return f"sha256/{content_sha256[:2]}/{content_sha256[2:4]}/{content_sha256}.json"
 
     def _resolve(self, storage_key: str) -> Path:
         if not storage_key or storage_key.startswith(("/", "\\")):

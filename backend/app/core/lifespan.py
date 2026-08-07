@@ -46,6 +46,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     raw_storage = LocalRawArtifactStore(
         root=settings.raw_storage_root,
         max_bytes=settings.source_max_file_size_bytes,
+        max_json_bytes=settings.macro_max_json_response_bytes,
     )
     resources = ApplicationResources(
         database=database,

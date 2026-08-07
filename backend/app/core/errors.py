@@ -109,6 +109,12 @@ class InvalidPdfFile(DomainError):
     message = "不是有效的 PDF 文件"
 
 
+class InvalidJsonFile(DomainError):
+    code = "invalid_json_file"
+    http_status = 400
+    message = "不是有效的 JSON 文件"
+
+
 class SourceProviderDisabled(DomainError):
     code = "source_provider_disabled"
     http_status = 409

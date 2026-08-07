@@ -2,7 +2,7 @@
 
 面向 A 股上市公司的证据驱动基本面研究与事实审核系统。
 
-> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）与阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
+> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）与阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）**已实现**，阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
 
 ## 目录职责
 
@@ -286,7 +286,7 @@ conda run -n insightforge python -m app.cli.probe_disclosure_sources \
 
 ## 宏观数据 Provider（阶段 2C.1）
 
-阶段 2C.1 建立宏观数据领域契约与第一个 Provider（World Bank Indicators API V2）。**当前只是"获取"层**：不写数据库、不创建表、结果不是 Evidence/Claim/Report，也不进入 LangGraph 编排；只有阶段 2C.2 完成持久化、Provider 快照与原始 JSON 归档后，宏观数据才能进入证据链。**尚未实现 FRED 与国内官方宏观数据（NBS 等）**。
+阶段 2C.1 建立宏观数据领域契约与第一个 Provider（World Bank Indicators API V2）。**状态拆分：implementation：completed / automated tests：completed / live external acceptance：pending**——网络阻断不是代码失败，允许离线推进 2C.2A；真实验收跑通前不开放生产宏观采集、不把 Macro Snapshot 视为 Evidence、不进入 Claim/Report。**当前 2C.1 只是"获取"层**：不写数据库、不创建表、结果不是 Evidence/Claim/Report，也不进入 LangGraph 编排；只有阶段 2C.2（2C.2A + 2C.2B）完成持久化、Provider 快照与原始 JSON 归档后，宏观数据才能进入证据链。**尚未实现 FRED 与国内官方宏观数据（NBS 等）**。
 
 - 只支持 `annual` 频率与单一 `country` 地理类型（`country_code` 拒绝 `ALL`）；年份闭区间最多 60 年。World Bank 允许 WLD/LCN/HIC 等聚合代码出现在 country 路径，解析国家元数据时若 `region.value` 规范化后等于 `Aggregates` 或缺失/无法确定，保守拒绝为 `geography_not_country`。
 - 固定官方 Indicators API V2（`api.worldbank.org/v2`）+ 数据源 `source=2`（World Development Indicators）；客户端固定接口模板，不接受任意 endpoint/query 参数；`MacroFetchResult.source_id` 固定 `"2"`。
@@ -306,7 +306,22 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
   - 输出 JSON 报告到 stdout（日志走 stderr），Decimal 输出为字符串，**不写数据库、不保存响应正文、不写本地文件**；
   - 退出码：0 成功 / 2 输入错误 / 3 Provider 配置错误 / 4 API/网络/响应错误。
 
-> **受控真实验收说明（2026-08-07，2C.1.1/2C.1.2 收口）**：本机网络对 `worldbank.org` 存在域名级出口阻断（DNS 被劫持到合成地址、TLS 握手被丢弃），真实请求在本环境返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误、不泄漏底层细节），CLI 未跑通成功路径。上述命令与断言不变量已记录在 [docs/decisions/0011-macro-provider-and-world-bank.md](docs/decisions/0011-macro-provider-and-world-bank.md)，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 保持"当前进行"（2C.1.2 收口仅冻结契约与测试），阶段 2C.2 不开始。
+> **受控真实验收说明（2026-08-07，2C.1.1/2C.1.2 收口）**：本机网络对 `worldbank.org` 存在域名级出口阻断（DNS 被劫持到合成地址、TLS 握手被丢弃），真实请求在本环境返回 `{"error":"request_failed","message":"World Bank API request failed"}`（exit 4，稳定非空错误、不泄漏底层细节），CLI 未跑通成功路径。上述命令与断言不变量已记录在 [docs/decisions/0011-macro-provider-and-world-bank.md](docs/decisions/0011-macro-provider-and-world-bank.md)，可在具备 World Bank 出网的环境补跑；跑通前 2C.1 的 **live external acceptance 保持 pending**（不影响离线推进 2C.2A，见下）。
+
+## 宏观数据持久化数据模型（阶段 2C.2A）
+
+阶段 2C.2A 已建立宏观数据持久化的数据模型与原始 JSON 归档路径，为 2C.2B（MacroPersistenceService 真实写入）做准备。**本阶段不实现 MacroPersistenceService、不创建 Macro API、不把 Macro 数据接入 Evidence/Claim，不接入 LangGraph/LLM/Agent/RAG/Chroma；没有已持久化的真实 World Bank 数据**。
+
+- RawArtifact 媒体类型从 PDF-only 泛化为 PDF+JSON：既有 PDF 行为、storage_key（`sha256/ab/cd/<hash>.pdf`）与全部 PDF 测试保持不变；`application/json` 仅用于 Macro 原始响应归档，不包装成 SourceRecord（SourceRecord 仍保持 company-bound、PDF-only 语义）。
+- `LocalRawArtifactStore` 新增 JSON 原始字节归档（`sha256/ab/cd/<hash>.json`）：非空、上限 `MACRO_MAX_JSON_RESPONSE_BYTES`（默认 5 MiB）、UTF-8（允许 BOM）、合法 JSON、`parse_float=Decimal`、拒绝 NaN/Infinity 字面量、保存原始字节（不重新序列化/不格式化/不改键序）、SHA-256 基于原始字节、随机临时文件 + flush/fsync + 原子移动、相同内容复用。
+- 四张 Macro 业务表（migration 0009）：`macro_series`（指标-国家稳定身份，UNIQUE 五元组）、`macro_dataset_snapshots`（一次获取快照，`snapshot_fingerprint` 唯一）、`macro_snapshot_artifacts`（原始响应与快照的关联，role/page 语义）、`macro_observations`（NUMERIC 值 + 缺失语义）；对应 Repository 使用 PostgreSQL ON CONFLICT 并发去重、稳定排序、不 commit。
+- 决策记录：[docs/decisions/0012-macro-snapshot-persistence-model.md](docs/decisions/0012-macro-snapshot-persistence-model.md)。
+
+环境变量（新增）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MACRO_MAX_JSON_RESPONSE_BYTES` | `5242880` | Macro 原始 JSON 响应单文件字节上限（1 KiB—20 MiB） |
 
 ## 完整系统（Docker Compose）
 
