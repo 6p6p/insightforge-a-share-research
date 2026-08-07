@@ -6,9 +6,9 @@
 
 ## 决策
 
-1. **2D.2A 状态（四维）：implementation completed / automated tests completed / docker rebuild acceptance completed / live external acceptance completed（2026-08-07）**。
+1. **2D.2A 状态（四维）：implementation completed / automated tests completed / docker rebuild acceptance completed / live_html_transport_acceptance completed（2026-08-07）**。real_article_e2e_acceptance = not performed / not required for 2D.2A code acceptance（真实文章端到端由自动化测试覆盖：真实 PostgreSQL + MockTransport + FakeHostResolver）。
    - 本阶段实现确定性链路：`NewsDiscoveryCandidate → Original Publisher → Safe HTML fetch → RawArtifact(text/html) → SourceRecord → NewsSourceVerification`。自动化测试全链路使用 MockTransport + FakeHostResolver，无真实外网请求。
-   - 受控真实 Probe（§二十八）只对 `xinhuanet.com` 最多 1 次请求、不重试、不代理、不 DNS 覆盖，已执行且成功（真实 DNS + 真实 HTTPS，status=200 / text/html / redirects=0 / 178,458 字节），**live external acceptance = completed**；本环境网络阻断时记录为 pending，不阻塞提交。
+   - 受控真实 HTML 传输 Probe（§二十八）只对 `xinhuanet.com` 最多 1 次请求、不重试、不代理、不 DNS 覆盖，已执行且成功（真实 DNS + 真实 HTTPS，status=200 / text/html / redirects=0 / 178,458 字节），**live_html_transport_acceptance = completed**；**只验证 HTML 传输链，不是真实文章端到端验收（real_article_e2e_acceptance = not performed）**。本环境网络阻断时记录为 pending，不阻塞提交。
 2. **顶层不变量 A：Discovery Provider ≠ Source Provider**。
    - GDELT、搜索引擎、LLM 搜索都是 Discovery Provider / acquisition mechanism，不是事实发布者、不是 SourceProvider、不是 Evidence source。`candidate.discovered_url` 指向的**原始发布网页**才是潜在事实来源。本阶段正是把"候选线索"提升为"可追溯原始来源记录"的第一步，但提升不等于证明内容为真。
 3. **顶层不变量 B：Candidate URL 不直接请求——必须走 Resolver → Registry → SafeHtmlFetcher**。
@@ -59,5 +59,6 @@
 - 建立"Candidate → Original Publisher → 安全获取 → 内容寻址归档 → SourceRecord → Verification"确定性链路，新闻原始发布网页第一次获得可追溯的、不可变归档的来源记录；`verified` 语义被严格限定为"发布者归属 + 页面可访问 + 原文已归档 + 溯源已建立"，不是内容真实性判定。
 - 第一批 Original Publishers 进入 Source Registry（共 11 个 Provider）：新华网 / 中国证券网 / 中证网为 media / tier 3 / news_article / public_html，`critical_claim_eligible=false`；GDELT 等 discovery-only 机制仍不进 Source Registry。
 - Migration 0012 已应用（`alembic current` = 0012 head）；downgrade 0011 / 再 upgrade 往返验证通过。
-- 自动化测试全部 MockTransport + FakeHostResolver（Network Guard 继续拦截真实网络）；受控 Probe 仅对 xinhuanet.com 至多 1 次请求且已成功（live external acceptance = completed）。Docker 重建成功（新镜像 healthy、`/api/v1/health/live` 200、`/api/v1/health/ready` 200、五项 checks ok），docker rebuild acceptance = completed。
-- 遗留边界：`news_article` 原文进入 Evidence 管线属于 2D.2B 后续/Evidence 阶段；2D.2B（verification status 演进：rejected / archived / evidence_ready）与 2D.3 未开始。
+- 自动化测试全部 MockTransport + FakeHostResolver（Network Guard 继续拦截真实网络）；受控 Probe 仅对 xinhuanet.com 至多 1 次请求且已成功，**只验证 HTML 传输链（live_html_transport_acceptance = completed），不是真实文章端到端验收（real_article_e2e_acceptance = not performed）**。Docker 重建成功（新镜像 healthy、`/api/v1/health/live` 200、`/api/v1/health/ready` 200、五项 checks ok），docker rebuild acceptance = completed。
+- **失败历史语义**：Candidate 的 `verification_status` 冻结为 unverified / verified 二者唯一，**不存在终态 rejected / archived / evidence_ready**。发布者不支持 / 抓取失败 / 内容被拒等失败不改 Candidate 状态（保持 unverified）。未来失败历史由独立的 Attempt 模型记录（如 `NewsSourceVerificationAttempt`，或统一 RetrievalAttempt 模型），该模型本阶段不建表，不把 verification_status 演进为 rejected / archived / evidence_ready。
+- 遗留边界：`news_article` 原文进入 Evidence 管线属于 2D.2B 后续/Evidence 阶段；2D.2B 与 2D.3 未开始。

@@ -23,7 +23,8 @@ from uuid import uuid4
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import IntegrityError
 
 from app.acquisition.host_resolver import HostResolver
 from app.acquisition.html_fetcher import SafeHtmlFetcher
@@ -488,3 +489,32 @@ async def test_unsupported_publisher_raises(env) -> None:
     with pytest.raises(NewsPublisherUnsupported) as exc:
         await service.verify_candidate(candidate_id)
     assert exc.value.code == "news_publisher_unsupported"
+    # §七：失败不改 Candidate 状态（无终态 rejected），保持 unverified。
+    async with env["sessionmaker"]() as session:
+        cand = await NewsDiscoveryCandidateRepository(session).get_by_id(candidate_id)
+        assert cand is not None and cand.verification_status == "unverified"
+
+
+async def test_candidate_verification_status_frozen_to_unverified_verified(env) -> None:
+    """§六 冻结：Candidate verification_status 只允许 unverified/verified。
+
+    rejected / archived / evidence_ready 等任何其他值都被 DB CHECK
+    （ck_news_discovery_candidates_verification_status）拒绝。失败不改
+    Candidate 状态、不存在终态 rejected；未来失败历史走独立 Attempt 模型。
+    """
+    _, candidate_id = await _seed_candidate(env["sessionmaker"], env["company_id"])
+
+    for forbidden in ("rejected", "archived", "evidence_ready"):
+        async with env["sessionmaker"]() as session:
+            with pytest.raises(IntegrityError):
+                await session.execute(
+                    update(NewsDiscoveryCandidateModel)
+                    .where(NewsDiscoveryCandidateModel.candidate_id == candidate_id)
+                    .values(verification_status=forbidden)
+                )
+            await session.rollback()
+
+    # 状态未被污染，保持 unverified
+    async with env["sessionmaker"]() as session:
+        cand = await NewsDiscoveryCandidateRepository(session).get_by_id(candidate_id)
+        assert cand is not None and cand.verification_status == "unverified"

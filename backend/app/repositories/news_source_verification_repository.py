@@ -44,9 +44,7 @@ class NewsSourceVerificationRepository:
         stmt = (
             insert(NewsSourceVerificationModel)
             .values(**values)
-            .on_conflict_do_nothing(
-                index_elements=[NewsSourceVerificationModel.candidate_id]
-            )
+            .on_conflict_do_nothing(index_elements=[NewsSourceVerificationModel.candidate_id])
             .returning(NewsSourceVerificationModel)
         )
         result = await self._session.execute(stmt)

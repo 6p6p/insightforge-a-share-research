@@ -101,9 +101,7 @@ class SourceProviderRepository:
         result = await self._session.execute(
             select(SourceProviderModel)
             .where(SourceProviderModel.enabled.is_(True))
-            .where(
-                SourceProviderModel.capabilities.contains([SourceCapability.NEWS_ARTICLE.value])
-            )
+            .where(SourceProviderModel.capabilities.contains([SourceCapability.NEWS_ARTICLE.value]))
             .where(
                 SourceProviderModel.acquisition_methods.contains(
                     [AcquisitionMethod.PUBLIC_HTML.value]

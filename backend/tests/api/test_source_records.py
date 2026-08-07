@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_source_ingestion_service
-from app.core.errors import SourceRecordNotFound
+from app.core.errors import SourceContentUnsupportedMediaType, SourceRecordNotFound
 from app.domain.source_records import SourceDocumentType
 from app.schemas.source_record import (
     SourceRecordListResponse,
@@ -298,6 +298,18 @@ def test_download_content_html_returns_415(ingestion_client, fake_ingestion) -> 
     assert response.status_code == 415
     body = response.json()
     assert body["error"]["code"] == "source_content_unsupported_media_type"
+
+
+def test_source_content_unsupported_media_type_contract() -> None:
+    """§二十一 契约：415 必须落在 DomainError 字段上，防止 docstring/字段漂移。
+
+    直接断言错误对象（不经 Fake Service/API 层），防止出现"注释写 415、
+    实际 http_status=4"这种总结与代码不一致。
+    """
+    err = SourceContentUnsupportedMediaType()
+    assert err.code == "source_content_unsupported_media_type"
+    assert err.http_status == 415
+    assert err.message == "该来源媒体类型不支持内容下载"
 
 
 def test_openapi_contains_source_endpoints(ingestion_client) -> None:

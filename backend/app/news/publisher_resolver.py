@@ -85,9 +85,7 @@ class OriginalPublisherResolver:
         match_url = parts.geturl()
 
         eligible = [p for p in providers if _is_eligible_publisher(p)]
-        matches = [
-            p for p in eligible if is_url_allowed(match_url, list(p.allowed_domains))
-        ]
+        matches = [p for p in eligible if is_url_allowed(match_url, list(p.allowed_domains))]
         if not matches:
             raise NewsPublisherUnsupported()
         if len(matches) > 1:

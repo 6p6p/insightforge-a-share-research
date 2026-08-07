@@ -200,9 +200,7 @@ def downgrade() -> None:
     op.drop_table("news_source_verifications")
 
     # 2. candidate.verification_status 回退到仅 unverified
-    if _table_has_row(
-        "news_discovery_candidates", "verification_status = 'verified'"
-    ):
+    if _table_has_row("news_discovery_candidates", "verification_status = 'verified'"):
         raise RuntimeError(
             "cannot downgrade migration 0012: news_discovery_candidates contains "
             "verified rows; refusing to drop them silently"

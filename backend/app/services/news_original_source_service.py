@@ -191,9 +191,7 @@ class NewsOriginalSourceService:
                 )
                 verification_id = verification.verification_id
 
-                candidate.verification_status = (
-                    NewsCandidateVerificationStatus.VERIFIED.value
-                )
+                candidate.verification_status = NewsCandidateVerificationStatus.VERIFIED.value
                 await session.commit()
             except SQLAlchemyError as exc:
                 await session.rollback()
