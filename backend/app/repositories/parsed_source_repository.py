@@ -26,6 +26,12 @@ class ParsedSourceRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id(self, parsed_source_id: UUID) -> ParsedSourceModel | None:
+        result = await self._session.execute(
+            select(ParsedSourceModel).where(ParsedSourceModel.parsed_source_id == parsed_source_id)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_source_id(self, source_id: UUID) -> ParsedSourceModel | None:
         result = await self._session.execute(
             select(ParsedSourceModel).where(ParsedSourceModel.source_id == source_id)

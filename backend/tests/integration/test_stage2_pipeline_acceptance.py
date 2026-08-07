@@ -31,7 +31,6 @@ conftest autouse guard 兜底拦截任何非回环真实请求。覆盖三条端
 
 import hashlib
 import io
-import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -57,13 +56,20 @@ from app.db.models.parsed_source_block import ParsedSourceBlockModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_record import SourceRecordModel
 from app.db.session import DatabaseManager
+from app.domain.source_records import SourceDocumentType
 from app.macro.world_bank.client import REQUEST_LIMIT, WorldBankClient
 from app.macro.world_bank.provider import WorldBankProvider
+from app.news.contracts import NewsDiscoveryQuery
+from app.news.gdelt.provider import GdeltNewsDiscoveryProvider
 from app.repositories.company_repository import CompanyRepository
-from app.repositories.raw_artifact_repository import RawArtifactRepository
+from app.repositories.news_discovery_candidate_repository import (
+    NewsDiscoveryCandidateRepository,
+)
 from app.repositories.source_record_repository import SourceRecordRepository
 from app.services.macro_persistence_service import MacroPersistenceService
+from app.services.news_discovery_service import NewsDiscoveryPersistenceService
 from app.services.news_original_source_service import NewsOriginalSourceService
+from app.services.source_ingestion_service import SourceIngestionService
 from app.services.source_parsing_service import SourceParsingService
 from app.services.source_registry_service import SourceRegistryService
 from app.storage.raw_store import LocalRawArtifactStore
@@ -82,7 +88,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 configure_asyncio_runtime()
 
 _XINHUA_URL = "https://www.xinhuanet.com/2026/0807/0001.htm"
-_XINHUA_DOMAIN = "www.xinhuanet.com"
 _SSE_URL = "https://www.sse.com.cn/disclosure/listedinfo/announcement/"
 # 含两个 <p>，保证 html_dom v2 抽取到 2 个 block。
 _HTML = (
@@ -94,8 +99,9 @@ _HTML = (
 # 从 WorldBankClient.__init__ 捕获会拿到上一次的 monkeypatch 代理。
 _REAL_CLIENT_INIT = WorldBankClient.__init__
 
-# Stage 3 才允许出现的表；当前 schema 必须不存在。
-_STAGE3_TABLES = ("evidence_cards", "document_chunks", "claims", "reports", "audits")
+# Stage 3A 之后合法存在的表（chunk_sets / document_chunks）不属于"尚不允许"
+# 之列；Evidence / Claim / Report / Audit 表仍未实现，必须不存在。
+_STAGE3_TABLES = ("evidence_cards", "claims", "reports", "audits")
 
 
 class FakeResolver(HostResolver):
@@ -305,94 +311,77 @@ async def _get_artifact(env: dict, artifact_id):
 
 
 async def _seed_company_pdf_source(env: dict) -> tuple:
-    """合法公司 PDF SourceRecord：sse provider + annual_report + user_upload。
+    """合法公司 PDF SourceRecord，经正式 SourceIngestionService（user_upload）。
 
+    覆盖正式入口：RawArtifact 内容寻址归档 + SourceRecord 登记 + replay 语义
+    均由 SourceIngestionService.ingest_upload 执行，不被 ORM seed 绕过。
     用跨页重复文本 fixture 顺带验证 2E.2 收口（跨页相同行全部保留）。
     返回 (source_id, artifact_id, storage_key, raw_bytes)。
     """
     pdf = duplicate_line_across_pages_pdf()
-    stored = env["raw_store"].put_pdf_stream(io.BytesIO(pdf))
-    async with env["sessionmaker"]() as session:
-        artifact = await RawArtifactRepository(session).create(
-            RawArtifactModel(
-                content_sha256=stored.content_sha256,
-                storage_key=stored.storage_key,
-                byte_size=stored.byte_size,
-                media_type=stored.media_type,
-            )
-        )
-        if artifact is None:
-            artifact = await RawArtifactRepository(session).get_by_sha256(stored.content_sha256)
-            assert artifact is not None
-        record = SourceRecordModel(
-            company_id=env["company_id"],
-            provider_key="sse",
-            artifact_id=artifact.artifact_id,
-            document_type="annual_report",
-            title="季度报告",
-            published_at=datetime(2026, 8, 7, 9, 30, tzinfo=UTC),
-            source_url=_SSE_URL,
-            acquisition_method="user_upload",
-            status="available",
-            authority_tier_snapshot=1,
-            critical_claim_eligible_snapshot=True,
-            provider_capabilities_snapshot=["company_announcement", "document_download"],
-            acquired_at=datetime.now(UTC),
-        )
-        record = await SourceRecordRepository(session).create(record)
-        await session.commit()
-        return record.source_id, artifact.artifact_id, stored.storage_key, pdf
+    service = SourceIngestionService(env["sessionmaker"], env["raw_store"])
+    ingested = await service.ingest_upload(
+        company_id=env["company_id"],
+        provider_key="sse",
+        document_type=SourceDocumentType.ANNUAL_REPORT,
+        title="季度报告",
+        source_url=_SSE_URL,
+        published_at=datetime(2026, 8, 7, 9, 30, tzinfo=UTC),
+        reporting_period_end=None,
+        external_document_id=None,
+        stream=io.BytesIO(pdf),
+    )
+    assert ingested.replayed is False
+    artifact = await _get_artifact(env, ingested.record.artifact_id)
+    assert artifact is not None
+    return ingested.record.source_id, artifact.artifact_id, artifact.storage_key, pdf
+
+
+def _gdelt_router() -> httpx.MockTransport:
+    """确定性 GDELT artlist 响应：一条指向新华网候选的候选。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v2/doc/doc"
+        payload = {
+            "articles": [
+                {
+                    "url": _XINHUA_URL,
+                    "title": "新闻标题",
+                    "seendate": "20260807063000",
+                }
+            ]
+        }
+        return httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+
+    return httpx.MockTransport(handler)
 
 
 async def _seed_news_candidate(env: dict) -> tuple:
-    """GDELT discovery run + unverified candidate（run 用 dummy JSON artifact）。"""
-    dummy = json.dumps({"url": _XINHUA_URL, "rank": 1}, ensure_ascii=True).encode()
-    digest = hashlib.sha256(dummy).hexdigest()
+    """GDELT discovery run + unverified candidate，经正式 Service 落库。
+
+    覆盖正式入口：NewsDiscoveryPersistenceService.discover_and_persist 执行
+    MockTransport 网络调用 → 原始 JSON 内容寻址归档 → run → candidates，
+    不被 ORM seed 绕过。
+    """
+    provider = GdeltNewsDiscoveryProvider(transport=_gdelt_router())
+    query = NewsDiscoveryQuery(
+        company_id=env["company_id"],
+        query_text="Kweichow Moutai",
+        start_at=datetime(2026, 8, 1, tzinfo=UTC),
+        end_at=datetime(2026, 8, 6, 12, 30, 45, tzinfo=UTC),
+        max_results=10,
+    )
+    result = await NewsDiscoveryPersistenceService(
+        env["sessionmaker"], env["raw_store"]
+    ).discover_and_persist(provider, query)
+    assert result.replayed is False
+    assert result.candidate_count == 1
     async with env["sessionmaker"]() as session:
-        artifact = RawArtifactModel(
-            content_sha256=digest,
-            storage_key=f"sha256/{digest[:2]}/{digest[2:4]}/{digest}.json",
-            byte_size=len(dummy),
-            media_type="application/json",
+        candidates = await NewsDiscoveryCandidateRepository(session).list_for_run(
+            result.discovery_run_id
         )
-        session.add(artifact)
-        await session.flush()
-        run = NewsDiscoveryRunModel(
-            discovery_run_id=uuid4(),
-            company_id=env["company_id"],
-            engine="gdelt_doc",
-            query_text="Kweichow Moutai",
-            query_start_at=datetime(2026, 8, 1, tzinfo=UTC),
-            query_end_at=datetime(2026, 8, 6, 12, 30, 45, tzinfo=UTC),
-            max_results=10,
-            raw_artifact_id=artifact.artifact_id,
-            raw_content_sha256=digest,
-            result_count=1,
-            request_count=1,
-            response_status=200,
-            final_hostname="api.gdeltproject.org",
-            content_type="application/json",
-            query_fingerprint=digest,
-            status="available",
-            fetched_at=datetime.now(UTC),
-        )
-        session.add(run)
-        await session.flush()
-        candidate = NewsDiscoveryCandidateModel(
-            candidate_id=uuid4(),
-            discovery_run_id=run.discovery_run_id,
-            rank=1,
-            title="新闻标题",
-            discovered_url=_XINHUA_URL,
-            normalized_url=_XINHUA_URL,
-            url_sha256=hashlib.sha256(_XINHUA_URL.encode()).hexdigest(),
-            domain=_XINHUA_DOMAIN,
-            seen_at=datetime(2026, 8, 7, 6, 30, tzinfo=UTC),
-            verification_status="unverified",
-        )
-        session.add(candidate)
-        await session.commit()
-        return run.discovery_run_id, candidate.candidate_id, artifact.artifact_id
+    assert len(candidates) == 1
+    return result.discovery_run_id, candidates[0].candidate_id, result.artifact_id
 
 
 # ---------------------------------------------------------------- 链 1：公司 PDF

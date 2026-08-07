@@ -2,7 +2,7 @@
 
 面向 A 股上市公司的证据驱动基本面研究与事实审核系统。
 
-> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）、阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）、阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）、阶段 2C.2B（原始响应捕获 + Snapshot Fingerprint + 事务化持久化）、阶段 2D.1（News Discovery 基础 + GDELT DOC 2.0 Discovery Provider，实现、自动化测试与 Docker 重建验收已完成、真实验收待环境，见下）、阶段 2D.2A（原始新闻来源核验 + Safe HTML 归档，实现、自动化测试、Docker 重建验收与受控 HTML 传输验收均已完成）、阶段 2E.1（确定性 HTML 解析 → ParsedSource / ParsedBlock 快照，实现与自动化测试已完成）与阶段 2E.2（确定性 PDF 解析 + 页面定位 → pdf_layout v1，实现与自动化测试已完成）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不做扫描件/OCR PDF 识别、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
+> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）、阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）、阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）、阶段 2C.2B（原始响应捕获 + Snapshot Fingerprint + 事务化持久化）、阶段 2D.1（News Discovery 基础 + GDELT DOC 2.0 Discovery Provider，实现、自动化测试与 Docker 重建验收已完成、真实验收待环境，见下）、阶段 2D.2A（原始新闻来源核验 + Safe HTML 归档，实现、自动化测试、Docker 重建验收与受控 HTML 传输验收均已完成）、阶段 2E.1（确定性 HTML 解析 → ParsedSource / ParsedBlock 快照，实现与自动化测试已完成）与阶段 2E.2（确定性 PDF 解析 + 页面定位 → pdf_layout v2，实现与自动化测试已完成）与阶段 3A（确定性文档分块 → ChunkSet / DocumentChunk，block_window v1，实现与自动化测试已完成）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不做扫描件/OCR PDF 识别、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
 
 ## 目录职责
 
@@ -399,6 +399,18 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 - **`SourceParsingService` 泛化为 dispatcher**：`text/html → html_dom v2`、`application/pdf → pdf_layout v2`，其他 media type → `UnsupportedParseMediaType`；复用同一 ParsedSource/ParsedSourceBlock 持久化、replay、integrity、并发单快照逻辑；**不改 schema（Alembic 保持 0013 head）**；SourceRecord 元数据不被回写。
 - **测试**：**28 项 PDF parser 单元测试 + 新增 PDF contracts/fingerprint 单元测试 + 6 项解析 Service 集成测试**（真实 PostgreSQL + 临时 RawStore，零网络；PDF bytes 由纯 stdlib 手写 fixture 确定性构造，不引入 PDF 生成运行时依赖），覆盖 first parse / replay / HTML vs PDF 独立快照 / page/line 1-based 与每页重置 / bbox bounds 与 float rounding / 重复字符 dedupe_chars 去重 / **同页不同 bbox 与跨页相同行全部保留（v2 收口）** / 中文提取 / 空页允许 / 整篇无文本 → PdfTextUnavailable / magic 与 malformed → PdfParseError / encrypted → PdfEncryptedError / 页数与字符超限 → PdfResourceLimitError / metadata Title normalize / published_at 恒 None / 确定性多遍一致 / SourceRecord 元数据不被回写 / 并发单快照 / 非受支持 media type 拒绝。
 - **决策记录**：[docs/decisions/0017-deterministic-pdf-parsing.md](docs/decisions/0017-deterministic-pdf-parsing.md)。
+
+## 确定性文档分块（阶段 3A）
+
+阶段 3A 把 ParsedSource + ordered ParsedBlocks 快照**确定性切分为 ChunkSet + DocumentChunk**（`chunk_sets` + `document_chunks` 表，migration 0014）。**状态（2026-08-08）：implementation = completed / automated_tests = completed / docker rebuild acceptance = completed / live acceptance = not required（纯本地确定性分块，无真实网络依赖）**。
+
+- **`block_window` chunker v1（字符窗口，不绑定 BGE tokenizer）**：`target_chars=400` / `max_chars=500` / `overlap=0`；严格按 block.ordinal、尽量合并完整 block、block 之间 `"\n"`、合并后 ≤ max；单 block > 500 按确定性句末标点（。！？!?；;）切分，无标点 hard split；**不删除重复文本、不跨 ParsedSource、chunk text 非空**。
+- **locator_refs（可完整回溯）**：每 chunk 保存 `[{"block_ordinal","char_start","char_end","locator"}]`，char 索引相对原 block.text（Python `[start, end)`）；**Chunk → ParsedBlock locator → ParsedSource → SourceRecord → RawArtifact** 逐级可回溯；PDF（`pdf_page`）与 HTML（`html_dom`）同一 Chunk 模型。
+- **fingerprint / replay / 并发 / 版本**：`chunk_set_fingerprint`（canonical JSON + SHA-256，排除 DB ID/created_at）驱动 replay 原 ChunkSet；并发相同 chunking 只 1 个 ChunkSet + 一套 chunks；chunker version 变化 → 新 ChunkSet、旧版本保留；已有 ChunkSet 损坏 → `ChunkSetIntegrityError`，**不自动修复**。
+- **不修改上游**：ChunkingService 对 SourceRecord / ParsedSource 零写操作；不重新读 RawArtifact 解析。
+- **边界**：**不创建 Chroma collection、不做 Embedding / Retrieval / EvidenceCard / LLM**（Stage 3B = BGE + Chroma，3C = EvidenceCard，见 [docs/stage-3-plan.md](docs/stage-3-plan.md)）。
+- **测试**：**38 项单元测试 + 11 项集成测试**（真实 PostgreSQL + 临时 RawStore，零网络）：HTML/PDF 首建、逐 chunk 回溯到 SourceRecord + RawArtifact + 原 locator、多 block 多 chunk、replay、chunker version 变化新旧并存、并发单集、chunk text/chunk_count/locator_refs 篡改 → 不修复、ParsedSourceNotFound、SourceRecord/ParsedSource 零修改。
+- **决策记录**：[docs/decisions/0018-deterministic-document-chunking.md](docs/decisions/0018-deterministic-document-chunking.md)。
 
 ## 完整系统（Docker Compose）
 

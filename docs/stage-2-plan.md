@@ -129,4 +129,31 @@
 - **2E.3（completed，2026-08-07）**：Stage-2 source pipeline E2E acceptance。
   - 新增集中 acceptance 集成测试 `tests/integration/test_stage2_pipeline_acceptance.py`（真实 PostgreSQL、零真实网络），验证三条端到端链：**公司 PDF**（Company → application/pdf RawArtifact → SourceRecord sse+annual_report → ParsedSource pdf_layout v2 → pdf_page locator → replay）、**新闻 HTML**（GDELT Discovery Run/Candidate → Original Publisher verification MockTransport → HTML RawArtifact → SourceRecord xinhuanet+news_article → ParsedSource html_dom v2 → DOM locator → replay）、**Macro**（WorldBank MockTransport → 原始 JSON artifacts → MacroSeries/MacroDatasetSnapshot → MacroObservations → replay）。
   - 横切不变量：RawArtifact hash/immutability（内容寻址文件哈希 == content_sha256）、SourceRecord provenance、parser/fingerprint replay（replayed=True 零新增行）、duplicate writes=0、backend/store 重启后 artifact 仍可读、PDF/HTML locator 可回到对应 Source/Artifact、**GDELT 永不成为 SourceRecord**（run 的 JSON artifact 不被任何 SourceRecord 引用）、**Macro Snapshot 不是 Evidence**、Stage 3（Chunk/Evidence/Claim/Report/Audit）表不存在。
-- **Stage 3（尚未开始）**：DocumentChunk / Embedding / Chroma / EvidenceCard（不属于 Stage 2）。
+  - **2E.3.1 最终 Gate（2026-08-08，service-level 收口）**：三条链的**核心业务步骤全部改走正式 Service，不被 ORM seed 绕过**——公司 PDF 经 `SourceIngestionService.ingest_upload`（RawArtifact 内容寻址归档 + SourceRecord 登记）→ `SourceParsingService.parse_source`；新闻发现经 `NewsDiscoveryPersistenceService.discover_and_persist`（GDELT MockTransport → 原始 JSON 归档 → run → candidates）→ `NewsOriginalSourceService.verify_candidate` → `SourceParsingService.parse_source`；Macro 经 `MacroPersistenceService.fetch_and_persist`。仅前置 seed Company / Provider。Stage-2 最终 Docker 验收：build 成功、backend healthy、live 200、ready 200（五项 checks ok）。
+
+## Stage-2 最终状态矩阵（2026-08-08）
+
+**core source pipeline = completed**（代码实现 + 自动化测试 + 持久化/replay/回溯全链路冻结，含 2E.3.1 service-level acceptance）。
+
+- ✅ Company Identity / Registry（11 SourceProvider seed、URL allowlist）
+- ✅ RawArtifact（SHA-256 内容寻址）+ SourceRecord（upload / URL import）
+- ✅ 2B.2A 官方披露发现契约 + 受控探测（结论 `discovery_not_confirmed`）
+- ✅ Macro Provider 契约 + World Bank Provider（implementation + automated tests）
+- ✅ Macro 持久化（series/snapshot/artifacts/observations + fingerprint + persistence）
+- ✅ News Discovery（GDELT DOC 2.0 Provider，implementation + automated tests）
+- ✅ News 原文验证 / 归档 / SourceRecord 登记（live_html_transport 验收 completed）
+- ✅ HTML 解析（html_dom v2）/ PDF 解析（pdf_layout v2）+ 页面定位
+- ✅ 2E.3 Stage-2 端到端 acceptance（service-level）
+
+**external/live acquisition 单独列（未全部完成）**：
+
+- ⏸ **2B.2B official disclosure auto provider = paused**（暂缓，收口探测未满足启动门槛）
+- ⏳ **World Bank live external = pending**（本机对 `worldbank.org` 域名级出口阻断，非代码失败）
+- ⏳ **GDELT live external = pending**（受控 Probe 为 ConnectTimeout）
+- ⏳ **真实文章端到端 = not performed**（2D.2A 代码验收不要求；live_html_transport 已完成）
+
+数据库业务表只读核实（2026-08-08）：除 `source_providers`（11 行 seed）外全部为 0 行——**没有任何真实外部数据被持久化**，MockTransport 验收不冒充真实数据源成功。
+
+- **Stage 3A（completed，2026-08-08）**：Deterministic Document Chunking（block_window v1 → ChunkSet/DocumentChunk，migration 0014，38 单元 + 11 集成测试全绿；见 docs/stage-3-plan.md 与 [ADR-0018](decisions/0018-deterministic-document-chunking.md)）。
+- **Stage 3B（next）**：BGE Embedding + Chroma indexing/retrieval（尚未开始）。
+- **Stage 3C（later）**：EvidenceCard（尚未开始）。
