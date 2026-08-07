@@ -35,6 +35,7 @@ from app.db.models.source_provider import SourceProviderModel
 from app.db.session import DatabaseManager
 from app.domain.macro_persistence import MacroSnapshotArtifactRole
 from app.macro.errors import (
+    MacroArtifactConflict,
     MacroCaptureInvalid,
     MacroPersistenceFailed,
     MacroSnapshotIntegrityError,
@@ -46,6 +47,8 @@ from app.macro.fingerprint import (
 from app.macro.world_bank.client import REQUEST_LIMIT, WorldBankClient
 from app.macro.world_bank.provider import WorldBankProvider
 from app.repositories.macro_observation_repository import MacroObservationRepository
+from app.repositories.macro_snapshot_repository import MacroSnapshotRepository
+from app.repositories.raw_artifact_repository import RawArtifactRepository
 from app.repositories.source_provider_repository import SourceProviderRepository
 from app.services.macro_persistence_service import MacroPersistenceService
 from app.storage.raw_store import LocalRawArtifactStore
@@ -167,6 +170,7 @@ def _build_provider(
     sessionmaker, transport: httpx.AsyncBaseTransport, monkeypatch
 ) -> WorldBankProvider:
     """构造 WorldBankProvider：向 WorldBankClient 注入 MockTransport。"""
+
     def _patched_init(
         self,
         *,
@@ -197,9 +201,7 @@ async def _all_rows(env: dict) -> dict:
         snapshots = (await session.execute(select(MacroDatasetSnapshotModel))).scalars().all()
         artifacts = (await session.execute(select(RawArtifactModel))).scalars().all()
         links = (await session.execute(select(MacroSnapshotArtifactModel))).scalars().all()
-        observations = (
-            (await session.execute(select(MacroObservationModel))).scalars().all()
-        )
+        observations = (await session.execute(select(MacroObservationModel))).scalars().all()
     return {
         "series": series,
         "snapshots": snapshots,
@@ -268,9 +270,7 @@ async def test_persist_full_chain(env, monkeypatch) -> None:
     for link in rows["links"]:
         assert link.final_hostname == "api.worldbank.org"
         assert link.response_status == 200
-    obs_page = next(
-        link for link in rows["links"] if link.role == "observations_page"
-    )
+    obs_page = next(link for link in rows["links"] if link.role == "observations_page")
     assert obs_page.page == 1
 
     # 观测值全程 Decimal 精确（大数不丢精度）。
@@ -389,9 +389,7 @@ async def test_replay_integrity_error_on_tampered_observations(env, monkeypatch)
 
     # 篡改：删除一条观测后重放 → 观测数不一致 → 不自动修复，抛 IntegrityError。
     async with env["sessionmaker"]() as session:
-        await session.execute(
-            text("DELETE FROM macro_observations WHERE period = '2020'")
-        )
+        await session.execute(text("DELETE FROM macro_observations WHERE period = '2020'"))
         await session.commit()
 
     with pytest.raises(MacroSnapshotIntegrityError) as exc:
@@ -431,3 +429,135 @@ async def test_persistence_failed_wraps_db_error(env, monkeypatch) -> None:
     with pytest.raises(MacroPersistenceFailed) as exc:
         await service.persist_captured_fetch(captured)
     assert exc.value.code == "macro_persistence_failed"
+    # 原子性（D：observation bulk_create 失败）：整个事务回滚。
+    rows = await _all_rows(env)
+    assert len(rows["snapshots"]) == 0
+    assert len(rows["links"]) == 0
+    assert len(rows["observations"]) == 0
+
+
+# ---------------------------------------------------------- JSON-only 防线
+
+
+async def test_pdf_artifact_not_reused_as_macro_json(env, monkeypatch) -> None:
+    """既有同 SHA 的 RawArtifact 若 media_type=application/pdf，不得被复用为 Macro JSON。
+
+    Service 必须拒绝 MacroArtifactConflict，不创建 Snapshot/Links/Observations。
+    """
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+
+    # 先让 raw_store 产生合法 JSON 的 stored descriptor，取得 content_sha256。
+    stored = env["raw_store"].put_json_bytes(captured.responses[0].raw_bytes)
+
+    # 数据库预先插入同 SHA、但 media_type=application/pdf 的既有行。
+    async with env["sessionmaker"]() as session:
+        session.add(
+            RawArtifactModel(
+                content_sha256=stored.content_sha256,
+                storage_key=f"sha256/ff/ff/{stored.content_sha256}.pdf",
+                byte_size=stored.byte_size,
+                media_type="application/pdf",
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(MacroArtifactConflict) as exc:
+        await service.persist_captured_fetch(captured)
+    assert exc.value.code == "macro_artifact_conflict"
+
+    rows = await _all_rows(env)
+    assert len(rows["snapshots"]) == 0
+    assert len(rows["links"]) == 0
+    assert len(rows["observations"]) == 0
+
+
+# ---------------------------------------------------------- 事务原子性故障注入
+
+
+async def test_atomic_rollback_series_created_then_failure(env, monkeypatch) -> None:
+    """A：Series get_or_create 之后、Snapshot 之前注入失败。
+
+    单事务语义下 rollback 使 series 一并回滚；即使未来架构允许稳定身份
+    Series 独立提交，稳定 identity Series 不携带 partial 数据，不违反原子性。
+    """
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+
+    async def _boom(self, artifact):
+        raise SQLAlchemyError("injected failure after series creation")
+
+    monkeypatch.setattr(RawArtifactRepository, "get_or_create", _boom)
+    with pytest.raises(MacroPersistenceFailed) as exc:
+        await service.persist_captured_fetch(captured)
+    assert exc.value.code == "macro_persistence_failed"
+
+    rows = await _all_rows(env)
+    assert len(rows["snapshots"]) == 0
+    assert len(rows["links"]) == 0
+    assert len(rows["observations"]) == 0
+
+
+async def test_atomic_rollback_snapshot_created_then_failure(env, monkeypatch) -> None:
+    """B：Snapshot 插入之后、Artifact Link 写入前注入失败。"""
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+
+    async def _boom(self, link):
+        raise SQLAlchemyError("injected failure after snapshot creation")
+
+    monkeypatch.setattr(MacroSnapshotRepository, "add_artifact_link", _boom)
+    with pytest.raises(MacroPersistenceFailed) as exc:
+        await service.persist_captured_fetch(captured)
+    assert exc.value.code == "macro_persistence_failed"
+
+    rows = await _all_rows(env)
+    assert len(rows["snapshots"]) == 0
+    assert len(rows["links"]) == 0
+    assert len(rows["observations"]) == 0
+
+
+async def test_atomic_rollback_partial_links_failure(env, monkeypatch) -> None:
+    """C：Artifact Link 写到中途（第二条）失败 → 无 partial links。"""
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+    original = MacroSnapshotRepository.add_artifact_link
+    calls = 0
+
+    async def _fail_second(self, link):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SQLAlchemyError("injected link failure at second link")
+        return await original(self, link)
+
+    monkeypatch.setattr(MacroSnapshotRepository, "add_artifact_link", _fail_second)
+    with pytest.raises(MacroPersistenceFailed) as exc:
+        await service.persist_captured_fetch(captured)
+    assert exc.value.code == "macro_persistence_failed"
+
+    rows = await _all_rows(env)
+    assert len(rows["snapshots"]) == 0
+    assert len(rows["links"]) == 0
+    assert len(rows["observations"]) == 0
+
+
+# ---------------------------------------------------------- replay 数据损坏
+
+
+async def test_replay_integrity_error_on_deleted_artifact_link(env, monkeypatch) -> None:
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+    first = await service.persist_captured_fetch(captured)
+    assert first.replayed is False
+
+    # 篡改：删除一条 Artifact Link 后重放 → link 数不一致 → 不自动补回。
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text("DELETE FROM macro_snapshot_artifacts WHERE role = 'indicator_metadata'")
+        )
+        await session.commit()
+
+    with pytest.raises(MacroSnapshotIntegrityError) as exc:
+        await service.persist_captured_fetch(captured)
+    assert exc.value.code == "macro_snapshot_integrity_error"

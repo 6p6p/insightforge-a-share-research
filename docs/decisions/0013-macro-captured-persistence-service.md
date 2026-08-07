@@ -6,9 +6,10 @@
 
 ## 决策
 
-1. **2C.2B 状态：implementation / automated tests completed；live external acceptance 沿用 2C.1 pending**。
+1. **2C.2B 状态：completed（2026-08-07，含 2C.2B.1 最终验收）**。
    - MacroPersistenceService、原始响应捕获、Snapshot Fingerprint v1 与事务化持久化已实现并冻结；全部自动化测试（单元 + MockTransport E2E 集成）通过。
-   - 本阶段不执行真实 World Bank 请求（本机对 `worldbank.org` 域名级出口阻断与 2C.1 相同）；真实验收沿用 2C.1 的 pending 状态，跑通前不开放生产宏观采集。
+   - 2C.2B.1 最终验收证据补齐并全部通过：`macro_series` UNIQUE 真实约束为六字段（`provider_key, source_id, external_indicator_id, geography_type, geography_code, frequency`）、migration 0009 downgrade 在恢复 PDF-only CHECK 前先拒绝存在 JSON Artifact 的降级、hostname validation 拒绝非 `api.worldbank.org`、同 content SHA-256 的 PDF Artifact 不冒充 Macro JSON（抛 `MacroArtifactConflict`）、事务原子性故障注入（series/snapshot/links/observations 四阶段失败均无 partial 行）、replay 删除 Artifact Link / Observation 后抛 `MacroSnapshotIntegrityError` 不自动补回；完整工程验收（pip check、ruff check/format、656 non-integration + 103 integration 全通过、alembic = 0010 head、docker compose build + backend healthy、`/health/live` 200、`/health/ready` 200 且 configuration/database/chroma/checkpoint/raw_storage 全部 ok）通过。
+   - 本阶段不执行真实 World Bank 请求（本机对 `worldbank.org` 域名级出口阻断与 2C.1 相同）；真实验收沿用 2C.1 的 pending 状态，跑通前不开放生产宏观采集、不把 Macro Snapshot 视为 Evidence、不开始新阶段。
 2. **Migration 0010 固化 fingerprint 版本字段**。
    - `macro_dataset_snapshots` 新增 `fingerprint_version`（SmallInteger，CHECK `= 1`）与 `normalization_version`（String(64)，CHECK `length(trim(...)) > 0`，当前 `world_bank_v1`），两者有 server_default，历史行可回填。
    - `fingerprint_version` 定义"从领域结果 + 归档 descriptor 构造 canonical SHA-256"的算法版本；`normalization_version` 定义"同一原始字节如何解析成 MacroIndicator / MacroGeography / MacroObservation"的规范版本。

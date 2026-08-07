@@ -138,9 +138,7 @@ def build_macro_snapshot_fingerprint(
                 "period": observation.period,
                 "normalized_period_start": observation.normalized_period_start.isoformat(),
                 "frequency": observation.frequency.value,
-                "value": (
-                    None if observation.value is None else str(observation.value)
-                ),
+                "value": (None if observation.value is None else str(observation.value)),
                 "is_missing": observation.is_missing,
                 "decimal_scale": observation.decimal_scale,
                 "observation_status": observation.observation_status,

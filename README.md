@@ -325,7 +325,7 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 
 ## 宏观数据捕获、指纹与持久化 Service（阶段 2C.2B）
 
-阶段 2C.2B 已实现"原始响应捕获 → 内容寻址归档 → Snapshot Fingerprint → 事务化持久化 → 并发幂等 → replay 完整性检查"的完整链路。**本阶段不创建 Macro API、不把 Macro 数据接入 Evidence/Claim、不接入 LangGraph/LLM/Agent/RAG/Chroma；没有持久化的真实 World Bank 数据**。
+阶段 2C.2B 已实现"原始响应捕获 → 内容寻址归档 → Snapshot Fingerprint → 事务化持久化 → 并发幂等 → replay 完整性检查"的完整链路。**状态：2C.2B completed（2026-08-07，含 2C.2B.1 最终验收：`macro_series` UNIQUE 六字段核实、migration 0009 downgrade JSON 防护验证、hostname validation、JSON-only Artifact 冲突防线、事务原子性故障注入、replay 完整性；完整工程验收通过）。本阶段不创建 Macro API、不把 Macro 数据接入 Evidence/Claim、不接入 LangGraph/LLM/Agent/RAG/Chroma；没有持久化的真实 World Bank 数据；不开始新功能**。
 
 - `MacroRawJsonResponse` 冻结原始响应（role/page/2xx 状态/裸 hostname/`application/json`/非空且 ≤ 5 MiB/时区感知，构造时 8 项校验）；`fetch_with_capture` 响应顺序固定 indicator → country → observations pages。
 - `validate_captured_macro_fetch` 11 项完整性校验（元数据各恰一条、分页完整 1..pages、总数 = 2+pages、hostname/content-type/source_id/provider_key），失败在文件/DB 写入前拦截。

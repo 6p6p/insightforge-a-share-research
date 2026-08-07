@@ -112,8 +112,7 @@ class MacroPersistenceService:
         # B. 原始响应先写内容寻址文件；文件 I/O 在 DB transaction 之前。
         #    相同内容复用（newly_created=False）；孤儿文件保留不删。
         stored_artifacts = [
-            self._raw_store.put_json_bytes(response.raw_bytes)
-            for response in captured.responses
+            self._raw_store.put_json_bytes(response.raw_bytes) for response in captured.responses
         ]
 
         # C. 计算 snapshot fingerprint（基于归档 artifact 的内容 SHA-256）。

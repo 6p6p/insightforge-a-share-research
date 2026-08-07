@@ -62,9 +62,7 @@ class MacroSnapshotRepository:
         stmt = (
             insert(MacroDatasetSnapshotModel)
             .values(**values)
-            .on_conflict_do_nothing(
-                index_elements=[MacroDatasetSnapshotModel.snapshot_fingerprint]
-            )
+            .on_conflict_do_nothing(index_elements=[MacroDatasetSnapshotModel.snapshot_fingerprint])
             .returning(MacroDatasetSnapshotModel)
         )
         result = await self._session.execute(stmt)

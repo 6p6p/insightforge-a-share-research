@@ -282,6 +282,36 @@ def test_validation_rejects_unexpected_hostname() -> None:
         validate_captured_macro_fetch(captured)
 
 
+def test_validation_rejects_evil_hostname_explicit() -> None:
+    # 除 hostname 外全部合法：MacroRawJsonResponse 只要求"裸主机名"，
+    # "evil.example.com" 本身合法；拒绝必须是 capture validator 的职责。
+    captured = _captured(
+        responses=[
+            _raw(role=MacroSnapshotArtifactRole.INDICATOR_METADATA),
+            _raw(role=MacroSnapshotArtifactRole.COUNTRY_METADATA, hostname="evil.example.com"),
+            _raw(role=MacroSnapshotArtifactRole.OBSERVATIONS_PAGE, page=1),
+        ]
+    )
+    with pytest.raises(MacroCaptureInvalid) as exc:
+        validate_captured_macro_fetch(captured)
+    assert exc.value.code == "macro_capture_invalid"
+
+
+def test_validation_accepts_world_bank_hostname_explicit() -> None:
+    captured = _captured(
+        responses=[
+            _raw(role=MacroSnapshotArtifactRole.INDICATOR_METADATA, hostname="api.worldbank.org"),
+            _raw(role=MacroSnapshotArtifactRole.COUNTRY_METADATA, hostname="api.worldbank.org"),
+            _raw(
+                role=MacroSnapshotArtifactRole.OBSERVATIONS_PAGE,
+                page=1,
+                hostname="api.worldbank.org",
+            ),
+        ]
+    )
+    validate_captured_macro_fetch(captured)
+
+
 def test_validation_rejects_too_many_pages() -> None:
     result = _result(pages=19)
     responses = [
