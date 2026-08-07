@@ -10,9 +10,12 @@ import httpx
 import pytest
 
 from app.disclosures.probe_client import (
+    PDF_MAX_BYTES,
     ProbeClient,
     ProbeFetchError,
+    ProbeInvalidPdf,
     ProbeLimitExceeded,
+    ProbePdfTooLarge,
     ProbeRedirectLoop,
     ProbeResponseTooLarge,
     ProbeUrlNotAllowed,
@@ -180,17 +183,21 @@ async def test_no_cookie_or_auth_headers_sent() -> None:
     assert seen["accept"] == "*/*"
 
 
+_PDF_BODY = b"%PDF-1.7\n%%EOF\n"
+
+
 @pytest.mark.asyncio
-async def test_fetch_pdf_head_uses_head_semantics() -> None:
+async def test_probe_pdf_ok_with_valid_prefix() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("accept") == "application/pdf"
         return httpx.Response(
             200,
             headers={"content-type": "application/pdf", "content-length": "2048"},
+            content=_PDF_BODY,
         )
 
     client = _client(transport=httpx.MockTransport(handler))
-    response = await client.fetch_pdf_head("https://www.sse.com.cn/2026/000001.pdf")
+    response = await client.probe_pdf("https://www.sse.com.cn/2026/000001.pdf")
     assert response.status_code == 200
     assert response.response_type == "pdf"
     assert response.length == 2048
@@ -198,17 +205,141 @@ async def test_fetch_pdf_head_uses_head_semantics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_pdf_head_same_domain_redirect_revalidated() -> None:
+async def test_probe_pdf_reads_only_prefix_not_full_body() -> None:
+    # 第二个数据块被"真实拉取"时抛 AssertionError：probe 只读取前 8192 字节，
+    # 不消费完整正文。注意流关闭（aclose）会以 GeneratorExit 恢复生成器，
+    # 因此用 try/except GeneratorExit 区分"真实拉取"（应触发）与"流关闭"（应干净退出）。
+    async def body():
+        try:
+            # 第一部分恰好 8192 字节（"%PDF-1.7\n" 为 9 字节）：
+            # aiter_bytes 攒满 8192 即产出第一块，probe 读取后即停止，
+            # 不会真实拉取第二个数据块。
+            yield b"%PDF-1.7\n" + b"P" * 8183
+        except GeneratorExit:
+            raise
+        raise AssertionError("PDF body fully consumed")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=body(),
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    response = await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+    assert response.status_code == 200
+    assert response.body == b""
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_rejects_declared_size_before_reading_body() -> None:
+    # Content-Length 超过上限时必须在读取正文之前拒绝（生成器不应被启动）。
+    async def body():
+        try:
+            yield b"should not be read"
+        except GeneratorExit:
+            raise
+        raise AssertionError("body must not be read when Content-Length exceeds limit")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/pdf",
+                "content-length": str(PDF_MAX_BYTES + 1),
+            },
+            content=body(),
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProbePdfTooLarge):
+        await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_without_content_length_reads_only_prefix() -> None:
+    # 无 Content-Length：只流式读取前 8192 字节前缀，不下载完整正文。
+    async def body():
+        yield b"%PDF-1.7\n"  # 10 字节
+        try:
+            yield b"Q" * 50000  # 大正文：probe 补足到 >= 8192 后即停止
+        except GeneratorExit:
+            raise
+        raise AssertionError("body beyond 8192 bytes must not be read")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=body(),
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    response = await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+    assert response.status_code == 200
+    assert response.length is None
+    assert response.body == b""
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_rejects_non_pdf_content_type() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=_PDF_BODY,
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProbeInvalidPdf) as exc:
+        await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+    assert exc.value.reason == "content_type"
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_rejects_bad_signature() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=b"<html>not a pdf</html>",
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProbeInvalidPdf) as exc:
+        await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+    assert exc.value.reason == "signature"
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_non_2xx_status_rejected() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            headers={"content-type": "application/pdf"},
+            content=b"forbidden",
+        )
+
+    client = _client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProbeInvalidPdf) as exc:
+        await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+    assert exc.value.reason == "http_status"
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_same_domain_redirect_revalidated() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/old.pdf":
             return httpx.Response(302, headers={"location": "/new.pdf"})
         return httpx.Response(
             200,
             headers={"content-type": "application/pdf"},
+            content=_PDF_BODY,
         )
 
     client = _client(transport=httpx.MockTransport(handler))
-    response = await client.fetch_pdf_head("https://www.sse.com.cn/old.pdf")
+    response = await client.probe_pdf("https://www.sse.com.cn/old.pdf")
     assert response.status_code == 200
     assert response.content_type == "application/pdf"
     assert response.final_url == "https://www.sse.com.cn/new.pdf"
@@ -217,14 +348,33 @@ async def test_fetch_pdf_head_same_domain_redirect_revalidated() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_pdf_head_cross_domain_redirect_rejected() -> None:
+async def test_probe_pdf_cross_domain_redirect_rejected() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"location": "https://evil.example.com/new.pdf"})
 
     client = _client(transport=httpx.MockTransport(handler))
     with pytest.raises(ProbeUrlNotAllowed):
-        await client.fetch_pdf_head("https://www.sse.com.cn/old.pdf")
+        await client.probe_pdf("https://www.sse.com.cn/old.pdf")
     assert client.request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_pdf_response_is_closed() -> None:
+    created: list[httpx.Response] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = httpx.Response(
+            200,
+            headers={"content-type": "application/pdf"},
+            content=_PDF_BODY,
+        )
+        created.append(response)
+        return response
+
+    client = _client(transport=httpx.MockTransport(handler))
+    await client.probe_pdf("https://www.sse.com.cn/2026/600519.pdf")
+    assert len(created) == 1
+    assert created[0].is_closed
 
 
 def test_extract_links_absolute_relative_and_query() -> None:

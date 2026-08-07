@@ -52,11 +52,13 @@ def test_auth_signal_without_confirmed_api_is_not_auth_mode() -> None:
     )
 
 
-def test_server_rendered_html_with_verified_pdf() -> None:
+def test_server_rendered_html_requires_applied_search() -> None:
+    # 不变量：search_request_applied=False 时不得返回 public_server_rendered_html。
     assert (
         decide_access_mode(
             _result(
                 listing_page_reachable=True,
+                search_request_applied=True,
                 matching_candidate_count=1,
                 direct_pdf_verified=True,
             )
@@ -65,12 +67,13 @@ def test_server_rendered_html_with_verified_pdf() -> None:
     )
 
 
-def test_matching_zero_never_server_rendered_html() -> None:
+def test_applied_search_with_pdf_but_no_candidate_is_not_server_rendered() -> None:
     # 不变量：matching_candidate_count=0 时不得返回 public_server_rendered_html。
     assert (
         decide_access_mode(
             _result(
                 listing_page_reachable=True,
+                search_request_applied=True,
                 matching_candidate_count=0,
                 direct_pdf_verified=True,
             )
@@ -81,6 +84,7 @@ def test_matching_zero_never_server_rendered_html() -> None:
 
 def test_no_pdf_never_direct_pdf_only() -> None:
     # 不变量：direct_pdf_verified=False 时不得返回 public_direct_pdf_only。
+    # 页面可达但查询未应用（真实 CLI 路径）→ discovery_not_confirmed。
     assert (
         decide_access_mode(
             _result(
@@ -89,21 +93,7 @@ def test_no_pdf_never_direct_pdf_only() -> None:
                 direct_pdf_verified=False,
             )
         )
-        == DisclosureAccessMode.REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT
-    )
-
-
-def test_candidate_rows_but_no_direct_pdf_is_js_mode() -> None:
-    # 有候选行但文件链接不是可直接验证的 PDF：需要详情页/JS/内部接口。
-    assert (
-        decide_access_mode(
-            _result(
-                listing_page_reachable=True,
-                matching_candidate_count=1,
-                direct_pdf_verified=False,
-            )
-        )
-        == DisclosureAccessMode.REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT
+        == DisclosureAccessMode.DISCOVERY_NOT_CONFIRMED
     )
 
 
@@ -120,10 +110,43 @@ def test_reachable_with_pdf_but_no_candidate_rows_is_direct_pdf_only() -> None:
     )
 
 
-def test_reachable_shell_requiring_js_or_internal() -> None:
+def test_homepage_accidental_pdf_hit_is_direct_pdf_only() -> None:
+    # 页面可达、直接验证到官方 PDF，但查询未应用：不能按公司/日期自动发现。
     assert (
-        decide_access_mode(_result(listing_page_reachable=True, matching_candidate_count=0))
-        == DisclosureAccessMode.REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT
+        decide_access_mode(
+            _result(
+                listing_page_reachable=True,
+                matching_candidate_count=1,
+                direct_pdf_verified=True,
+            )
+        )
+        == DisclosureAccessMode.PUBLIC_DIRECT_PDF_ONLY
+    )
+
+
+def test_reachable_without_applied_search_is_not_confirmed() -> None:
+    # 页面可达但本次没有把查询送入合规入口：保守判为未确认，不推断需要 JS/内部接口。
+    assert (
+        decide_access_mode(
+            _result(
+                listing_page_reachable=True,
+                matching_candidate_count=0,
+            )
+        )
+        == DisclosureAccessMode.DISCOVERY_NOT_CONFIRMED
+    )
+
+
+def test_reachable_with_applied_search_but_no_candidates_is_not_confirmed() -> None:
+    assert (
+        decide_access_mode(
+            _result(
+                listing_page_reachable=True,
+                search_request_applied=True,
+                matching_candidate_count=0,
+            )
+        )
+        == DisclosureAccessMode.DISCOVERY_NOT_CONFIRMED
     )
 
 
@@ -137,6 +160,7 @@ def test_fully_unavailable() -> None:
         (DisclosureAccessMode.DOCUMENTED_API, True),
         (DisclosureAccessMode.PUBLIC_SERVER_RENDERED_HTML, True),
         (DisclosureAccessMode.PUBLIC_DIRECT_PDF_ONLY, False),
+        (DisclosureAccessMode.DISCOVERY_NOT_CONFIRMED, False),
         (DisclosureAccessMode.REQUIRES_AUTH_OR_CONTRACT, False),
         (DisclosureAccessMode.REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT, False),
         (DisclosureAccessMode.UNAVAILABLE, False),

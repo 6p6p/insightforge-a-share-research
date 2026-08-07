@@ -6,14 +6,15 @@
 - 不使用 Cookie、Authorization、自定义 Header，不自动重试；
 - 不执行 JavaScript，不使用浏览器；
 - 同域重定向仍重新执行 allowlist，跨域重定向拒绝；
-- 单次 HTML 响应上限 2 MiB、PDF 探测上限 10 MiB；
+- 单次 HTML 响应上限 2 MiB；PDF 探测使用流式 GET 只读取前 8192 字节
+  文件头验证（Content-Type/签名/声明大小），不下载正文；
 - 单个 Provider 最多 6 个请求；
 - 日志只记录 provider_key、hostname、status、duration、response_type，
   不记录完整 query 与响应正文。
 """
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -149,6 +150,25 @@ class ProbeResponseTooLarge(Exception):
     """响应正文超过探测上限。"""
 
 
+class ProbePdfTooLarge(Exception):
+    """PDF 声明大小（Content-Length）超过探测上限，未读取正文即拒绝。"""
+
+    def __init__(self, declared_bytes: int) -> None:
+        super().__init__(f"pdf declared size {declared_bytes} exceeds probe limit")
+        self.declared_bytes = declared_bytes
+
+
+class ProbeInvalidPdf(Exception):
+    """PDF 探测失败：Content-Type 或签名不符。
+
+    reason 取值："http_status" / "content_type" / "signature"。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"invalid pdf probe result: {reason}")
+        self.reason = reason
+
+
 class ProbeClient:
     """受控探测客户端；同一个实例用于一个 Provider 的全部探测。"""
 
@@ -211,11 +231,14 @@ class ProbeClient:
             accept="*/*",
         )
 
-    async def fetch_pdf_head(self, url: str) -> ProbeResponse:
-        """PDF 探测：不拉取正文，仅确认可达性与 Content-Type。
+    async def probe_pdf(self, url: str) -> ProbeResponse:
+        """流式 PDF 探测：只读取前 8192 字节验证，不下载正文。
 
-        重定向重新执行 allowlist 校验；Content-Type 以响应头为准，
-        由调用方比对 application/pdf。
+        - 重定向重新执行 allowlist 校验，最多 5 次；
+        - 只允许 2xx；Content-Type 去除参数后必须为 application/pdf；
+        - Content-Length 声明超过 PDF_MAX_BYTES 立即拒绝；
+        - 跳过开头空白后必须以 %PDF- 开头；验证完成立即关闭流；
+        - 成功返回的 ProbeResponse.body 恒为空（正文不进入结果）。
         """
         return await self._fetch(
             url,
@@ -238,87 +261,122 @@ class ProbeClient:
         while True:
             self._next_request()
             started = time.monotonic()
-            async with self._new_client() as client:
-                try:
-                    response = await client.get(
+            outcome: ProbeResponse | None = None
+            redirect_to: str | None = None
+            try:
+                async with self._new_client() as client:
+                    # 必须用流式 GET：client.get() 默认 stream=False 会在返回前
+                    # 缓冲/读取整个响应正文（PDF 探测会实际下载完整 PDF）。
+                    async with client.stream(
+                        "GET",
                         current,
                         follow_redirects=False,
                         headers={"accept": accept},
-                    )
-                except (httpx.TimeoutException, httpx.TransportError) as exc:
-                    raise ProbeFetchError(self._provider_key, str(exc)) from exc
+                    ) as response:
+                        status = response.status_code
+                        final_url = str(response.url)
+                        content_type = response.headers.get("content-type")
+                        if status in _REDIRECT_CODES:
+                            if redirects >= _MAX_REDIRECTS:
+                                raise ProbeRedirectLoop(self._provider_key)
+                            location = response.headers.get("location")
+                            if not location:
+                                raise ProbeRedirectLoop(self._provider_key)
+                            next_url = str(httpx.URL(current).join(location))
+                            # 跨域重定向：即使 http -> https 也拒绝（只允许 allowed_domains 内）
+                            self._validate_url(next_url)
+                            if next_url == current:
+                                raise ProbeRedirectLoop(self._provider_key)
+                            redirect_to = next_url
+                        elif response_type == "pdf":
+                            outcome = await self._probe_pdf(response, status, final_url, redirects)
+                        elif 400 <= status < 600:
+                            outcome = ProbeResponse(
+                                status_code=status,
+                                content_type=content_type,
+                                body=b"",
+                                final_url=final_url,
+                                duration_ms=0,
+                                response_type=response_type,
+                                redirects=redirects,
+                            )
+                        else:
+                            body = await self._read_limited(response, max_bytes)
+                            outcome = ProbeResponse(
+                                status_code=status,
+                                content_type=content_type,
+                                body=body,
+                                final_url=final_url,
+                                duration_ms=0,
+                                response_type=response_type,
+                                redirects=redirects,
+                            )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                raise ProbeFetchError(self._provider_key, str(exc)) from exc
+
             duration_ms = int((time.monotonic() - started) * 1000)
-
-            if response.status_code in _REDIRECT_CODES:
-                if redirects >= _MAX_REDIRECTS:
-                    raise ProbeRedirectLoop(self._provider_key)
-                location = response.headers.get("location")
-                if not location:
-                    raise ProbeRedirectLoop(self._provider_key)
-                next_url = str(httpx.URL(current).join(location))
-                # 跨域重定向：即使 http -> https 也拒绝（探测只允许 allowed_domains 内）
-                self._validate_url(next_url)
-                if next_url == current:
-                    raise ProbeRedirectLoop(self._provider_key)
-                current = next_url
+            if redirect_to is not None:
+                current = redirect_to
                 redirects += 1
-                self._log("probe_redirect", current, response.status_code, duration_ms)
+                self._log("probe_redirect", current, status, duration_ms)
                 continue
-
-            if 400 <= response.status_code < 600:
-                await response.aclose()
-                return ProbeResponse(
-                    status_code=response.status_code,
-                    content_type=response.headers.get("content-type"),
-                    body=b"",
-                    final_url=str(response.url),
-                    duration_ms=duration_ms,
-                    response_type=response_type,
-                    redirects=redirects,
-                )
-
-            if response_type == "pdf":
-                # PDF 探测只确认可达性与 Content-Type，不读取正文。
-                content_length = response.headers.get("content-length")
-                length = (
-                    int(content_length) if content_length and content_length.isdigit() else None
-                )
-                self._log(
-                    "probe_pdf",
-                    current,
-                    response.status_code,
-                    duration_ms,
-                    response.headers.get("content-type"),
-                )
-                await response.aclose()
-                return ProbeResponse(
-                    status_code=response.status_code,
-                    content_type=response.headers.get("content-type"),
-                    body=b"",
-                    final_url=str(response.url),
-                    duration_ms=duration_ms,
-                    response_type="pdf",
-                    redirects=redirects,
-                    length=length,
-                )
-
-            body = await self._read_limited(response, max_bytes)
+            if outcome is None:
+                raise ProbeFetchError(self._provider_key, "unexpected probe outcome")
+            event = "probe_pdf" if response_type == "pdf" else "probe_ok"
             self._log(
-                "probe_ok",
-                current,
-                response.status_code,
+                event,
+                outcome.final_url,
+                outcome.status_code,
                 duration_ms,
-                response.headers.get("content-type"),
+                outcome.content_type,
             )
-            return ProbeResponse(
-                status_code=response.status_code,
-                content_type=response.headers.get("content-type"),
-                body=body,
-                final_url=str(response.url),
-                duration_ms=duration_ms,
-                response_type=response_type,
-                redirects=redirects,
-            )
+            return replace(outcome, duration_ms=duration_ms)
+
+    async def _probe_pdf(
+        self,
+        response: httpx.Response,
+        status: int,
+        final_url: str,
+        redirects: int,
+    ) -> ProbeResponse:
+        """PDF 验证不变量：任一条件不满足即抛异常，调用方无需再比对状态码。"""
+        if not 200 <= status < 300:
+            raise ProbeInvalidPdf("http_status")
+        content_type = response.headers.get("content-type")
+        if (
+            content_type is None
+            or content_type.split(";", 1)[0].strip().lower() != "application/pdf"
+        ):
+            raise ProbeInvalidPdf("content_type")
+        content_length = response.headers.get("content-length")
+        length: int | None = None
+        if content_length and content_length.isdigit():
+            length = int(content_length)
+            if length > PDF_MAX_BYTES:
+                raise ProbePdfTooLarge(length)
+        prefix = await self._read_pdf_prefix(response)
+        if not prefix.lstrip(b" \t\r\n\x00").startswith(b"%PDF-"):
+            raise ProbeInvalidPdf("signature")
+        return ProbeResponse(
+            status_code=status,
+            content_type=content_type,
+            body=b"",
+            final_url=final_url,
+            duration_ms=0,
+            response_type="pdf",
+            redirects=redirects,
+            length=length,
+        )
+
+    @staticmethod
+    async def _read_pdf_prefix(response: httpx.Response) -> bytes:
+        """流式读取最多 8192 字节文件头；不消费正文。"""
+        prefix = b""
+        async for chunk in response.aiter_bytes(chunk_size=8192):
+            prefix += chunk
+            if len(prefix) >= 8192:
+                break
+        return prefix[:8192]
 
     def _new_client(self) -> httpx.AsyncClient:
         kwargs: dict = {

@@ -16,6 +16,10 @@ class DisclosureAccessMode(StrEnum):
     PUBLIC_SERVER_RENDERED_HTML = "public_server_rendered_html"
     PUBLIC_DIRECT_PDF_ONLY = "public_direct_pdf_only"
     REQUIRES_AUTH_OR_CONTRACT = "requires_auth_or_contract"
+    # 保守形态：官方公开页面可达，但本次受控探测未确认能按目标公司与日期
+    # 自动发现；不代表 Provider 不可用、不一定需要 JS/内部接口、
+    # 不排除其他合规公开入口。当前阶段优先于 requires_javascript_or_internal_endpoint。
+    DISCOVERY_NOT_CONFIRMED = "discovery_not_confirmed"
     REQUIRES_JAVASCRIPT_OR_INTERNAL_ENDPOINT = "requires_javascript_or_internal_endpoint"
     UNAVAILABLE = "unavailable"
 

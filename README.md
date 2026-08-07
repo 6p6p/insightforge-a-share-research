@@ -278,8 +278,10 @@ conda run -n insightforge python -m app.cli.probe_disclosure_sources \
 
 - 输出 JSON 到 stdout，不写数据库、不下载/保留响应正文；`request` 字段如实记录探测目标（security_code / 日期窗口）。
 - 候选识别基于页面真实链接（security_code + 非空标题 + 日期文本 + urljoin 后 allowlist 校验）；日期/公司筛选未送入合规查询入口时 `search_request_applied=false`，不伪造候选。
-- 接入形态决策采用严格不变量：`direct_pdf_verified=false` 不得判为 `public_direct_pdf_only`；`matching_candidate_count=0` 不得判为 `public_server_rendered_html`；仅出现"登录/注册"不得判为需要认证。
+- **PDF 探测使用流式 GET** 只读取前 8192 字节文件头验证（2xx + Content-Type `application/pdf` + Content-Length ≤ 10 MiB + `%PDF-` 签名），不下载正文；旧 `client.get()` 会在返回前读取完整正文的缺陷已修复。
+- 接入形态决策采用严格不变量（7 条优先级）：`public_server_rendered_html` 必须 `search_request_applied=true`；`direct_pdf_verified=false` 不得判为 `public_direct_pdf_only`；页面可达但本次未确认按公司/日期自动发现时保守判为 `discovery_not_confirmed`（不表述为"不可用"或"需要 JS/内部接口"）；仅出现"登录/注册"不得判为需要认证。
 - 自动发现仅限 `documented_api` 与 `public_server_rendered_html` 两种接入形态；未确认合规通路的形态不实现生产 Adapter。
+- **收口 Probe（2026-08-07）**：SSE 与 CNINFO 首页均可达（HTTP 200），但 `search_request_applied=false`、`direct_pdf_verified=false`、`matching_candidate_count=0`，两者均判为 `discovery_not_confirmed`；总请求 2，`selected_candidate_provider=null`，未满足 2B.2B 启动门槛（暂缓），继续依赖用户上传 + URL 导入 + 后续网络搜索发现兜底。
 - 探测边界、决策规则与人工验收门槛见 [docs/decisions/0010-official-disclosure-discovery-policy.md](docs/decisions/0010-official-disclosure-discovery-policy.md)。
 
 ## 完整系统（Docker Compose）

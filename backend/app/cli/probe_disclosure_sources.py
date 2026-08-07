@@ -49,7 +49,9 @@ from app.disclosures.probe_client import (
     Link,
     ProbeClient,
     ProbeFetchError,
+    ProbeInvalidPdf,
     ProbeLimitExceeded,
+    ProbePdfTooLarge,
     ProbeRedirectLoop,
     ProbeResponseTooLarge,
     ProbeUrlNotAllowed,
@@ -139,13 +141,6 @@ def _matching_candidate_urls(
     return urls
 
 
-def _is_pdf_content_type(content_type: str | None) -> bool:
-    """PDF 验证基于 Content-Type（不只看 .pdf 后缀）。"""
-    if not content_type:
-        return False
-    return content_type.split(";", 1)[0].strip().lower() == "application/pdf"
-
-
 def probe_api_signals(body: bytes, base_url: str) -> tuple[bool, bool]:
     """识别已确认的官方 API 文档入口与明确认证条款。
 
@@ -209,12 +204,19 @@ async def _probe_provider(
         if matching_candidate_count:
             for url in matching_urls[:_MAX_PDF_CHECKS]:
                 try:
-                    pdf = await client.fetch_pdf_head(url)
-                    if pdf.status_code == 200 and _is_pdf_content_type(pdf.content_type):
-                        direct_pdf = True
-                        notes.append(NOTE_OFFICIAL_PDF_LINK_VERIFIED)
-                        break
-                except (ProbeFetchError, ProbeRedirectLoop, ProbeUrlNotAllowed):
+                    # probe_pdf 只流式读取前 8192 字节验证，不下载正文；
+                    # 成功返回即代表已通过 2xx + Content-Type + 签名校验。
+                    await client.probe_pdf(url)
+                    direct_pdf = True
+                    notes.append(NOTE_OFFICIAL_PDF_LINK_VERIFIED)
+                    break
+                except (
+                    ProbeFetchError,
+                    ProbeInvalidPdf,
+                    ProbePdfTooLarge,
+                    ProbeRedirectLoop,
+                    ProbeUrlNotAllowed,
+                ):
                     continue
         else:
             notes.append(NOTE_NO_MATCHING_CANDIDATE_ROW)
