@@ -21,7 +21,10 @@ from app.domain.parsing import ParsedBlockType
 from app.parsing.errors import ParsingError
 
 HTML_PARSER_NAME = "html_dom"
-HTML_PARSER_VERSION = 1
+# v1 → v2：2E.1.1 收口改变了 published_at 严格识别与 charset 确定性检测语义
+# （ADR-0016），旧 v1 快照不修改不删除；同 source + 同 raw + 新 version →
+# 新 fingerprint → 新快照，旧快照保留（可追溯）。
+HTML_PARSER_VERSION = 2
 
 _LOCATOR_TYPE = "html_dom"
 _LOCATOR_KEYS = {"type", "ordinal", "tag", "xpath", "element_id"}

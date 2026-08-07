@@ -290,6 +290,56 @@ def test_charset_in_body_or_script_text_ignored() -> None:
     assert doc.blocks[0].text_sha256 == _sha("中文段落 charset=gbk 正文。")
 
 
+def test_description_meta_content_charset_ignored() -> None:
+    """<meta name="description" content="report charset=gbk"> 不产生编码声明。
+
+    只有真实 meta 声明（<meta charset> 属性 / http-equiv Content-Type 的
+    charset 参数）才被认可；description 的 content 值里出现 charset= 文本
+    不得被当作编码声明（否则 UTF-8 字节会被误按 GBK 解成乱码）。
+    """
+    html = (
+        '<html><head><meta name="description" '
+        'content="report charset=gbk 摘要"></head>'
+        "<body><p>中文段落：确定性解析。</p></body></html>"
+    )
+    doc = _doc(html)  # UTF-8 bytes
+    assert doc.blocks[0].text == "中文段落：确定性解析。"
+    assert doc.blocks[0].text_sha256 == _sha("中文段落：确定性解析。")
+
+
+def test_meta_charset_attribute_authoritative_on_any_meta() -> None:
+    """charset 属性本身就是声明，即使该 meta 同时带 name=description。"""
+    html = (
+        '<html><head><meta name="description" charset="gbk" '
+        'content="摘要"></head>'
+        "<body><p>中文GBK编码段落。</p></body></html>"
+    )
+    doc = parse_html_bytes(html.encode("gbk"))
+    assert doc.blocks[0].text == "中文GBK编码段落。"
+
+
+def test_http_equiv_charset_case_insensitive() -> None:
+    """http-equiv / content 属性名及值大小写不敏感（CONTENT-TYPE 亦可）。"""
+    html = (
+        '<html><head><meta HTTP-EQUIV="CONTENT-TYPE" '
+        'CONTENT="text/html; charset=gbk"></head>'
+        "<body><p>中文GBK编码段落。</p></body></html>"
+    )
+    doc = parse_html_bytes(html.encode("gbk"))
+    assert doc.blocks[0].text == "中文GBK编码段落。"
+
+
+def test_charset_param_without_space_before_semicolon() -> None:
+    """content 值 charset 参数无空格（text/html;charset=gbk）同样被认可。"""
+    html = (
+        '<html><head><meta http-equiv="Content-Type" '
+        'content="text/html;charset=gbk"></head>'
+        "<body><p>中文GBK编码段落。</p></body></html>"
+    )
+    doc = parse_html_bytes(html.encode("gbk"))
+    assert doc.blocks[0].text == "中文GBK编码段落。"
+
+
 def test_invalid_declared_charset_falls_back_to_utf8() -> None:
     """声明编码不可用（未知名称）→ 回退 UTF-8；合法 UTF-8 内容正常解码。"""
     html = (

@@ -309,28 +309,33 @@ async def test_replay_reuses_same_snapshot(env) -> None:
 
 
 async def test_parser_version_change_creates_new_snapshot_keeps_old(env, monkeypatch) -> None:
-    """parser version 升级 → 新 fingerprint → 新快照；旧快照保留（可追溯）。"""
-    source_id, _, _ = await _seed_html_source(env)
-    service = _service(env)
-    v1 = await service.parse_source(source_id)
-    assert v1.parser_version == 1
+    """parser version 升级 → 新 fingerprint → 新快照；旧 v1 快照保留（可追溯）。
 
-    # 模拟 parser 升级到 v2（真实 parser + 真实 fingerprint，仅换版本号）。
+    当前真实 html_dom VERSION=2（Gate 0）。先 monkeypatch 成 1 建 v1 快照，
+    再恢复真实 v2：v1 快照不修改不删除，v2 是新快照（replay 不复用 v1）。
+    """
     import app.parsing.contracts as contracts_mod
     import app.parsing.html_parser as parser_mod
 
-    monkeypatch.setattr(parser_mod, "HTML_PARSER_VERSION", 2)
-    monkeypatch.setattr(contracts_mod, "HTML_PARSER_VERSION", 2)
+    source_id, _, _ = await _seed_html_source(env)
+    service = _service(env)
+
+    # 模拟 v1 parser（真实 parser + 真实 fingerprint，仅把版本号压回 1）。
+    monkeypatch.setattr(parser_mod, "HTML_PARSER_VERSION", 1)
+    monkeypatch.setattr(contracts_mod, "HTML_PARSER_VERSION", 1)
+    v1 = await service.parse_source(source_id)
+    assert v1.parser_version == 1
+    monkeypatch.undo()  # 恢复真实 VERSION=2
 
     v2 = await service.parse_source(source_id)
     assert v2.replayed is False
-    assert v2.parser_version == 2
+    assert v2.parser_version == HTML_PARSER_VERSION  # 真实 v2
     assert v2.parse_fingerprint != v1.parse_fingerprint
     assert v2.parsed_source_id != v1.parsed_source_id
     assert v2.block_count == v1.block_count == 4
 
     parsed, blocks = await _counts(env)
-    assert parsed == 2  # 新旧快照并存
+    assert parsed == 2  # 新旧（v1 + v2）快照并存
     assert blocks == 8  # 各自一套 blocks
 
 

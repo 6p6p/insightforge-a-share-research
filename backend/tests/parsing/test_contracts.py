@@ -272,7 +272,7 @@ def test_fingerprint_is_sha256_of_canonical_json() -> None:
         "source_id": "source-1",
         "raw_content_sha256": doc.raw_content_sha256,
         "parser_name": "html_dom",
-        "parser_version": 1,
+        "parser_version": 2,
         "extracted_title": "标题",
         "extracted_published_at": None,
         "blocks": [

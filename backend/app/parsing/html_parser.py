@@ -22,6 +22,7 @@ import codecs
 import hashlib
 import re
 from datetime import datetime
+from html.parser import HTMLParser
 
 from lxml import etree
 from lxml import html as lxml_html
@@ -56,16 +57,56 @@ _HTML_PARSER = lxml_html.HTMLParser(
 )
 
 _BOM_UTF8 = codecs.BOM_UTF8
-# 只从真实 meta 声明识别编码，绝不全局扫描任意 charset= 文本（body/script
-# 内出现 charset=... 不影响编码判定）。覆盖两种合法形式：
-#   (a) <meta charset="gbk">（HTML5 属性形式）
-#   (b) <meta http-equiv="Content-Type" content="text/html; charset=gbk">
-_META_TAG_RE = re.compile(rb"<meta\b[^>]*>", re.IGNORECASE)
-_META_CHARSET_ATTR_RE = re.compile(
-    rb"\scharset\s*=\s*([\"']?)([a-zA-Z0-9._\-]+)",
+_HEAD_SCAN_BYTES = 8192
+# 只认可 http-equiv="Content-Type" 的 content 值里 charset 参数（仅这一种
+# 参数形式；http-equiv 大小写不敏感）。绝不从 <meta name="description"
+# content="... charset=gbk"> 这类非 http-equiv 的 content 文本推断编码，
+# 也不全局扫描任意 charset= 文本（body/script 内出现 charset=... 不影响）。
+_CHARSET_PARAM_RE = re.compile(
+    r"\bcharset\s*=\s*[\"']?([a-zA-Z0-9._\-]+)",
     re.IGNORECASE,
 )
-_HEAD_SCAN_BYTES = 8192
+
+
+class _MetaCharsetParser(HTMLParser):
+    """确定性 meta 编码声明扫描器（stdlib HTMLParser，纯本地不联网）。
+
+    只认可两种真实 meta 声明：
+      (a) <meta charset="gbk">（HTML5 属性形式，charset 属性本身）；
+      (b) <meta http-equiv="Content-Type" content="text/html; charset=gbk">
+          （http-equiv 大小写不敏感；charset 仅取自 Content-Type 的
+          content 值内 charset 参数）。
+    其余任何 attribute 值里出现的 charset= 文本（如
+    <meta name="description" content="report charset=gbk">）都不产生声明。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self._declared: str | None = None
+
+    @property
+    def declared(self) -> str | None:
+        return self._declared
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if self._declared is not None or tag.lower() != "meta":
+            return
+        attr_map = {key.lower(): value for key, value in attrs if value is not None}
+        charset_attr = attr_map.get("charset")
+        if charset_attr:
+            self._set(charset_attr)
+            return
+        http_equiv = attr_map.get("http-equiv")
+        content = attr_map.get("content")
+        if http_equiv and http_equiv.strip().lower() == "content-type" and content:
+            match = _CHARSET_PARAM_RE.search(content)
+            if match:
+                self._set(match.group(1))
+
+    def _set(self, name: str) -> None:
+        normalized = name.strip().lower()
+        if normalized:
+            self._declared = normalized
 
 
 def parse_html_bytes(raw: bytes) -> ParsedDocument:
@@ -113,6 +154,8 @@ def _decode(raw: bytes) -> str:
 def _detect_encoding(raw: bytes) -> str | None:
     """只做纯本地字节扫描，不联网；返回声明编码或 None（→ 默认 UTF-8）。
 
+    用 stdlib html.parser.HTMLParser 确定性扫描 head 字节的 <meta> 声明
+    （latin-1 无损解码字节为 str：仅 ASCII 编码名会被提取，中文字节不受影响）。
     只从真实 meta 声明识别编码（<meta charset> 属性形式，或
     <meta http-equiv="Content-Type" content="...; charset=...">），
     绝不从 body/script 文本或任意 charset= 文本推断编码。
@@ -121,12 +164,15 @@ def _detect_encoding(raw: bytes) -> str | None:
         return "utf-8-sig"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return "utf-16"
-    head = raw[:_HEAD_SCAN_BYTES]
-    for meta_tag in _META_TAG_RE.finditer(head):
-        match = _META_CHARSET_ATTR_RE.search(meta_tag.group(0))
-        if match:
-            return match.group(2).decode("ascii", errors="ignore").lower()
-    return None
+    head = raw[:_HEAD_SCAN_BYTES].decode("latin-1")
+    parser = _MetaCharsetParser()
+    try:
+        parser.feed(head)
+        parser.close()
+    except (ValueError, AssertionError, IndexError):
+        # 畸形标记防御：解析失败即视为无声明（→ 默认 UTF-8），保持确定性。
+        return None
+    return parser.declared
 
 
 def _load_dom(text: str) -> lxml_html.HtmlElement:
