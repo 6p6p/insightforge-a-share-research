@@ -5,6 +5,8 @@ from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
 from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
+from app.db.models.news_discovery_candidate import NewsDiscoveryCandidateModel
+from app.db.models.news_discovery_run import NewsDiscoveryRunModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.source_provider import SourceProviderModel
@@ -20,6 +22,8 @@ __all__ = [
     "MacroObservationModel",
     "MacroSeriesModel",
     "MacroSnapshotArtifactModel",
+    "NewsDiscoveryCandidateModel",
+    "NewsDiscoveryRunModel",
     "RawArtifactModel",
     "ResearchTaskModel",
     "SourceProviderModel",

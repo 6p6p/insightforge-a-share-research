@@ -78,7 +78,19 @@
 
 ## 2D：新闻发现与大模型联网搜索兜底
 
-- 搜索结果只是发现记录；原始页面才是证据来源。
+**发现（Discovery）与事实来源（Source）分离是 2D 的顶层不变量。** GDELT、搜索引擎、LLM 搜索都是 **Discovery Provider / Acquisition mechanism**（`AcquisitionMethod.WEB_SEARCH_DISCOVERY` 等），它们不是：事实发布者、SourceProvider、Evidence source。真正的新闻来源是 `candidate.discovered_url`（本阶段契约字段名 `discovered_url`）指向的**原始发布网页**。只有完成 2D.2 的 original-source verification + 原文归档后，新闻材料才有资格进入后续 Evidence 管线。
+
+- **2D.1（completed，2026-08-07）**：News Discovery 基础 + GDELT DOC 2.0 Discovery Provider。
+  - 通用 News Discovery 契约（`NewsDiscoveryQuery` / `NewsDiscoveryCandidate` / `NewsDiscoveryProvider` Protocol / `NewsDiscoveryResult`）。
+  - `GdeltNewsDiscoveryProvider`：固定 endpoint `https://api.gdeltproject.org/api/v2/doc/doc`，仅 `mode=artlist&format=json&sort=datedesc&maxrecords=1..100&startdatetime&enddatetime`；安全 HTTP 规则（仅 https、固定 hostname、`trust_env=false`、无 Cookie/Auth/API Key、手动重定向 ≤3 次且 hostname 不变、不自动重试、5 MiB 流式上限、日志脱敏）。
+  - Discovery Run / Discovery Candidate 持久化（migration 0011，`news_discovery_runs` + `news_discovery_candidates`）；GDELT 原始 JSON 搜索响应归档为 RawArtifact；确定性 query/result 去重（query fingerprint + replay）。
+  - 75 项 News 单元测试（Contracts/Client/Parser/Fingerprint）+ 7 项 MockTransport E2E 集成测试通过；受控真实 Probe 已执行（本机对 `api.gdeltproject.org` 连接超时，acceptance 记录为 pending，与 2C.1 相同的网络阻断环境）。
+  - **GDELT 不进 Source Registry**：`source_providers` seed 禁止 `gdelt`/`gdelt_doc`/`openai`/`chatgpt`/`search_engine`；GDELT 不伪装成 Tier 3/4 SourceProvider。
+  - 本阶段不下载新闻正文、不解析 HTML、不把 Candidate 当 Source、不创建 Evidence/Claim、不用 LLM、不接 LangGraph。
+- **2D.2（尚未开始）**：Original Source Verification + HTML RawArtifact archival。
+  - 对 Candidate 指向的原始发布网页做分类与安全获取（safe fetch）、HTML RawArtifact 归档、verification status 演进（verified / rejected / archived / evidence_ready）。只有通过 2D.2 验证并归档原文后，新闻材料才有资格进入 Evidence 管线。
+- **2D.3（尚未开始）**：Model Web Search fallback + Discovery Router。
+  - 在 2D.1 的 GDELT 发现（主要覆盖英文机器翻译内容）之外提供大模型联网搜索兜底与路由。GDELT 不是中文原生全文搜索的可靠替代，不承诺对 A 股中文媒体拥有完整 recall。
 
 ## 2E：原始归档、哈希、解析、去重与阶段验收
 

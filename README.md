@@ -2,7 +2,7 @@
 
 面向 A 股上市公司的证据驱动基本面研究与事实审核系统。
 
-> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）与阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）**已实现**，阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
+> 当前进度：阶段 2A 基础（公司标准身份 + Source Registry）、阶段 2B.1（原始文件归档 + 来源登记）、阶段 2B.2A（官方披露发现契约 + 可行性探测）、阶段 2C.1（Macro Provider 契约 + World Bank Indicators Provider，实现与自动化测试已完成、真实验收待网络环境）、阶段 2C.2A（宏观持久化数据模型 + RawArtifact JSON 泛化）、阶段 2C.2B（原始响应捕获 + Snapshot Fingerprint + 事务化持久化）与阶段 2D.1（News Discovery 基础 + GDELT DOC 2.0 Discovery Provider，实现与自动化测试已完成、真实验收待网络环境）**已实现**，阶段 1B/1C 提供 LangGraph 模拟工作流基础。核心证据链（Evidence → Claim → Report → Audit）、真实 Agent、RAG、业务研报生成与前端**尚未实现**：不自动抓取公告、不同步公司目录、不解析 PDF 正文、不接入 LLM。当前 FastAPI 应用提供健康检查、研究任务、模拟工作流、来源登记与原始文件归档接口，并具备 PostgreSQL 与 Chroma 的持久化基础设施。
 
 ## 目录职责
 
@@ -334,6 +334,21 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 - `MacroPersistenceService`（`persist_captured_fetch` / `fetch_and_persist`）严格写入顺序 A-K：网络 I/O 不持有 AsyncSession；并发幂等（`ON CONFLICT DO NOTHING`，仅赢家写 Links/Observations）；replay 完整性检查失败抛 `MacroSnapshotIntegrityError`，不自动修复。
 - migration 0010 新增 `fingerprint_version` / `normalization_version` + CHECK（已应用，`alembic current` = 0010 head）；**不创建 RetrievalAttempt 表**（设计决策见 ADR-0013）。
 - 决策记录：[docs/decisions/0013-macro-captured-persistence-service.md](docs/decisions/0013-macro-captured-persistence-service.md)。
+
+## 新闻发现（阶段 2D.1）
+
+阶段 2D.1 建立**发现（Discovery）与事实来源（Source）分离**的 News Discovery 基础，并实现第一个 discovery-only 新闻候选 Provider（GDELT DOC 2.0）。**状态：2D.1 implementation + automated tests completed / live external acceptance pending（本机对 `api.gdeltproject.org` 连接超时，与 2C.1 相同的网络阻断环境；跑通前不开放生产新闻发现、不把 Discovery Candidate 视为 Evidence，见下）**。
+
+- 通用 News Discovery 契约：`NewsDiscoveryQuery`（company_id/query_text/start_at/end_at/max_results，8 条校验规则）与 `NewsDiscoveryCandidate`（rank/title/discovered_url/normalized_url/domain/seen_at/engine，10 条规则；URL 确定性 normalization：默认端口删除、fragment 删除、IDNA hostname、不删 utm）；`NewsDiscoveryProvider` Protocol + `NewsDiscoveryResult` + `NewsRawDiscoveryResponse`。
+- `GdeltNewsDiscoveryProvider`（`NewsDiscoveryEngine.GDELT_DOC`）：固定 endpoint `https://api.gdeltproject.org/api/v2/doc/doc`，仅 `mode=artlist&format=json&sort=datedesc&maxrecords=1..100&startdatetime&enddatetime`（UTC `YYYYMMDDHHMMSS`）；安全 HTTP 22 条规则（仅 https、固定 hostname、`trust_env=false`、无 Cookie/Auth/API Key、手动重定向 ≤3 次且 hostname 不变、不自动重试、429/5xx 稳定错误、5 MiB 流式上限、Content-Type 必须 `application/json`、JSON 显式拒绝 NaN/Infinity、日志脱敏——只记 provider_key/hostname/status/duration_ms/error_type）。
+- 宽容 Parser：缺 url/title、非法 URL、日期无法解析的单条跳过（不让整个查询失败）；顶层非 object / articles 非 list 拒绝；domain 由 normalized URL hostname 派生、不盲信 Provider 字段；同一 normalized_url 去重；rank 从 1 重排。
+- **Discovery Run / Discovery Candidate 持久化**（migration 0011，已应用）：`news_discovery_runs`（engine/query/时间窗/max_results/raw_artifact 引用 + 冗余响应元数据/query_fingerprint UNIQUE）与 `news_discovery_candidates`（rank/title/discovered_url/normalized_url/url_sha256/domain/seen_at/verification_status=unverified，`(run, rank)` 与 `(run, normalized_url)` 唯一）。GDELT 原始 JSON 搜索响应归档为 RawArtifact（内容寻址，SHA-256）。
+- `NewsDiscoveryPersistenceService.discover_and_persist` A-H：网络 I/O 不持有 AsyncSession → 原始响应先落盘 → 短 DB transaction → raw artifact get_or_create → query fingerprint → run create-or-get（`ON CONFLICT DO NOTHING`，并发幂等）→ replay 完整性检查（候选数不符抛 `NewsDiscoveryIntegrityError`）→ 仅赢家写 Candidates → commit。
+- query fingerprint v1：engine + company_id + query_text + UTC 时间窗 + max_results + raw response sha256 的 canonical JSON SHA-256（golden vector 固定）；重复完全相同的发现响应 replay 到同一 run。
+- 测试：75 项 News 单元测试（A. Contracts / B. GDELT Client / C. Parser / D. Fingerprint）+ 7 项 MockTransport E2E 集成测试，全部通过；Network Guard（conftest autouse）继续拦截非回环真实网络。
+- **GDELT 不进 Source Registry**：`source_providers` seed 禁止 `gdelt`/`gdelt_doc`/`openai`/`chatgpt`/`search_engine`；GDELT 不是 Tier 3/4 SourceProvider、不创建 SourceRecord/Evidence/Claim。
+- **重要现实限制**：GDELT 不是中文全文搜索的可靠替代，已实现的是**第一种 discovery-only 新闻候选 Provider**——它只产生待核验的候选 URL 线索，不代表系统现在可以完整搜索 A 股新闻。本阶段不下载新闻正文、不解析 HTML、不把 Candidate 当 Source、不用 LLM、不接 LangGraph；2D.2（original-source verification + HTML 归档）与 2D.3（Model Web Search fallback + Discovery Router）尚未开始。
+- 决策记录：[docs/decisions/0014-news-discovery-and-gdelt-provider.md](docs/decisions/0014-news-discovery-and-gdelt-provider.md)。
 
 ## 完整系统（Docker Compose）
 
