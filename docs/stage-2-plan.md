@@ -126,5 +126,7 @@
   - `SourceParsingService` 泛化为 dispatcher：text/html → html_dom v2、application/pdf → pdf_layout v2，其他 media type → `UnsupportedParseMediaType`；复用同一持久化/replay/integrity/并发逻辑；SourceRecord 元数据不被回写。
   - 测试：**28 PDF parser 单元 + 新增 PDF contracts/fingerprint 单元 + 6 解析 Service 集成**（真实 PostgreSQL + 临时 RawStore，零网络；PDF bytes 由纯 stdlib 手写 fixture 确定性构造）全部通过；ruff 零告警、`pip check` 通过。
   - 决策记录：[docs/decisions/0017-deterministic-pdf-parsing.md](decisions/0017-deterministic-pdf-parsing.md)。
-- **2E.3（next，尚未开始）**：Stage-2 source pipeline E2E acceptance（PDF + HTML 全链路确定性解析的端到端验收）。
+- **2E.3（completed，2026-08-07）**：Stage-2 source pipeline E2E acceptance。
+  - 新增集中 acceptance 集成测试 `tests/integration/test_stage2_pipeline_acceptance.py`（真实 PostgreSQL、零真实网络），验证三条端到端链：**公司 PDF**（Company → application/pdf RawArtifact → SourceRecord sse+annual_report → ParsedSource pdf_layout v2 → pdf_page locator → replay）、**新闻 HTML**（GDELT Discovery Run/Candidate → Original Publisher verification MockTransport → HTML RawArtifact → SourceRecord xinhuanet+news_article → ParsedSource html_dom v2 → DOM locator → replay）、**Macro**（WorldBank MockTransport → 原始 JSON artifacts → MacroSeries/MacroDatasetSnapshot → MacroObservations → replay）。
+  - 横切不变量：RawArtifact hash/immutability（内容寻址文件哈希 == content_sha256）、SourceRecord provenance、parser/fingerprint replay（replayed=True 零新增行）、duplicate writes=0、backend/store 重启后 artifact 仍可读、PDF/HTML locator 可回到对应 Source/Artifact、**GDELT 永不成为 SourceRecord**（run 的 JSON artifact 不被任何 SourceRecord 引用）、**Macro Snapshot 不是 Evidence**、Stage 3（Chunk/Evidence/Claim/Report/Audit）表不存在。
 - **Stage 3（尚未开始）**：DocumentChunk / Embedding / Chroma / EvidenceCard（不属于 Stage 2）。
