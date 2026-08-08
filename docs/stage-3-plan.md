@@ -15,11 +15,24 @@
 - 决策记录：[docs/decisions/0018-deterministic-document-chunking.md](decisions/0018-deterministic-document-chunking.md)。
 - 测试：38 项单元测试 + 11 项集成测试（E2E 回溯、replay、版本、并发、损坏、零修改上游）。
 
-## 3B：BGE Embedding + Chroma indexing/retrieval（next，尚未开始）
+## 3B：BGE Embedding + Chroma indexing/retrieval
 
-- 对 3A 的 DocumentChunk 生成确定性 Embedding（BGE），写入 Chroma collection（向量索引）。
-- 语义检索：给定查询 → 返回候选 Chunk 及其证据链定位。
-- 前置：3A 完成（已达成）；需引入 BGE 相关依赖并冻结模型版本。
+### 3B.1：BGE Embedding + Chroma Index Foundation（当前，completed）
+
+- **状态（2026-08-08）：implementation completed / automated tests completed / docker rebuild acceptance completed / live acceptance not required；real_bge_acceptance = passed**。
+- 冻结 BGE 契约（`app/rag/embedding/contracts.py`）：**BAAI/bge-small-zh-v1.5**、dimension=512、normalize=true、max_input_tokens=512、query_instruction=`"为这个句子生成表示以用于检索相关文章："`（仅 query 加）；**immutable revision `7999e1d3359715c523056ef9478215996d62a620`**（real smoke 解析，不依赖 "main"）；禁止 silent truncation。
+- 模型 lazy load（不阻塞 app startup / 不在启动时联网下载）；sentence-transformers 4.1.0 精确 pin。
+- **PG = Source of Truth，Chroma = 可重建 derived index**：固定共享 collection `insightforge_document_chunks`、cosine、不配置 embedding function；冻结 metadata（schema_version/model_id/model_revision/dimension/normalized/distance_metric），配置不一致 → `VectorCollectionConflict`。
+- **Migration 0015**：`chunk_vector_indexes` 表（vector_index_id PK、chunk_set_id FK RESTRICT、模型配置、expected/indexed count、index_fingerprint CHAR(64) UNIQUE、status building/ready/failed、last_error_code、ready_at；自然身份 UNIQUE(chunk_set_id, model_id, model_revision, schema_version)）；`chunk_sets` 补 UNIQUE(parsed_source_id, chunker_name, chunker_version)。
+- **VectorIndexService.index_chunk_set(chunk_set_id)**：短 DB session 读后关闭；Embedding/Chroma 网络操作不持 DB transaction；create-or-get manifest（自然身份 ON CONFLICT）→ 兼容 collection → 分批 upsert（确定性 id=str(chunk_id)）→ 验证 expected chunk IDs + text_sha256；成功 ready、失败 failed+稳定错误码；ready replay 先验证不重嵌入，缺失 → `VectorIndexIntegrityError` 不自动修复；允许 Chroma partial；并发 → PG manifest=1 + 每 chunk record=1（无进程锁）。
+- Chroma record metadata 仅 primitive：chunk_id/chunk_set_id/parsed_source_id/source_id/company_id/provider_key/document_type/chunk_ordinal/text_sha256/authority_tier/critical_claim_eligible（published_at 有值才存 epoch）；不塞 locator_refs。
+- 测试：单元（contracts/bge/fingerprint/collection）+ 集成（真实 PG + FakeChroma 零网络 9 项）+ 真实 Chroma 2 项（独立测试 collection，结束删除）；**不下载真实模型**（FakeEmbeddingProvider）。
+- 决策记录：[docs/decisions/0019-bge-chroma-index-foundation.md](decisions/0019-bge-chroma-index-foundation.md)。
+
+### 3B.2：Retrieval（next，尚未开始）
+
+- 对 3B.1 的向量索引实现语义检索：给定查询 → 返回候选 Chunk 及其证据链定位。
+- 前置：3B.1 完成（已达成）。
 - 不在本阶段实现的边界：EvidenceCard / Claim / Report / LLM。
 
 ## 3C：EvidenceCard（later，尚未开始）

@@ -15,6 +15,12 @@ class ChunkSetRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, chunk_set_id: UUID) -> ChunkSetModel | None:
+        result = await self._session.execute(
+            select(ChunkSetModel).where(ChunkSetModel.chunk_set_id == chunk_set_id)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_fingerprint(self, chunk_set_fingerprint: str) -> ChunkSetModel | None:
         result = await self._session.execute(
             select(ChunkSetModel).where(
@@ -23,9 +29,28 @@ class ChunkSetRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_parsed_source_id(self, parsed_source_id: UUID) -> ChunkSetModel | None:
+    async def list_by_parsed_source_id(self, parsed_source_id: UUID) -> list[ChunkSetModel]:
+        """返回该 ParsedSource 的全部 ChunkSet（可能含多个 chunker version）。"""
         result = await self._session.execute(
-            select(ChunkSetModel).where(ChunkSetModel.parsed_source_id == parsed_source_id)
+            select(ChunkSetModel)
+            .where(ChunkSetModel.parsed_source_id == parsed_source_id)
+            .order_by(ChunkSetModel.created_at, ChunkSetModel.chunk_set_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_identity(
+        self,
+        parsed_source_id: UUID,
+        chunker_name: str,
+        chunker_version: int,
+    ) -> ChunkSetModel | None:
+        """按 (parsed_source_id, chunker_name, chunker_version) 自然身份精确定位。"""
+        result = await self._session.execute(
+            select(ChunkSetModel).where(
+                ChunkSetModel.parsed_source_id == parsed_source_id,
+                ChunkSetModel.chunker_name == chunker_name,
+                ChunkSetModel.chunker_version == chunker_version,
+            )
         )
         return result.scalar_one_or_none()
 

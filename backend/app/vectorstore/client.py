@@ -40,6 +40,10 @@ class ChromaManager:
                     )
         return self._client
 
+    async def get_client(self) -> AsyncClientAPI:
+        """Return the shared async Chroma client (lazily initialised, thread-safe)."""
+        return await self._get_client()
+
     async def heartbeat(self) -> None:
         """Verify service connectivity only; never creates collections."""
         client = await self._get_client()

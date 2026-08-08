@@ -61,6 +61,14 @@ class ChunkSetModel(Base):
             "chunk_set_fingerprint",
             name="uq_chunk_sets_chunk_set_fingerprint",
         ),
+        # 自然身份（0015 新增）：同 ParsedSource + 同 chunker 身份 → 最多 1 个
+        # ChunkSet（fingerprint 已隐含该不变式，此处显式约束供向量索引等下游定位）。
+        UniqueConstraint(
+            "parsed_source_id",
+            "chunker_name",
+            "chunker_version",
+            name="uq_chunk_sets_identity",
+        ),
         Index("ix_chunk_sets_parsed_source_id", "parsed_source_id"),
     )
 

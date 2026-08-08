@@ -291,8 +291,8 @@ async def test_html_parsed_source_chunked_and_traceable(env) -> None:
     assert result.chunk_count == 1  # 3 短 block 全合并
 
     async with env["sessionmaker"]() as session:
-        chunk_set = await ChunkSetRepository(session).get_by_parsed_source_id(
-            parsed.parsed_source_id
+        chunk_set = await ChunkSetRepository(session).get_by_identity(
+            parsed.parsed_source_id, chunker_name="block_window", chunker_version=1
         )
     assert chunk_set is not None and chunk_set.chunk_set_id == result.chunk_set_id
     chunks = await _chunks(env, result.chunk_set_id)
