@@ -14,6 +14,12 @@ class DocumentChunkRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, chunk_id: UUID) -> DocumentChunkModel | None:
+        result = await self._session.execute(
+            select(DocumentChunkModel).where(DocumentChunkModel.chunk_id == chunk_id)
+        )
+        return result.scalar_one_or_none()
+
     async def bulk_insert(self, chunks: list[DocumentChunkModel]) -> None:
         """同事务批量插入 chunks；空列表为 no-op。"""
         if not chunks:

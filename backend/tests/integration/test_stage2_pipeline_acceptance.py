@@ -99,9 +99,10 @@ _HTML = (
 # 从 WorldBankClient.__init__ 捕获会拿到上一次的 monkeypatch 代理。
 _REAL_CLIENT_INIT = WorldBankClient.__init__
 
-# Stage 3A 之后合法存在的表（chunk_sets / document_chunks）不属于"尚不允许"
-# 之列；Evidence / Claim / Report / Audit 表仍未实现，必须不存在。
-_STAGE3_TABLES = ("evidence_cards", "claims", "reports", "audits")
+# Stage 3 各子阶段合法存在的表不属于"尚不允许"之列：chunk_sets /
+# document_chunks（3A）、chunk_vector_indexes（3B）、evidence_cards（3C.1）。
+# Claim / Report / Audit 表仍未实现（Stage 4 及以后），必须不存在。
+_STAGE3_TABLES = ("claims", "reports", "audits")
 
 
 class FakeResolver(HostResolver):
@@ -565,7 +566,7 @@ async def test_macro_pipeline_e2e(env, monkeypatch) -> None:
 
 
 async def test_no_stage3_tables_or_evidence(env) -> None:
-    """Chunk / Evidence / Claim / Report / Audit 表必须不存在（schema 不变量）。"""
+    """Claim / Report / Audit 表必须不存在（schema 不变量，Stage 4 及以后）。"""
     async with env["sessionmaker"]() as session:
         for table in _STAGE3_TABLES:
             row = await session.execute(text(f"SELECT to_regclass('public.{table}')"))

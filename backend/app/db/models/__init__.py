@@ -3,6 +3,7 @@ from app.db.models.chunk_vector_index import ChunkVectorIndexModel
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.document_chunk import DocumentChunkModel
+from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.human_action import HumanActionModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
@@ -26,6 +27,7 @@ __all__ = [
     "CompanyAliasModel",
     "CompanyModel",
     "DocumentChunkModel",
+    "EvidenceCardModel",
     "HumanActionModel",
     "MacroDatasetSnapshotModel",
     "MacroObservationModel",

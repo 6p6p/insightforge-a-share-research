@@ -442,6 +442,24 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 - **测试**：**单元测试 37 项**（RetrievalQuery 校验 / where builder / RetrievalService：query instruction、token too long、no threshold、company isolation、collection 缺失、eligible 空、Chroma 不可用、hydrate integrity、**collection metadata 校验、重复 chunk_id、非 finite distance**）+ **集成测试**（真实 PostgreSQL + FakeChroma 零网络 20 项：company 隔离 / provider / document_type / source_ids / authority / critical-only / published range / reporting period range / ready-only / failed+building 排除 / 旧 chunker+parser 排除 / **维度、normalize、collection 名不匹配、ready 但 indexed<expected 排除** / 全链路 hydrate / ranking / 篡改 metadata→integrity / Chroma 不可用 / read path 0 manifest）+ **真实 Chroma 1 项**（独立 collection，结束删除）；自动化测试**不下载真实模型**。
 - **决策记录**：[docs/decisions/0020-filtered-vector-retrieval.md](docs/decisions/0020-filtered-vector-retrieval.md)。
 
+## EvidenceCard Provenance（阶段 3C.1）
+
+阶段 3C.1 把**已确认与研究问题相关的 DocumentChunk 片段**确定性登记为可追溯 EvidenceCard（`evidence_cards` 表，migration 0016）。**状态（2026-08-09）：implementation = completed / automated_tests = completed / live acceptance = not required（不开放 Evidence HTTP 端点）**。证据边界：**RetrievalHit = 候选资料；EvidenceCard = 已确认、有明确原文片段和 provenance 的原子证据；Claim = Stage 4**。EvidenceCard 不含 supports/contradicts_claim，语义字段命名 `evidence_statement`（不用 `claim_text`）。
+
+- **Migration 0016**：`evidence_cards`（evidence_card_id PK；5 个 FK RESTRICT：company_id/source_id/parsed_source_id/chunk_set_id/chunk_id；provider_key FK RESTRICT source_providers；16 个 CHECK：quote_start≥0、quote_end>quote_start、evidence_type IN 五类、extractor_confidence IN 三档、extractor_version≥1、evidence_schema_version≥1、全部 SHA `^[0-9a-f]{64}$`、locator_refs array、btrim 非空五字段；6 个索引：company_id/source_id/chunk_id/research_question_sha256/evidence_type/created_at；evidence_fingerprint CHAR(64) UNIQUE）。**0016 downgrade guard**：有卡拒绝降级、空表允许（isolated 集成测试）。
+- **EvidenceCardDraft 只允许语义输入**（`app/evidence/contracts.py`）：research_question/evidence_statement/evidence_type/chunk_id/quote_start/quote_end/extractor_name/extractor_version/extractor_model_id?/extractor_confidence；调用方**不得提供** company_id/source_id/authority tier/provider/published time/locator_refs/quote_text/quote_sha256/evidence_fingerprint（由 Service 从 PG provenance + chunk 确定性推导）。
+- **Exact quote**：`quote_text = chunk.text[quote_start:quote_end]`，程序切片，不信任 caller/LLM，strip 后非空、越界 → `EvidenceQuoteRangeError`；**绝不 normalize/改写/摘要/自动纠错**。
+- **Locator projection**（`project_evidence_locator_refs`）：chunk text = 各 ref block slice 以 `"\n"` 连接；`sum(段长)+separators == len(chunk_text)` 破坏 → `EvidenceLocatorIntegrityError` 不修复；与 quote 求交后只留实际覆盖的 refs，char 范围缩窄到原 ParsedBlock，locator 原样保留（HTML xpath/element_id；PDF page_number/bbox）。
+- **Provenance load**：`create_card(draft)` 从 chunk_id 真实加载 DocumentChunk→ChunkSet→ParsedSource→SourceRecord→Company，派生全部 provenance 快照；链损坏 → `EvidenceProvenanceIntegrityError`；**不读取 Chroma、不重新 Retrieval**。company_id 取自 SourceRecord.company_id（FK RESTRICT）。
+- **Research question**：不新建表、不伪造 question UUID；trim 后保留原文本；`research_question_sha256` = SHA-256(trim 后 UTF-8)。
+- **Confidence/reliability 分离**：`authority_tier_snapshot`（来源可靠性）≠ `extractor_confidence`（语义提取置信度）；`critical_claim_eligible_snapshot` 直接复制 SourceRecord，**不因 extractor_confidence=high 自动提升**。
+- **Fingerprint / replay / 并发**：`evidence_fingerprint` = canonical JSON（sort_keys、紧分隔、UTF-8）+ SHA-256，含 schema_version + 5 ids + 语义 + quote + locator_refs + provenance 快照 + extractor 三件套，排除 evidence_id/created_at；相同 → replay 原卡；并发 → 1 卡（PG `ON CONFLICT(evidence_fingerprint)`，无进程锁）；语义/quote/extractor version 任一变化 → 新卡、旧卡保留。
+- **Replay integrity**：replay 时重新加载真实 provenance 并核实 quote 切片、quote_sha256、locator projection、各级 IDs、provider、authority/critical 快照、published/reporting period、fingerprint；任一损坏 → `EvidenceCardIntegrityError`，**不自动 repair**。
+- **Repository**（`app/repositories/evidence_card_repository.py`）：get_by_id / get_by_fingerprint / list_by_company / create_or_get（ON CONFLICT DO NOTHING RETURNING）；**无 update API**。
+- **测试**：**57 项单元**（contracts/quote/locator）+ **19 项集成**（真实 PG + 真实 SourceParsingService/ChunkingService，零 Chroma/LLM/embedding：首建、replay、并发→1、statement/quote/extractor version 变化→新卡、provenance snapshots、high confidence 不提升 critical eligibility、损坏 replay→integrity 不修复、无 update API、E2E HTML DOM locator + 完整回溯、E2E HTML 跨 `"\n"` 双 locator、E2E PDF page/bbox 跨页 + 回溯 ParsedSourceBlock、provenance 链断裂→integrity）+ **2 项 migration 0016 downgrade guard**（isolated 临时 PG）。
+- **边界**：不创建 Claim/Report/ReviewIssue；不调用 LLM/LangGraph/CrewAI/BGE/Chroma query；EvidenceCard 不是 RetrievalHit 的自动升级（Service 构造函数只持有 sessionmaker，只显式接受 `create_card(EvidenceCardDraft)`）。
+- **决策记录**：[docs/decisions/0021-evidence-card-provenance.md](docs/decisions/0021-evidence-card-provenance.md)。
+
 ## 完整系统（Docker Compose）
 
 ```bash

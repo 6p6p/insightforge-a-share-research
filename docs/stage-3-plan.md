@@ -44,8 +44,31 @@
 - 测试：单元 37 项（contracts/validation/where builder/query instruction/token too long/no threshold/collection metadata 校验/重复 chunk_id/非 finite distance）+ 集成 20 项（真实 PG + FakeChroma 零网络：company 隔离 / provider / document_type / source_ids / authority / critical-only / published range / reporting period range / ready-only / failed+building 排除 / 旧 chunker+parser 排除 / 维度、normalize、collection 名不匹配、ready 但 indexed<expected 排除 / 全链路 hydrate / ranking / 篡改 metadata→integrity / Chroma 不可用→稳定错误 / read path 0 manifest）+ 真实 Chroma 1 项（独立 collection，结束删除）。
 - 决策记录：[docs/decisions/0020-filtered-vector-retrieval.md](decisions/0020-filtered-vector-retrieval.md)。
 
-## 3C：EvidenceCard（next，尚未开始）
+## 3C：EvidenceCard（当前：3C.1 完成）
 
-- 把 Retrieval 命中的 Chunk + 原文定位封装为 EvidenceCard（可独立核对的证据单元）。
-- 前置：3B 完成（已达成）。
-- 后续：Claim（主张抽取）、Report（研报生成）、Audit（事实审核）属于 Stage 4 及以后。
+### 3C.1：EvidenceCard Provenance（completed）
+
+- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required**（不开放 Evidence HTTP 端点）。
+- 把**已确认与研究问题相关的 DocumentChunk 片段**确定性登记为可追溯 EvidenceCard（`evidence_cards` 表，migration 0016）。证据边界：RetrievalHit = 候选资料；EvidenceCard = 已确认、有明确原文片段和 provenance 的原子证据；Claim = Stage 4。EvidenceCard 不含 supports/contradicts_claim，语义字段命名 `evidence_statement`。
+- **EvidenceCardDraft 只允许语义输入**（research_question/evidence_statement/evidence_type/chunk_id/quote_start/quote_end/extractor_name/extractor_version/extractor_model_id?/extractor_confidence）；company_id/source_id/authority tier/provider/published time/locator_refs/quote_text/evidence_fingerprint 全部由 Service 从 PG provenance + chunk **确定性推导**。
+- **Exact quote**：`quote_text = chunk.text[quote_start:quote_end]` 程序切片，不信任 caller/LLM，strip 后非空、越界 → `EvidenceQuoteRangeError`；绝不 normalize/改写/摘要/自动纠错。
+- **Locator projection**：chunk text = 各 ref block slice 以 `"\n"` 连接；`sum(段长)+separators == len(chunk_text)` 破坏 → `EvidenceLocatorIntegrityError` 不修复；与 quote 求交只留实际覆盖的 refs，char 范围缩窄到原 ParsedBlock，locator 原样保留（HTML xpath/element_id；PDF page_number/bbox）。
+- **Provenance load**：`create_card(draft)` 从 chunk_id 真实加载 DocumentChunk→ChunkSet→ParsedSource→SourceRecord→Company 派生全部快照；链损坏 → `EvidenceProvenanceIntegrityError`；不读取 Chroma、不重新 Retrieval。
+- **Confidence/reliability 分离**：`authority_tier_snapshot` ≠ `extractor_confidence`；`critical_claim_eligible_snapshot` 直接复制 SourceRecord，不因 high confidence 自动提升。
+- **Fingerprint / replay / 并发**：`evidence_fingerprint` = canonical JSON + SHA-256（含 schema_version + 5 ids + 语义 + quote + locator_refs + provenance 快照 + extractor 三件套，排除 evidence_id/created_at）；相同 → replay 原卡；并发 → 1 卡（PG `ON CONFLICT`，无进程锁）；语义/quote/extractor version 任一变化 → 新卡、旧卡保留。
+- **Replay integrity**：replay 时重新加载真实 provenance 核实 quote 切片/quote_sha256/locator projection/各级 IDs/provider/快照/fingerprint；任一损坏 → `EvidenceCardIntegrityError`，不自动 repair；Repository 无 update API。
+- **测试**：57 单元 + 19 集成（真实 PG + 真实 Parsing/Chunking，零 Chroma/LLM/embedding）+ 2 项 migration 0016 downgrade guard（isolated 临时 PG）。
+- 决策记录：[docs/decisions/0021-evidence-card-provenance.md](decisions/0021-evidence-card-provenance.md)。
+
+### 3C.2：Evidence Extractor（next，尚未开始）
+
+- 把 RetrievalHit + LLM 语义抽取（Evidence Extractor Agent）接入 `EvidenceCardService.create_card(draft)`：确认研究问题相关性、生成 `evidence_statement` / `evidence_type` / `extractor_confidence`，quote 与 locator 仍由确定性程序推导。
+- 前置：3C.1 完成（已达成）。
+
+### 3C.3：Evidence 服务收口（later）
+
+- 3C.1 + 3C.2 之后的收口与 E2E 验收（文档、全量验证）。
+
+### 3C 之后
+
+- Claim（主张抽取）、Report（研报生成）、Audit（事实审核）属于 Stage 4 及以后。
