@@ -562,10 +562,10 @@ async def test_macro_pipeline_e2e(env, monkeypatch) -> None:
     assert all(s.fingerprint_version == 1 for s in rows["snapshots"])
 
 
-# ---------------------------------------------------------------- 横切：Stage 3 表不存在
+# ---------------------------------------------------------------- 横切：Stage 4 表不存在
 
 
-async def test_no_stage3_tables_or_evidence(env) -> None:
+async def test_no_stage4_claim_report_audit_tables(env) -> None:
     """Claim / Report / Audit 表必须不存在（schema 不变量，Stage 4 及以后）。"""
     async with env["sessionmaker"]() as session:
         for table in _STAGE3_TABLES:

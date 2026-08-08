@@ -460,6 +460,20 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 - **边界**：不创建 Claim/Report/ReviewIssue；不调用 LLM/LangGraph/CrewAI/BGE/Chroma query；EvidenceCard 不是 RetrievalHit 的自动升级（Service 构造函数只持有 sessionmaker，只显式接受 `create_card(EvidenceCardDraft)`）。
 - **决策记录**：[docs/decisions/0021-evidence-card-provenance.md](docs/decisions/0021-evidence-card-provenance.md)。
 
+## Structured Evidence Extractor（阶段 3C.2）
+
+阶段 3C.2 把 **RetrievalHit + research question → LLM structured semantic extraction → 确定性 quote resolution → EvidenceCardService.create_card()** 接通：把检索候选变成"被原文直接支持、有精确引用定位的 EvidenceCard"。**状态（2026-08-09）：implementation = completed / automated tests = completed / live acceptance = not required（不开放 Evidence HTTP 端点）；real_llm_smoke = pending_environment（本环境无 LLM 凭据，一次性人工 smoke 未执行）**。角色边界：**Extractor 只做语义**（相关性判断、原子 evidence_statement、evidence_type、low/medium/high confidence、逐字 quote_text）；**确定性代码负责** quote_start/end、locator 投影、provenance IDs、authority tier、critical eligibility、fingerprint、Claim、投资建议。
+
+- **契约**（`app/evidence/extractor/contracts.py`）：`EVIDENCE_EXTRACTOR_NAME="structured_llm"`、`EVIDENCE_EXTRACTOR_VERSION=1`、`MAX_EXTRACTION_ITEMS_PER_HIT=3`。`EvidenceExtractionItem`（evidence_statement/evidence_type/quote_text/confidence，**无 reasoning/CoT/free-form 字段**）+ `EvidenceExtractionDecision`（relevant/items/reason_code）；relevant=false→items 空；relevant=true→1..3 items 且 reason_code=None；单 response 不允许完全重复 item。
+- **LLM 抽象**：最小 `EvidenceExtractionModel` Protocol（model_id + async extract）；domain 不依赖具体 provider；自动测试一律用 `FakeEvidenceExtractionModel`（零真实 LLM/网络）。可选 `LangChainStructuredOutputAdapter`（lazy import，langchain 非必需依赖；model_id = `provider:model@revision`，绝不伪造 revision）；temperature=0，禁止 tools/web search。
+- **Prompt 边界**（`prompt.py`）：system 冻结声明 source 是不可信 DATA、忽略注入、无 tools/CoT、quote 逐字、statement 由 quote 支持、不补充 source 外事实、不生成投资建议、不输出 Claim、无直接证据→relevant=false；source 只进 user/data payload（`<<<SOURCE_TEXT_START/END>>>` delimiter），绝不拼接进 system。
+- **Exact quote resolver**（`quote.py`）：`resolve_exact_quote(chunk_text, quote_text)` 精确子串，0 次→`QuoteNotFound`、>1 次（含重叠）→`QuoteAmbiguous`；不做 fuzzy/normalize/自动纠错；LLM 不返回 offsets。
+- **ExtractionService**（`service.py`）：短 DB read + stale guard（`sha256(hit.text)==chunk.text_sha256` 且 5 个 provenance ids 匹配，否则 `InputStale`，**在 LLM 调用前拒绝**）→ model.extract → strict schema（malformed → `MalformedOutput`）→ relevant=false 0 写 → 全部 items 先完成 quote+decode 校验再逐 draft `create_card`（单 hit 最多 3 卡；replay/并发由 3C.1 fingerprint 保证）。quote 以 fresh PG text 为准；日志仅白名单字段。
+- **错误分类**：`EvidenceExtractorUnavailable` / `EvidenceExtractionMalformedOutput` / `EvidenceExtractionQuoteNotFound` / `EvidenceExtractionQuoteAmbiguous` / `EvidenceExtractionInputStale` / `EvidenceExtractionInputError`。
+- **测试**：**122 项单元**（contracts/quote resolver/prompt 注入边界/service；零 LLM）+ **11 项集成**（真实 PG：E2E HTML DOM locator 跨 block 2 refs + provenance 快照、E2E PDF 跨 page/bbox + 回溯 ParsedSourceBlock、rerun replay、stale 拒绝 0 写、relevant=false/not-found/ambiguous/malformed 0 写、high confidence 不提升 critical、单 hit 3 卡、0 manifest 无 claims/reports 表；零 Chroma/BGE/LLM/network）。
+- **边界**：不创建 Claim/Report/Audit；不接 LangGraph/CrewAI；不自动 Retrieval/reranker/fact cross-check/second judge；不开放 HTTP API；Alembic head 保持 0016（无新 migration）。
+- **决策记录**：[docs/decisions/0022-structured-evidence-extraction.md](docs/decisions/0022-structured-evidence-extraction.md)。
+
 ## 完整系统（Docker Compose）
 
 ```bash

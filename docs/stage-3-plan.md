@@ -44,7 +44,7 @@
 - 测试：单元 37 项（contracts/validation/where builder/query instruction/token too long/no threshold/collection metadata 校验/重复 chunk_id/非 finite distance）+ 集成 20 项（真实 PG + FakeChroma 零网络：company 隔离 / provider / document_type / source_ids / authority / critical-only / published range / reporting period range / ready-only / failed+building 排除 / 旧 chunker+parser 排除 / 维度、normalize、collection 名不匹配、ready 但 indexed<expected 排除 / 全链路 hydrate / ranking / 篡改 metadata→integrity / Chroma 不可用→稳定错误 / read path 0 manifest）+ 真实 Chroma 1 项（独立 collection，结束删除）。
 - 决策记录：[docs/decisions/0020-filtered-vector-retrieval.md](decisions/0020-filtered-vector-retrieval.md)。
 
-## 3C：EvidenceCard（当前：3C.1 完成）
+## 3C：EvidenceCard（当前：3C.2 完成）
 
 ### 3C.1：EvidenceCard Provenance（completed）
 
@@ -60,12 +60,20 @@
 - **测试**：57 单元 + 19 集成（真实 PG + 真实 Parsing/Chunking，零 Chroma/LLM/embedding）+ 2 项 migration 0016 downgrade guard（isolated 临时 PG）。
 - 决策记录：[docs/decisions/0021-evidence-card-provenance.md](decisions/0021-evidence-card-provenance.md)。
 
-### 3C.2：Evidence Extractor（next，尚未开始）
+### 3C.2：Structured Evidence Extractor（completed）
 
-- 把 RetrievalHit + LLM 语义抽取（Evidence Extractor Agent）接入 `EvidenceCardService.create_card(draft)`：确认研究问题相关性、生成 `evidence_statement` / `evidence_type` / `extractor_confidence`，quote 与 locator 仍由确定性程序推导。
-- 前置：3C.1 完成（已达成）。
+- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required（不开放 Evidence HTTP 端点）；real_llm_smoke = pending_environment（本环境无 LLM 凭据，一次性人工 smoke 未执行，不阻塞提交）**。
+- 把 `RetrievalHit + research question` 经 LLM 结构化语义抽取接入 `EvidenceCardService.create_card(draft)`。角色边界：**Extractor 只做语义**（相关性、原子 evidence_statement、evidence_type、low/medium/high confidence、逐字 quote_text）；确定性代码负责 quote_start/end、locator、provenance IDs、authority tier、critical eligibility、fingerprint、Claim、投资建议；Extractor 不调用 RetrievalService / 不重新检索 / 不读 Chroma。
+- **契约**（`app/evidence/extractor/`）：`EVIDENCE_EXTRACTOR_NAME="structured_llm"`、`EVIDENCE_EXTRACTOR_VERSION=1`、`MAX_EXTRACTION_ITEMS_PER_HIT=3`；`EvidenceExtractionItem` + `EvidenceExtractionDecision`（relevant=false→items 空；true→1..3 且 reason_code=None；无完全重复 item；无 reasoning/CoT 字段）。
+- **LLM 抽象**：最小 `EvidenceExtractionModel` Protocol（model_id + async extract）；自动测试用 `FakeEvidenceExtractionModel`；可选 `LangChainStructuredOutputAdapter`（lazy import，langchain 非必需依赖；model_id 不伪造 revision）；temperature=0，禁止 tools/web search。
+- **Prompt 边界**：system/data 分离（source 只在 user payload 的 `<<<SOURCE_TEXT_START/END>>>` 内）；system 冻结声明 source 不可信 DATA、忽略注入、无 tools/CoT、quote 逐字、statement 由 quote 支持、不补充 source 外事实、不投资建议、不输出 Claim、无直接证据→relevant=false。
+- **Exact quote resolver**：`resolve_exact_quote` 精确子串，0 次→NotFound、>1 次（含重叠）→Ambiguous；不做 fuzzy/normalize/自动纠错；LLM 不返回 offsets。
+- **ExtractionService**：短 DB read + stale guard（hash + 5 ids，LLM 前拒绝）→ strict schema → relevant=false 0 写 → 全部 items 先完成 quote+decode 校验再逐 draft `create_card`（单 hit ≤3 卡；replay/并发由 3C.1 fingerprint 保证）；quote 以 fresh PG text 为准；日志仅白名单字段。
+- **错误分类**：Unavailable / MalformedOutput / QuoteNotFound / QuoteAmbiguous / InputStale / InputError。
+- **测试**：122 单元（contracts/quote/prompt 注入边界/service；零 LLM）+ 11 集成（真实 PG：E2E HTML DOM locator + PDF page/bbox、rerun replay、stale 0 写、relevant=false/not-found/ambiguous/malformed 0 写、high confidence 不提升 critical、单 hit 3 卡、0 manifest 无 Stage 4 表；零 Chroma/BGE/LLM/network）。
+- 决策记录：[docs/decisions/0022-structured-evidence-extraction.md](decisions/0022-structured-evidence-extraction.md)。
 
-### 3C.3：Evidence 服务收口（later）
+### 3C.3：Evidence 服务收口（next）
 
 - 3C.1 + 3C.2 之后的收口与 E2E 验收（文档、全量验证）。
 
