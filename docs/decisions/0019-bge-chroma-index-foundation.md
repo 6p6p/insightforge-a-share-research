@@ -6,7 +6,7 @@
 
 ## 决策
 
-1. **3B.1 状态（四维）：implementation completed / automated tests completed / docker rebuild acceptance completed / live acceptance = not required（本阶段不开放检索端点、无检索 read path；BGE 不作为 /ready 条件）。real_bge_acceptance = passed（2026-08-08，真实模型单次受控 smoke，见 §10）**。本阶段建立 **DocumentChunk → BGE Embedding → Chroma 向量索引**的确定性索引基座：PG manifest（`chunk_vector_indexes`，migration 0015）+ 固定共享 Chroma collection + 逐 chunk 向量记录。**不实现 RetrievalService / top-k API / threshold / reranker / EvidenceCard / Claim / Report / LLM / LangGraph 集成**——那些属于 3B.2 / 3C 及以后。
+1. **3B.1 状态（四维）：implementation completed / automated tests completed / docker rebuild acceptance completed / live acceptance = not required（本阶段不开放检索端点、无检索 read path；BGE 不作为 /ready 条件）。real_bge_acceptance = passed（2026-08-08，真实模型单次受控 smoke，见 §10）。latest_image_docker_acceptance = completed（2026-08-08，CPU-only build 成功：镜像 `9066b4c9150b`，2.24GB；torch 2.13.0+cpu 从 PyTorch 官方 CPU index 预装，镜像内无 nvidia-* CUDA 运行时包）**。本阶段建立 **DocumentChunk → BGE Embedding → Chroma 向量索引**的确定性索引基座：PG manifest（`chunk_vector_indexes`，migration 0015）+ 固定共享 Chroma collection + 逐 chunk 向量记录。**不实现 RetrievalService / top-k API / threshold / reranker / EvidenceCard / Claim / Report / LLM / LangGraph 集成**——那些属于 3B.2 / 3C 及以后。
 
 2. **Embedding 模型契约（`app/rag/embedding/contracts.py`）**。
    - 冻结 **BAAI/bge-small-zh-v1.5**：`dimension=512`、`normalize_embeddings=true`、`max_input_tokens=512`、query_instruction=`"为这个句子生成表示以用于检索相关文章："`（**仅 query 加，document 不加**）。
@@ -22,12 +22,12 @@
 4. **Chroma 角色（PG = Source of Truth，Chroma = 可重建 derived index）**。
    - PostgreSQL：DocumentChunk + ChunkSet + provenance 全量、权威、不可静默重建。
    - Chroma：只存 `确定性 record id（str(chunk_id)）→ embedding → primitive metadata`，不含 chunk 正文、不含 locator_refs（locator 仍从 PG hydrate）。**允许 partial rows / 整体重建**。
-   - 固定共享 collection `insightforge_document_chunks`（不按公司 / ChunkSet 拆），cosine distance（HNSW `space: cosine`，**不配置 embedding_function**——application 自己计算 embedding 显式传入）。
-   - collection metadata 冻结键：`schema_version / model_id / model_revision / dimension / normalized / distance_metric`（`CHROMA_COLLECTION_SCHEMA_VERSION=1`）；同名 collection 配置不一致 → `VectorCollectionConflict`，**不覆盖既有 collection**（覆盖会掩盖配置漂移）。
+   - **collection identity v2（3B.1 closeout）**：collection 名称由 **embedding schema fingerprint 纯函数**派生（`app/rag/index/contracts.py::compute_collection_name`）：`insightforge_chunks_v2_<schema_fp[:12]>`，其中 fingerprint（`compute_collection_schema_fingerprint`）至少覆盖 `collection_schema_version / model_id / model_revision / dimension / normalize_embeddings / distance_metric`。同 schema 的所有公司 / ChunkSet 共享同一 collection（**不按 company / ChunkSet 拆**）；模型 revision / schema 版本 / 维度 / 归一化 / 距离度量任一变化 → 确定性新名称 → 新 collection + 新 manifest，**旧 collection / manifest 保留**（不覆盖、不写死 revision-specific 分支）。`CHROMA_COLLECTION_SCHEMA_VERSION` **1 → 2**。
+   - collection metadata 冻结键：`schema_version / model_id / model_revision / dimension / normalized / distance_metric`；同名 collection 配置不一致 → `VectorCollectionConflict`，**不覆盖既有 collection**（覆盖会掩盖配置漂移）。cosine distance（HNSW `space: cosine`，**不配置 embedding_function**——application 自己计算 embedding 显式传入）。
 
-5. **Chroma record metadata（每 chunk 一条，仅 primitive）**。含 `chunk_id / chunk_set_id / parsed_source_id / source_id / company_id / provider_key / document_type / chunk_ordinal / text_sha256 / authority_tier / critical_claim_eligible`；`published_at` 有值才额外存 `published_at_epoch`（int，NULL 不伪造）；**不塞 locator_refs**（nested JSON 不写 Chroma）。
+5. **Chroma record metadata（每 chunk 一条，仅 primitive）**。含 `chunk_id / chunk_set_id / parsed_source_id / source_id / company_id / provider_key / document_type / chunk_ordinal / text_sha256 / authority_tier / critical_claim_eligible`；`published_at` 有值才额外存 `published_at_epoch`（int，NULL 不伪造）；`reporting_period_end` 有值才额外存 `reporting_period_end_epoch`（int，当日 00:00 UTC，NULL 不伪造）；**不塞 locator_refs**（nested JSON 不写 Chroma）。
 
-6. **Index fingerprint（`app/rag/index/contracts.py::compute_index_fingerprint`）**。canonical JSON（`sort_keys + separators + ensure_ascii=False` + UTF-8）→ SHA-256，覆盖：`chunk_set_fingerprint`、`embedding_model_id`、`embedding_model_revision`、`embedding_dimension`、`normalize_embeddings`、`collection_name`、`collection_schema_version`、`distance_metric`。**不含 timestamps / DB ID / status / chunk 正文**。同一 ChunkSet + 同模型配置 → 同一指纹 → 重建命中同一 manifest。
+6. **Index fingerprint（`app/rag/index/contracts.py::compute_index_fingerprint`）**。canonical JSON（`sort_keys + separators + ensure_ascii=False` + UTF-8）→ SHA-256，覆盖：`chunk_set_fingerprint`、`embedding_model_id`、`embedding_model_revision`、`embedding_dimension`、`normalize_embeddings`、`collection_name`（v2 下由 embedding schema 派生）、`collection_schema_version`、`distance_metric`。**不含 timestamps / DB ID / status / chunk 正文**。同一 ChunkSet + 同模型配置 → 同一指纹 → 重建命中同一 manifest。
 
 7. **Migration 0015（Alembic head = 0015）**。新表 `chunk_vector_indexes`：
    - `vector_index_id` UUID PK、`chunk_set_id` FK **RESTRICT**、`embedding_model_id` / `embedding_model_revision`、`embedding_dimension`、`normalize_embeddings`、`collection_name`、`collection_schema_version`、`expected_chunk_count` / `indexed_chunk_count`、`index_fingerprint` CHAR(64) **UNIQUE**、`status`（building/ready/failed）、`last_error_code`、`created_at` / `ready_at`；
@@ -52,6 +52,10 @@
     - **集成测试**（真实 PostgreSQL，零网络）：VectorIndexService E2E（FakeEmbeddingProvider + FakeChromaManager）：happy path（manifest ready / indexed=expected / fingerprint 64 hex / metadata 证据链字段齐全）、metadata where company_id 过滤、ready replay 不重新 embed、embedding 失败 → manifest failed + 稳定错误码 → retry ready、Chroma record 被删 → `VectorIndexIntegrityError` 且 manifest 仍 ready（不自动修复）、并发单 manifest + 每 chunk 单 record、ChunkSetNotFound、chunk 被删 → `ChunkSetIntegrityError`、collection 配置冲突 → `VectorCollectionConflict` + manifest failed。
     - **真实 Chroma 集成测试**（真实 Chroma 127.0.0.1:8002）：独立测试 collection（uuid 后缀，结束删除）：roundtrip + 冻结 metadata 往返一致 + where company_id 过滤生效、replay 验证既有 records（replayed=True、同一 vector_index_id）。
     - 完整回归：**全部 non-integration + 全部 integration** 通过；ruff check 零告警、ruff format 全部格式化；`pip check` 通过；`alembic current` = 0015 head。
+
+12. **3B.1 closeout（2026-08-08）**。
+    - **collection identity v2**（见 §4）：`CHROMA_COLLECTION_SCHEMA_VERSION` 1→2，collection 名称从固定共享改为 embedding schema fingerprint 纯函数派生（`insightforge_chunks_v2_<fp12>`）；`VectorIndexService.__init__` 默认由 `provider.model_info` 派生 collection 名（测试仍可显式注入独立 collection）。测试：same config → same name；revision / schema version / dimension / normalize / distance metric 任一变化 → 不同 name；current revision replay → 同 collection；revision B 重建 → 新 manifest + 新 collection 不冲突；已有同名 collection 真 metadata 冲突 → 仍 `VectorCollectionConflict`。
+    - **0015 downgrade guard 隔离测试**（`tests/integration/test_migration_0015_downgrade_guard.py`，独立临时 PG 库 `insightforge_gate_*`）：有 manifest 数据 → downgrade 0014 被拒（alembic_version 仍 0015、manifest 保留）；无 manifest → downgrade 0014 成功（`chunk_vector_indexes` 表与 `uq_chunk_sets_identity` 约束删除，chunk_sets 数据保留）。
 
 ## 后果
 

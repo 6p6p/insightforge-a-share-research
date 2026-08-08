@@ -1,12 +1,14 @@
-"""Vector index contract unit tests (stage 3B.1).
+"""Vector index contract unit tests (stage 3B.1 / collection identity v2).
 
 覆盖：collection 冻结配置（cosine、无 embedding function、metadata 冻结键）、
-index fingerprint 确定性 / 覆盖字段 / 不含时间戳与状态、Chunk metadata
-（primitive、evidence-chain 字段、published_at epoch、不塞 locator_refs）、
-稳定错误码映射。不依赖 DB / Chroma / 真实模型。
+collection 命名纯函数（embedding schema fingerprint → 确定性名称、revision /
+schema version / 维度 / 归一化 / 距离度量 任一变化 → 新名称）、index
+fingerprint 确定性 / 覆盖字段 / 不含时间戳与状态、Chunk metadata（primitive、
+evidence-chain 字段、published_at epoch、reporting_period_end epoch、不塞
+locator_refs）、稳定错误码映射。不依赖 DB / Chroma / 真实模型。
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import pytest
@@ -14,13 +16,15 @@ import pytest
 from app.rag.embedding.contracts import EmbeddingModelSpec
 from app.rag.embedding.errors import EmbeddingModelNotConfigured
 from app.rag.index.contracts import (
-    CHROMA_COLLECTION_NAME,
+    CHROMA_COLLECTION_NAME_PREFIX,
     CHROMA_COLLECTION_SCHEMA_VERSION,
     CHROMA_DISTANCE_METRIC,
     ChunkProvenance,
     build_chunk_metadata,
     build_collection_metadata,
     collection_configuration,
+    compute_collection_name,
+    compute_collection_schema_fingerprint,
     compute_index_fingerprint,
 )
 from app.rag.index.errors import (
@@ -55,6 +59,7 @@ def _provenance(**overrides) -> ChunkProvenance:
         authority_tier=3,
         critical_claim_eligible=False,
         published_at=_PUBLISHED,
+        reporting_period_end=None,
     )
     base.update(overrides)
     return ChunkProvenance(**base)
@@ -88,17 +93,86 @@ class TestCollectionConfiguration:
             build_collection_metadata(_spec(revision=None))
 
 
+class TestCollectionName:
+    """collection 命名纯函数：embedding schema fingerprint → 确定性名称。"""
+
+    def _name(self, spec=None, **kw) -> str:
+        spec = spec or _spec()
+        kwargs = dict(
+            collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
+            distance_metric=CHROMA_DISTANCE_METRIC,
+        )
+        kwargs.update(kw)
+        return compute_collection_name(spec=spec, **kwargs)
+
+    def test_deterministic_same_config_same_name(self) -> None:
+        assert self._name() == self._name()
+        assert (
+            compute_collection_name(
+                spec=_spec(),
+                **{
+                    "collection_schema_version": CHROMA_COLLECTION_SCHEMA_VERSION,
+                    "distance_metric": CHROMA_DISTANCE_METRIC,
+                },
+            )
+            == self._name()
+        )
+
+    def test_prefix_and_short_fingerprint_suffix(self) -> None:
+        name = self._name()
+        assert name.startswith(CHROMA_COLLECTION_NAME_PREFIX + "_")
+        suffix = name.rsplit("_", 1)[-1]
+        assert len(suffix) == 12
+        assert all(ch in "0123456789abcdef" for ch in suffix)
+
+    def test_name_does_not_carry_revision_literals(self) -> None:
+        # 名称只含 prefix + fingerprint 前 12 位，绝不内嵌 revision 字符串
+        # （不写死 revision-specific 分支）。
+        name = self._name(spec=_spec(revision="rev-1"))
+        assert "rev-1" not in name
+        fingerprint = compute_collection_schema_fingerprint(
+            spec=_spec(revision="rev-1"),
+            collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
+            distance_metric=CHROMA_DISTANCE_METRIC,
+        )
+        assert name == f"{CHROMA_COLLECTION_NAME_PREFIX}_{fingerprint[:12]}"
+
+    def test_different_revision_different_name(self) -> None:
+        assert self._name(spec=_spec(revision="rev-1")) != self._name(spec=_spec(revision="rev-2"))
+
+    def test_different_schema_version_different_name(self) -> None:
+        assert self._name(collection_schema_version=3) != self._name()
+
+    def test_different_schema_knobs_different_name(self) -> None:
+        assert self._name(spec=_spec(dimension=768)) != self._name()
+        assert self._name(spec=_spec(normalize=False)) != self._name()
+        assert self._name(distance_metric="l2") != self._name()
+
+    def test_revision_none_raises(self) -> None:
+        with pytest.raises(EmbeddingModelNotConfigured):
+            self._name(spec=_spec(revision=None))
+
+
 class TestIndexFingerprint:
     def _fp(self, spec=None, **kw) -> str:
         spec = spec or _spec()
         kwargs = dict(
             chunk_set_fingerprint="c" * 64,
             spec=spec,
-            collection_name=CHROMA_COLLECTION_NAME,
             collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
             distance_metric=CHROMA_DISTANCE_METRIC,
         )
         kwargs.update(kw)
+        # collection 名称默认由同一 embedding schema 派生：schema 变化时
+        # 名称与指纹同步变化（同一 ChunkSet + 同模型配置 → 同一指纹）。
+        kwargs.setdefault(
+            "collection_name",
+            compute_collection_name(
+                spec=kwargs["spec"],
+                collection_schema_version=kwargs["collection_schema_version"],
+                distance_metric=kwargs["distance_metric"],
+            ),
+        )
         return compute_index_fingerprint(**kwargs)
 
     def test_deterministic_and_sha256(self) -> None:
@@ -116,14 +190,20 @@ class TestIndexFingerprint:
         assert self._fp(spec=_spec(normalize=False)) != self._fp()
 
     def test_sensitive_to_schema_version_and_collection(self) -> None:
-        assert self._fp(collection_schema_version=2) != self._fp()
+        assert (
+            self._fp(collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION + 1) != self._fp()
+        )
         assert self._fp(collection_name="other") != self._fp()
 
     def test_sensitive_to_chunk_set_fingerprint(self) -> None:
         other = compute_index_fingerprint(
             chunk_set_fingerprint="d" * 64,
             spec=_spec(),
-            collection_name=CHROMA_COLLECTION_NAME,
+            collection_name=compute_collection_name(
+                spec=_spec(),
+                collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
+                distance_metric=CHROMA_DISTANCE_METRIC,
+            ),
             collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
             distance_metric=CHROMA_DISTANCE_METRIC,
         )
@@ -174,6 +254,17 @@ class TestChunkMetadata:
     def test_null_published_at_not_fabricated(self) -> None:
         meta = self._meta(provenance=_provenance(published_at=None))
         assert "published_at_epoch" not in meta
+
+    def test_reporting_period_end_epoch_stored(self) -> None:
+        period_end = date(2026, 6, 30)
+        meta = self._meta(provenance=_provenance(reporting_period_end=period_end))
+        assert meta["reporting_period_end_epoch"] == int(
+            datetime.combine(period_end, datetime.min.time(), tzinfo=UTC).timestamp()
+        )
+
+    def test_null_reporting_period_end_not_fabricated(self) -> None:
+        meta = self._meta(provenance=_provenance(reporting_period_end=None))
+        assert "reporting_period_end_epoch" not in meta
 
 
 class TestStableErrorCode:

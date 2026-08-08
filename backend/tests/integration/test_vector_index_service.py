@@ -10,6 +10,8 @@ FakeChromaManager（内存），零真实网络。覆盖：
 - embedding 失败 → manifest failed + 稳定错误码 → retry 成功；
 - Chroma record 被删 → ready replay 抛 VectorIndexIntegrityError，不自动修复；
 - 并发 index 同 ChunkSet → PG manifest=1、Chroma 每 chunk record=1、ready；
+- 模型 revision 变化 → 新 collection + 新 manifest，旧 manifest / collection 保留
+  （collection identity v2）；
 - ChunkSet 不存在 → ChunkSetNotFound；collection 冻结 metadata 不一致 →
   VectorCollectionConflict（manifest failed）；
 - ChunkSet 完整性被破坏（chunk 被删）→ ChunkSetIntegrityError。
@@ -33,10 +35,10 @@ from app.db.session import DatabaseManager
 from app.rag.embedding.contracts import EmbeddingModelSpec
 from app.rag.embedding.errors import EmbeddingInputTooLong
 from app.rag.index.contracts import (
-    CHROMA_COLLECTION_NAME,
     CHROMA_COLLECTION_SCHEMA_VERSION,
     CHROMA_DISTANCE_METRIC,
     collection_configuration,
+    compute_collection_name,
 )
 from app.rag.index.errors import (
     ChunkSetIntegrityError,
@@ -212,7 +214,15 @@ async def _chunk_set_id(env: dict) -> object:
     return result.chunk_set_id
 
 
-def _service(env: dict, *, provider=None, chroma=None, collection_name=CHROMA_COLLECTION_NAME):
+def _collection_name(spec=_TEST_SPEC) -> str:
+    return compute_collection_name(
+        spec=spec,
+        collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
+        distance_metric=CHROMA_DISTANCE_METRIC,
+    )
+
+
+def _service(env: dict, *, provider=None, chroma=None, collection_name=None):
     return VectorIndexService(
         sessionmaker=env["sessionmaker"],
         embedding_provider=provider or FakeEmbeddingProvider(_TEST_SPEC),
@@ -221,18 +231,18 @@ def _service(env: dict, *, provider=None, chroma=None, collection_name=CHROMA_CO
     )
 
 
-async def _manifest(env: dict, chunk_set_id) -> ChunkVectorIndexModel | None:
+async def _manifest(env: dict, chunk_set_id, spec=_TEST_SPEC) -> ChunkVectorIndexModel | None:
     async with env["sessionmaker"]() as session:
         return await ChunkVectorIndexRepository(session).get_by_identity(
             chunk_set_id,
-            _TEST_SPEC.model_id,
-            _TEST_SPEC.revision,
+            spec.model_id,
+            spec.revision,
             CHROMA_COLLECTION_SCHEMA_VERSION,
         )
 
 
-async def _chroma_records(chroma, chunk_set_id) -> tuple[list, list]:
-    collection = await chroma.client.get_or_create_collection(CHROMA_COLLECTION_NAME)
+async def _chroma_records(chroma, chunk_set_id, spec=_TEST_SPEC) -> tuple[list, list]:
+    collection = await chroma.client.get_or_create_collection(_collection_name(spec))
     got = await collection.get(where={"chunk_set_id": str(chunk_set_id)}, include=["metadatas"])
     return got["ids"], got["metadatas"]
 
@@ -261,7 +271,8 @@ async def test_happy_path_indexes_all_chunks(env) -> None:
     assert manifest.embedding_model_revision == _TEST_SPEC.revision
     assert manifest.embedding_dimension == 512
     assert manifest.normalize_embeddings is True
-    assert manifest.collection_name == CHROMA_COLLECTION_NAME
+    assert manifest.collection_name == _collection_name()
+    assert manifest.collection_name.startswith("insightforge_chunks_v2_")
     assert manifest.collection_schema_version == CHROMA_COLLECTION_SCHEMA_VERSION
     assert len(manifest.index_fingerprint) == 64
     assert all(ch in "0123456789abcdef" for ch in manifest.index_fingerprint)
@@ -289,7 +300,7 @@ async def test_metadata_where_filters_company_id(env) -> None:
     service = _service(env, chroma=chroma)
     await service.index_chunk_set(chunk_set_id)
 
-    collection = await chroma.client.get_or_create_collection(CHROMA_COLLECTION_NAME)
+    collection = await chroma.client.get_or_create_collection(_collection_name())
     mine = await collection.get(where={"company_id": str(env["company_id"])}, include=["metadatas"])
     assert len(mine["ids"]) == 3
     for meta in mine["metadatas"]:
@@ -359,7 +370,7 @@ async def test_missing_chroma_record_raises_integrity_error(env) -> None:
 
     # 模拟 Chroma 部分丢失一条 record（derived index 允许 partial）。
     ids, _ = await _chroma_records(chroma, chunk_set_id)
-    collection = await chroma.client.get_or_create_collection(CHROMA_COLLECTION_NAME)
+    collection = await chroma.client.get_or_create_collection(_collection_name())
     await collection.delete(ids=[ids[0]])
 
     with pytest.raises(VectorIndexIntegrityError) as exc:
@@ -370,6 +381,47 @@ async def test_missing_chroma_record_raises_integrity_error(env) -> None:
     manifest = await _manifest(env, chunk_set_id)
     assert manifest.status == "ready"
     assert manifest.indexed_chunk_count == 3
+
+
+async def test_revision_change_creates_new_collection_and_manifest(env) -> None:
+    """模型 revision 变化 → 确定性新 collection + 新 manifest，旧 manifest 保留。
+
+    不同 revision 使用不同 collection 名称，不会互相覆盖，也不会触发
+    VectorCollectionConflict（collection identity v2）。
+    """
+    chunk_set_id = await _chunk_set_id(env)
+    chroma = FakeChromaManager()
+    spec_b = EmbeddingModelSpec(
+        model_id=_TEST_SPEC.model_id,
+        dimension=_TEST_SPEC.dimension,
+        normalize_embeddings=_TEST_SPEC.normalize_embeddings,
+        query_instruction=_TEST_SPEC.query_instruction,
+        max_input_tokens=_TEST_SPEC.max_input_tokens,
+        revision="test-revision-002",
+    )
+    assert _collection_name(spec_b) != _collection_name()
+
+    result_a = await _service(env, chroma=chroma).index_chunk_set(chunk_set_id)
+    assert result_a.status == "ready"
+
+    result_b = await _service(
+        env, provider=FakeEmbeddingProvider(spec_b), chroma=chroma
+    ).index_chunk_set(chunk_set_id)
+    assert result_b.status == "ready"
+    assert result_b.vector_index_id != result_a.vector_index_id
+
+    manifest_a = await _manifest(env, chunk_set_id, _TEST_SPEC)
+    manifest_b = await _manifest(env, chunk_set_id, spec_b)
+    assert manifest_a is not None and manifest_b is not None
+    assert manifest_a.collection_name == _collection_name()
+    assert manifest_b.collection_name == _collection_name(spec_b)
+    assert manifest_a.index_fingerprint != manifest_b.index_fingerprint
+
+    # 两个 collection 各自有完整 records，互不覆盖。
+    ids_a, _ = await _chroma_records(chroma, chunk_set_id, _TEST_SPEC)
+    ids_b, _ = await _chroma_records(chroma, chunk_set_id, spec_b)
+    assert len(ids_a) == 3
+    assert len(ids_b) == 3
 
 
 # ---------------------------------------------------------------- 并发
@@ -438,7 +490,7 @@ async def test_collection_config_conflict_marks_failed(env) -> None:
     chroma = FakeChromaManager()
     # 预建同名 collection，但冻结 metadata 与当前 spec 不一致。
     await chroma.client.get_or_create_collection(
-        CHROMA_COLLECTION_NAME,
+        _collection_name(),
         configuration=collection_configuration(),
         metadata={
             "schema_version": CHROMA_COLLECTION_SCHEMA_VERSION + 1,

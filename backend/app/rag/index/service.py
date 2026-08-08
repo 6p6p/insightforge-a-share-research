@@ -1,10 +1,12 @@
 """Vector index service: ChunkSet → embedding → Chroma + PG manifest (stage 3B.1).
 
 index_chunk_set(chunk_set_id) 把一个 ChunkSet 的 DocumentChunk 逐个 embedding
-后写入**固定共享** Chroma collection（cosine、应用侧计算 embedding、确定性
-record id = str(chunk_id)），并在 PostgreSQL 登记可重建 manifest
-（chunk_vector_indexes）。PostgreSQL = Source of Truth，Chroma = derived index
-（允许 partial rows / 可整体重建）。
+后写入 Chroma collection（cosine、应用侧计算 embedding、确定性 record id =
+str(chunk_id)）。collection 名称由 embedding schema fingerprint 纯函数派生
+（`insightforge_chunks_v2_<fp12>`，同 schema 所有公司 / ChunkSet 共享；
+模型 revision 变化 → 新 collection + 新 manifest，旧 collection 保留）。
+PostgreSQL 登记可重建 manifest（chunk_vector_indexes）。PostgreSQL =
+Source of Truth，Chroma = derived index（允许 partial rows / 可整体重建）。
 
 流程与不变量：
 1. 短 DB session 读 ChunkSet + ordered chunks + provenance metadata → 关闭；
@@ -35,7 +37,6 @@ from app.db.models.document_chunk import DocumentChunkModel
 from app.rag.embedding.contracts import EmbeddingProvider
 from app.rag.embedding.errors import EmbeddingModelNotConfigured
 from app.rag.index.contracts import (
-    CHROMA_COLLECTION_NAME,
     CHROMA_COLLECTION_SCHEMA_VERSION,
     CHROMA_DISTANCE_METRIC,
     CHROMA_UPSERT_BATCH_SIZE,
@@ -43,6 +44,7 @@ from app.rag.index.contracts import (
     build_chunk_metadata,
     build_collection_metadata,
     collection_configuration,
+    compute_collection_name,
     compute_index_fingerprint,
 )
 from app.rag.index.errors import (
@@ -79,12 +81,23 @@ class VectorIndexService:
         sessionmaker: async_sessionmaker,
         embedding_provider: EmbeddingProvider,
         chroma: ChromaManager,
-        collection_name: str = CHROMA_COLLECTION_NAME,
+        collection_name: str | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._provider = embedding_provider
         self._chroma = chroma
-        self._collection_name = collection_name
+        if collection_name is not None:
+            # 测试注入：真实 Chroma 测试用独立 collection（uuid 后缀）做隔离。
+            self._collection_name = collection_name
+        else:
+            # 生产默认：由 embedding schema 纯函数派生（revision 未配置 →
+            # EmbeddingModelNotConfigured）。同 schema 所有公司 / ChunkSet
+            # 共享同一 collection；模型 revision 变化 → 新 collection。
+            self._collection_name = compute_collection_name(
+                spec=embedding_provider.model_info,
+                collection_schema_version=CHROMA_COLLECTION_SCHEMA_VERSION,
+                distance_metric=CHROMA_DISTANCE_METRIC,
+            )
 
     async def index_chunk_set(self, chunk_set_id: UUID) -> VectorIndexResult:
         spec = self._provider.model_info
@@ -176,6 +189,7 @@ class VectorIndexService:
                 authority_tier=record.authority_tier_snapshot,
                 critical_claim_eligible=record.critical_claim_eligible_snapshot,
                 published_at=record.published_at,
+                reporting_period_end=record.reporting_period_end,
             )
         # session 已关闭；以下纯校验，不持有 DB 连接。
         if chunk_set.chunk_count != len(chunks):

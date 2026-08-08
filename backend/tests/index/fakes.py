@@ -135,6 +135,12 @@ class FakeChromaClient:
         self._collections[name] = collection
         return collection
 
+    async def get_collection(self, name, **_):
+        """read path：只取既有 collection，不存在抛 KeyError（不创建）。"""
+        if name not in self._collections:
+            raise KeyError(name)
+        return self._collections[name]
+
     async def list_collections(self, **_):
         return list(self._collections.values())
 

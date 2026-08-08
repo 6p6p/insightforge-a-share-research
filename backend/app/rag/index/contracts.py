@@ -7,8 +7,13 @@
   primitive metadata"，不含 chunk 正文、不含 locator_refs（locator 仍从
   PostgreSQL hydrate）。允许 partial rows / 整体重建。
 
-本模块冻结：
-- 固定共享 collection（不按公司 / ChunkSet 拆）、cosine distance；
+本模块冻结（collection identity v2）：
+- collection 名称由 **embedding schema fingerprint 纯函数** 决定：
+  `insightforge_chunks_v2_<fp[:12]>`，其中 fingerprint 至少覆盖
+  collection_schema_version / model_id / model_revision / dimension /
+  normalize_embeddings / distance_metric；同 schema 的所有公司 / ChunkSet
+  共享同一 collection，**不按 company / ChunkSet 拆**。模型 revision 变化 →
+  确定性新名称 → 新 collection + 新 manifest，旧 collection / manifest 保留。
 - collection metadata 冻结键：schema_version / model_id / model_revision /
   dimension / normalized / distance_metric（同名 collection 配置不一致 →
   VectorCollectionConflict，见 errors）；
@@ -21,15 +26,16 @@
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime, time
 from uuid import UUID
 
 from app.rag.embedding.contracts import EmbeddingModelSpec
 from app.rag.embedding.errors import EmbeddingModelNotConfigured
 
-CHROMA_COLLECTION_NAME = "insightforge_document_chunks"
+CHROMA_COLLECTION_NAME_PREFIX = "insightforge_chunks_v2"
 # collection metadata / manifest 共用的 schema 版本（改名或换结构时递增）。
-CHROMA_COLLECTION_SCHEMA_VERSION = 1
+# v2：collection 名称从固定共享改为 embedding schema fingerprint 派生。
+CHROMA_COLLECTION_SCHEMA_VERSION = 2
 CHROMA_DISTANCE_METRIC = "cosine"
 # upsert/get 校验的保守批量上限（≤ chroma 客户端 max batch size）。
 CHROMA_UPSERT_BATCH_SIZE = 100
@@ -45,6 +51,56 @@ def collection_configuration() -> dict:
         "hnsw": {"space": CHROMA_DISTANCE_METRIC},
         "embedding_function": None,
     }
+
+
+def compute_collection_schema_fingerprint(
+    *,
+    spec: EmbeddingModelSpec,
+    collection_schema_version: int,
+    distance_metric: str,
+) -> str:
+    """确定性 embedding schema fingerprint（collection 命名用）。
+
+    至少覆盖：collection_schema_version / model_id / model_revision /
+    dimension / normalize_embeddings / distance_metric。**不含** company /
+    ChunkSet / timestamps / DB ID（同一 schema 的所有公司 / ChunkSet
+    共享同一 collection，模型 revision 变化 → 新 fingerprint → 新 collection）。
+    """
+    if spec.revision is None:
+        raise EmbeddingModelNotConfigured()
+    payload = {
+        "collection_schema_version": collection_schema_version,
+        "model_id": spec.model_id,
+        "model_revision": spec.revision,
+        "dimension": spec.dimension,
+        "normalize_embeddings": spec.normalize_embeddings,
+        "distance_metric": distance_metric,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def compute_collection_name(
+    *,
+    spec: EmbeddingModelSpec,
+    collection_schema_version: int,
+    distance_metric: str,
+) -> str:
+    """collection 名称纯函数：`insightforge_chunks_v2_<schema_fp[:12]>`。
+
+    - 同 embedding schema → 同名 → 同 collection（所有公司 / ChunkSet 共享）；
+    - 模型 revision 变化 / schema 版本递增 / 维度或归一化或距离度量变化 →
+      新名称 → 新 collection + 新 manifest，旧 collection / manifest 保留
+      （不覆盖、不写死 revision-specific 分支）。
+    """
+    fingerprint = compute_collection_schema_fingerprint(
+        spec=spec,
+        collection_schema_version=collection_schema_version,
+        distance_metric=distance_metric,
+    )
+    return f"{CHROMA_COLLECTION_NAME_PREFIX}_{fingerprint[:12]}"
 
 
 def build_collection_metadata(spec: EmbeddingModelSpec) -> dict[str, int | str | bool]:
@@ -117,6 +173,7 @@ class ChunkProvenance:
     authority_tier: int
     critical_claim_eligible: bool
     published_at: datetime | None
+    reporting_period_end: date | None
 
 
 def build_chunk_metadata(
@@ -132,6 +189,8 @@ def build_chunk_metadata(
       company_id、provider_key、document_type、chunk_ordinal、text_sha256、
       authority_tier、critical_claim_eligible；
     - published_at 有值时额外存 epoch（int），NULL 时不伪造；
+    - reporting_period_end 有值时额外存 epoch（int，当日 00:00 UTC），
+      NULL 时不伪造；
     - **不塞** locator_refs nested JSON（locator 从 PostgreSQL hydrate）。
     """
     metadata: dict[str, int | str | bool] = {
@@ -149,4 +208,8 @@ def build_chunk_metadata(
     }
     if provenance.published_at is not None:
         metadata["published_at_epoch"] = int(provenance.published_at.timestamp())
+    if provenance.reporting_period_end is not None:
+        metadata["reporting_period_end_epoch"] = int(
+            datetime.combine(provenance.reporting_period_end, time.min, tzinfo=UTC).timestamp()
+        )
     return metadata

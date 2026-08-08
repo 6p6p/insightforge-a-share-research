@@ -11,6 +11,12 @@ COPY backend/app ./app
 COPY backend/alembic.ini ./
 COPY backend/alembic ./alembic
 
+# CPU-only PyTorch：预装 PyTorch 官方 CPU wheel（torch==2.13.0+cpu），
+# 避免 `pip install .` 从默认 PyPI 拉取 CUDA torch / nvidia-* 运行时包。
+# PEP 440 下 torch==2.13.0 匹配 2.13.0+cpu（public version 忽略 local version），
+# 因此后续 `pip install .` 会复用此 CPU torch，不会重装 CUDA build。
+RUN python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch==2.13.0+cpu"
+
 # 安装 backend 运行依赖（不含 dev 组）
 RUN pip install --no-cache-dir .
 
