@@ -100,9 +100,11 @@ _HTML = (
 _REAL_CLIENT_INIT = WorldBankClient.__init__
 
 # Stage 3 各子阶段合法存在的表不属于"尚不允许"之列：chunk_sets /
-# document_chunks（3A）、chunk_vector_indexes（3B）、evidence_cards（3C.1）。
-# Claim / Report / Audit 表仍未实现（Stage 4 及以后），必须不存在。
-_STAGE3_TABLES = ("claims", "reports", "audits")
+# document_chunks（3A）、chunk_vector_indexes（3B）、evidence_cards（3C.1）、
+# claims / claim_evidence_links（4A）。Stage 5 report 表仍未实现，必须不存在。
+# 用精确阶段边界名（report_outlines / report_sections / reports / review_issues），
+# 避免用 "Stage 4 tables must not exist" 这种以后会过期的名字。
+_STAGE5_TABLES = ("report_outlines", "report_sections", "reports", "review_issues")
 
 
 class FakeResolver(HostResolver):
@@ -253,8 +255,26 @@ def _build_provider(
 
 async def _all_parsed(env: dict) -> tuple:
     async with env["sessionmaker"]() as session:
-        parsed = (await session.execute(select(ParsedSourceModel))).scalars().all()
-        blocks = (await session.execute(select(ParsedSourceBlockModel))).scalars().all()
+        parsed = (
+            (
+                await session.execute(
+                    select(ParsedSourceModel).order_by(ParsedSourceModel.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # 显式按 ordinal 排序：SELECT 不带 ORDER BY 时物理堆顺序不受保证，
+        # 大量 INSERT/DELETE 复用堆槽后可能返回非 ordinal 顺序。
+        blocks = (
+            (
+                await session.execute(
+                    select(ParsedSourceBlockModel).order_by(ParsedSourceBlockModel.ordinal.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
     return parsed, blocks
 
 
@@ -565,9 +585,11 @@ async def test_macro_pipeline_e2e(env, monkeypatch) -> None:
 # ---------------------------------------------------------------- 横切：Stage 4 表不存在
 
 
-async def test_no_stage4_claim_report_audit_tables(env) -> None:
-    """Claim / Report / Audit 表必须不存在（schema 不变量，Stage 4 及以后）。"""
+async def test_no_stage5_report_tables(env) -> None:
+    """Stage 5 report 表必须不存在（report_outlines / report_sections /
+    reports / review_issues）。Stage 4 claims / claim_evidence_links 允许存在
+    （由 4A 引入），不在这里约束。"""
     async with env["sessionmaker"]() as session:
-        for table in _STAGE3_TABLES:
+        for table in _STAGE5_TABLES:
             row = await session.execute(text(f"SELECT to_regclass('public.{table}')"))
-            assert row.scalar() is None, f"Stage 3 表 {table} 不应存在"
+            assert row.scalar() is None, f"Stage 5 表 {table} 不应存在"

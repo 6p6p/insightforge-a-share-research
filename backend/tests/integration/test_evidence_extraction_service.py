@@ -547,7 +547,7 @@ async def test_single_hit_three_items_creates_three_cards(env) -> None:
     assert await _card_count(env["sessionmaker"]) == 3
 
 
-async def test_zero_chroma_and_no_claims_reports_tables(env) -> None:
+async def test_zero_chroma_and_no_stage5_report_tables(env) -> None:
     src, parsed_id, _, chunks = await _seed_html_source(env)
     chunk = chunks[0]
     quote = chunk.text[195:211]  # 唯一（跨 "\n"）
@@ -574,13 +574,17 @@ async def test_zero_chroma_and_no_claims_reports_tables(env) -> None:
             await session.execute(text("SELECT count(*) FROM chunk_vector_indexes"))
         ).scalar_one()
         assert manifests == 0
-        # Stage 4 表不存在。
+        # Stage 边界：Stage 3 extraction 不产生 Stage 5 report 表
+        # （report_outlines / report_sections / reports / review_issues）。
+        # Stage 4 claims 表由 Stage 4A 单独引入，不在这里约束
+        # （精确阶段边界名，避免以后过期）。
         extra = (
             await session.execute(
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' "
-                    "AND table_name IN ('claims','reports','review_issues')"
+                    "AND table_name IN ('report_outlines','report_sections',"
+                    "'reports','review_issues')"
                 )
             )
         ).scalar_one()
