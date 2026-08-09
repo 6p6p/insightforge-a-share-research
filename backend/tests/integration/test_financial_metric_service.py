@@ -55,6 +55,7 @@ from app.financial.errors import (
     FinancialMetricEvidenceMismatch,
     FinancialMetricIntegrityError,
     FinancialMetricPeriodError,
+    FinancialMetricStorageRangeError,
     FinancialMetricValueAmbiguous,
     FinancialMetricValueNotFound,
 )
@@ -90,6 +91,18 @@ _TWO_VALUES_P = "2024年营业收入为123,456万元，调整后为123,457万元
 
 _PDF_B1 = "贵州茅台2024年归属净利润862亿元"
 _PDF_B2 = "丙丁" * 40
+
+# Gate 0 A：exact numeric-token provenance 场景。
+# '1000' 是完整 token，'100' / '000' 只是子串。
+_PARTIAL_P = "2024年贵州茅台营业收入1000万元"
+# '-123.45' 是完整 token（负号属于 token），'123.45' 不是。
+_SIGN_P = "2024年贵州茅台净亏损-123.45万元"
+# '(123.45)' 是完整 token（括号属于 token），'123.45' 不是。
+_PAREN_P = "2024年贵州茅台净亏损(123.45)万元"
+# 两个完整 '100' → ambiguous。
+_AMBIG_100_P = "2024年营业收入100万元，调整后100万元"
+# Gate 0 B：raw 合法（10^26 - 1）但 hundred_million_yuan normalize 后溢出。
+_HUGE_NORMALIZED_P = "2024年贵州茅台营业收入99999999999999999999999999万元"
 
 
 def _sha(s: str) -> str:
@@ -387,6 +400,17 @@ async def _card_spanning_value(env: dict, chunks, value: str) -> dict:
     return await _create_metric_card(env, chunk, quote_start=first, quote_end=second + len(value))
 
 
+async def _card_for_context(env: dict, chunks, ctx: str) -> dict:
+    """quote 精确覆盖 ctx（含上下文）在 chunk 文本中的一次出现。
+
+    用于 Gate 0 numeric-token 场景：token 匹配必须基于完整引用上下文
+    （"营业收入1000万元"），而不是孤立的数值子串。
+    """
+    chunk = next(c for c in chunks if ctx in c.text)
+    idx = chunk.text.index(ctx)
+    return await _create_metric_card(env, chunk, quote_start=idx, quote_end=idx + len(ctx))
+
+
 def _obs_draft(
     env: dict,
     evidence_card_id: UUID,
@@ -572,6 +596,96 @@ async def test_value_ambiguous(env) -> None:
     assert card["quote_text"].count("123,456") == 2
     with pytest.raises(FinancialMetricValueAmbiguous):
         await _service(env).create_observation(_obs_draft(env, card["evidence_card_id"]))
+
+
+# ---------------------------------------------------------------- Gate 0 A：exact numeric-token
+
+
+async def test_value_exact_token_accepted(env) -> None:
+    """quote "营业收入1000万元"：'1000' 是完整 token → 接受。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_PARTIAL_P))
+    card = await _card_for_context(env, chunks, "营业收入1000万元")
+    assert card["quote_text"] == "营业收入1000万元"
+    result = await _service(env).create_observation(
+        _obs_draft(env, card["evidence_card_id"], source_value_text="1000")
+    )
+    assert result.replayed is False
+
+
+async def test_value_partial_token_rejected(env) -> None:
+    """quote "营业收入1000万元"：'100' 只是子串 → NotFound（禁止 partial match）。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_PARTIAL_P))
+    card = await _card_for_context(env, chunks, "营业收入1000万元")
+    with pytest.raises(FinancialMetricValueNotFound):
+        await _service(env).create_observation(
+            _obs_draft(env, card["evidence_card_id"], source_value_text="100")
+        )
+
+
+async def test_value_partial_token_leading_zeros_rejected(env) -> None:
+    """quote "营业收入1000万元"：'000' 只是子串 → NotFound。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_PARTIAL_P))
+    card = await _card_for_context(env, chunks, "营业收入1000万元")
+    with pytest.raises(FinancialMetricValueNotFound):
+        await _service(env).create_observation(
+            _obs_draft(env, card["evidence_card_id"], source_value_text="000")
+        )
+
+
+async def test_value_sign_belongs_to_token(env) -> None:
+    """quote "净亏损-123.45万元"：'-123.45' 接受，剥掉符号的 '123.45' 拒绝。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_SIGN_P))
+    card = await _card_for_context(env, chunks, "净亏损-123.45万元")
+    result = await _service(env).create_observation(
+        _obs_draft(env, card["evidence_card_id"], source_value_text="-123.45")
+    )
+    assert result.replayed is False
+    with pytest.raises(FinancialMetricValueNotFound):
+        await _service(env).create_observation(
+            _obs_draft(env, card["evidence_card_id"], source_value_text="123.45")
+        )
+
+
+async def test_value_parenthesis_belongs_to_token(env) -> None:
+    """quote "净亏损(123.45)万元"：'(123.45)' 接受，剥掉括号的 '123.45' 拒绝。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_PAREN_P))
+    card = await _card_for_context(env, chunks, "净亏损(123.45)万元")
+    result = await _service(env).create_observation(
+        _obs_draft(env, card["evidence_card_id"], source_value_text="(123.45)")
+    )
+    assert result.replayed is False
+    with pytest.raises(FinancialMetricValueNotFound):
+        await _service(env).create_observation(
+            _obs_draft(env, card["evidence_card_id"], source_value_text="123.45")
+        )
+
+
+async def test_duplicate_complete_tokens_ambiguous(env) -> None:
+    """quote 中两个完整 '100' → source_value_text='100' 匹配 >1 → Ambiguous。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_AMBIG_100_P))
+    card = await _card_for_context(env, chunks, "营业收入100万元，调整后100万元")
+    with pytest.raises(FinancialMetricValueAmbiguous):
+        await _service(env).create_observation(
+            _obs_draft(env, card["evidence_card_id"], source_value_text="100")
+        )
+
+
+# ---------------------------------------------------------------- Gate 0 B：NUMERIC(38,12) storage
+
+
+async def test_storage_overflow_after_unit_normalize_rejected(env) -> None:
+    """raw 合法（10^26 - 1）但 hundred_million_yuan normalize 后溢出 → 拒绝。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_HUGE_NORMALIZED_P))
+    card = await _card_for_context(env, chunks, "营业收入99999999999999999999999999万元")
+    with pytest.raises(FinancialMetricStorageRangeError):
+        await _service(env).create_observation(
+            _obs_draft(
+                env,
+                card["evidence_card_id"],
+                source_value_text="99999999999999999999999999",
+                raw_unit=RawUnit.HUNDRED_MILLION_YUAN,
+            )
+        )
 
 
 # ---------------------------------------------------------------- period 规则

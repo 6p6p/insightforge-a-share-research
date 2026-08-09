@@ -33,13 +33,17 @@ class FinancialMetricPeriodError(FinancialMetricError):
 
 
 class FinancialMetricValueNotFound(FinancialMetricError):
-    """source_value_text 不是 EvidenceCard.quote_text 的 exact substring。"""
+    """source_value_text.strip() 不是 quote_text 中任何一个完整数字 token。
+
+    与 `find_financial_number_tokens`（= parse 同一 grammar）对齐：禁止 substring
+    partial match（"收入1000万元" 里 "100" / "000" 不是 token）。
+    """
 
     code = "financial_metric_value_not_found"
 
 
 class FinancialMetricValueAmbiguous(FinancialMetricError):
-    """source_value_text 在 quote_text 中出现 >1 次，无法确定取哪一个。"""
+    """source_value_text.strip() 匹配 quote_text 中 >1 个完整数字 token。"""
 
     code = "financial_metric_value_ambiguous"
 
@@ -61,3 +65,13 @@ class FinancialMetricPersistenceFailed(FinancialMetricError):
     """持久化事务失败（已整批回滚，0 partial write）。"""
 
     code = "financial_metric_persistence_failed"
+
+
+class FinancialMetricStorageRangeError(FinancialMetricError):
+    """raw_value / normalized_value_cny 超出 NUMERIC(38,12) 存储范围。
+
+    小数位 > 12 或 abs >= 10^26：PG 会静默 rounding / overflow，必须在应用层
+    显式拒绝（禁止 quantize / round / truncate 后落库）。
+    """
+
+    code = "financial_metric_storage_range_error"

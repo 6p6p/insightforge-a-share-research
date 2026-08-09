@@ -8,8 +8,21 @@ from decimal import Decimal
 
 import pytest
 
-from app.financial.errors import FinancialMetricValueNotNumeric
-from app.financial.number_parser import normalize_value_cny, parse_financial_number
+from app.financial.errors import (
+    FinancialMetricStorageRangeError,
+    FinancialMetricValueNotNumeric,
+)
+from app.financial.number_parser import (
+    find_financial_number_tokens,
+    normalize_value_cny,
+    parse_financial_number,
+    validate_financial_decimal_storage,
+)
+
+
+def _tokens(text: str) -> list[tuple[str, int, int]]:
+    return [(t.text, t.start, t.end) for t in find_financial_number_tokens(text)]
+
 
 # ---------------------------------------------------------------- 正例
 
@@ -166,3 +179,147 @@ def test_normalize_rejects_non_decimal() -> None:
 def test_normalize_rejects_unknown_unit() -> None:
     with pytest.raises(FinancialMetricValueNotNumeric):
         normalize_value_cny(Decimal("1"), "dollar")
+
+
+# ---------------------------------------------------------------- tokenizer
+# （Gate 0 A：find_financial_number_tokens，与 parse 同一 grammar，exact token）
+
+
+def test_tokens_extract_exact_number_in_cjk_context() -> None:
+    assert _tokens("收入1000万元") == [("1000", 2, 6)]
+
+
+def test_tokens_no_partial_substring_of_longer_token() -> None:
+    # "100" / "000" 只是 "1000" 的子串 → 不是 token。
+    assert _tokens("收入1000万元") == [("1000", 2, 6)]
+
+
+def test_tokens_sign_belongs_to_token() -> None:
+    assert _tokens("亏损-123.45万元") == [("-123.45", 2, 9)]
+
+
+def test_tokens_sign_stripped_is_not_a_token() -> None:
+    # "123.45" 剥掉负号 → 不是完整 token。
+    assert _tokens("亏损-123.45万元") == [("-123.45", 2, 9)]
+
+
+def test_tokens_plus_sign_belongs_to_token() -> None:
+    assert _tokens("增长+123.45万元") == [("+123.45", 2, 9)]
+
+
+def test_tokens_parentheses_belong_to_token() -> None:
+    assert _tokens("(123.45)") == [("(123.45)", 0, 8)]
+
+
+def test_tokens_parenthesis_stripped_is_not_a_token() -> None:
+    # "123.45" 剥掉括号 → 不是完整 token。
+    assert _tokens("净亏损(123.45)万元") == [("(123.45)", 3, 11)]
+
+
+def test_tokens_duplicate_complete_number_is_two_tokens() -> None:
+    assert _tokens("营业收入100万元，调整后100万元") == [
+        ("100", 4, 7),
+        ("100", 13, 16),
+    ]
+
+
+def test_tokens_thousands_separator_single_token() -> None:
+    assert _tokens("营业收入123,456万元") == [("123,456", 4, 11)]
+
+
+def test_tokens_malformed_thousands_yields_nothing() -> None:
+    # "1,23" / "1,2345" malformed → 不产生 token（"1" 不是 partial token）。
+    assert _tokens("收入1,23万元") == []
+    assert _tokens("收入1,2345万元") == []
+
+
+def test_tokens_malformed_double_decimal_yields_nothing() -> None:
+    assert _tokens("收入12.3.4万元") == []
+
+
+def test_tokens_plain_long_run_is_single_token() -> None:
+    assert _tokens("收入1234万元") == [("1234", 2, 6)]
+
+
+def test_tokens_scientific_notation_yields_nothing() -> None:
+    # "1e3" 是科学计数，"1" 不是完整 token。
+    assert _tokens("收入1e3万元") == []
+
+
+def test_tokens_units_percent_are_outside_token() -> None:
+    assert _tokens("收入100亿万元") == [("100", 2, 5)]
+    assert _tokens("毛利率12%") == [("12", 3, 5)]
+
+
+def test_tokens_decimal_and_comma_separator() -> None:
+    assert _tokens("100, 200") == [("100", 0, 3), ("200", 5, 8)]
+
+
+def test_tokens_empty() -> None:
+    assert _tokens("") == []
+    assert _tokens("   ") == []
+    assert _tokens("营业收入约") == []
+
+
+def test_tokens_rejects_non_string() -> None:
+    with pytest.raises(FinancialMetricValueNotNumeric):
+        find_financial_number_tokens(123)  # type: ignore[arg-type]
+
+
+def test_every_token_round_trips_through_parse() -> None:
+    """token.text 必须能被 parse_financial_number 解析（同一 grammar 保证）。"""
+    text = "收入-1,234.56万元，亏损(123.45)万元，+8亿元，100.5千元"
+    for token in find_financial_number_tokens(text):
+        value = parse_financial_number(token.text)
+        assert isinstance(value, Decimal)
+    assert parse_financial_number("-1,234.56") == Decimal("-1234.56")
+    assert parse_financial_number("(123.45)") == Decimal("-123.45")
+
+
+def test_parse_still_rejects_partial_tokens() -> None:
+    # 与 tokenizer 对齐：partial / 上下文文本都不能 parse。
+    with pytest.raises(FinancialMetricValueNotNumeric):
+        parse_financial_number("收入1000万元")
+
+
+# ---------------------------------------------------------------- storage bounds
+# （Gate 0 B：validate_financial_decimal_storage，NUMERIC(38,12) contract）
+
+
+def test_storage_12_fraction_digits_ok() -> None:
+    validate_financial_decimal_storage(Decimal("12345678901234.123456789012"))
+    validate_financial_decimal_storage(Decimal("0.000000000001"))
+
+
+def test_storage_13_fraction_digits_rejected() -> None:
+    with pytest.raises(FinancialMetricStorageRangeError):
+        validate_financial_decimal_storage(Decimal("0.0000000000001"))
+
+
+def test_storage_max_integer_boundary_ok() -> None:
+    # 10^26 - 1（26 个 9）：整数部分最大合法边界。
+    validate_financial_decimal_storage(Decimal("99999999999999999999999999"))
+
+
+def test_storage_ten_to_26_rejected() -> None:
+    with pytest.raises(FinancialMetricStorageRangeError):
+        validate_financial_decimal_storage(Decimal(10**26))
+
+
+def test_storage_negative_same_rule() -> None:
+    validate_financial_decimal_storage(Decimal("-99999999999999999999999999.123456789012"))
+    with pytest.raises(FinancialMetricStorageRangeError):
+        validate_financial_decimal_storage(Decimal(-(10**26)))
+    with pytest.raises(FinancialMetricStorageRangeError):
+        validate_financial_decimal_storage(Decimal("-0.0000000000001"))
+
+
+def test_storage_zero_and_integers_ok() -> None:
+    validate_financial_decimal_storage(Decimal("0"))
+    validate_financial_decimal_storage(Decimal("1"))
+    validate_financial_decimal_storage(Decimal("-1"))
+
+
+def test_storage_rejects_non_decimal() -> None:
+    with pytest.raises(FinancialMetricValueNotNumeric):
+        validate_financial_decimal_storage(123)  # type: ignore[arg-type]

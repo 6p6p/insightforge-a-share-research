@@ -11,15 +11,20 @@ margin / ratio；**不调用 LLM**；**不自动从 PDF 表格猜财务数字**�
    evidence.company_id != draft.company_id → FinancialMetricEvidenceMismatch），
    随后立即关闭 connection（纯函数阶段不持有 DB 连接）。
 2. 纯函数派生（无 DB）：
-   - exact source value resolution：source_value_text 必须是 quote_text 的
-     **exact substring**（`.count()`；0 → FinancialMetricValueNotFound，
-     >1 → FinancialMetricValueAmbiguous；禁止 fuzzy / normalize / LLM 修正）；
+   - exact source value resolution：source_value_text.strip() 必须是 quote_text
+     中**一个完整数字 token**（`find_financial_number_tokens`，与 parse 同一
+     grammar；0 个 → FinancialMetricValueNotFound，>1 个 →
+     FinancialMetricValueAmbiguous；禁止 substring partial match / fuzzy /
+     normalize 后匹配 / 自动纠错）；
    - Decimal parse：raw_value 完全由 source_value_text 解析
      （FinancialMetricValueNotNumeric）；
    - period rule：根据 metric_code 的 expected period_kind（balance → instant
      + period_start 必须 None；income/cash-flow → duration + period_start 必须
      非空且 <= period_end），不匹配 → FinancialMetricPeriodError；
    - unit normalize：normalized_value_cny = raw_value × raw_unit 系数（Decimal）；
+   - storage bounds：raw_value 与 normalized_value_cny 都必须能无失真存入
+     NUMERIC(38,12)（小数位 <= 12 且 abs < 10^26），不满足 →
+     FinancialMetricStorageRangeError（禁止静默 quantize / round / truncate）；
    - fingerprint：canonical JSON + SHA-256。
 3. 短 DB transaction：create_or_get（ON CONFLICT(metric_fingerprint)，无进程
    锁）→ 已有 fingerprint 时 **重新加载 EvidenceCard + 重新 exact-match /
@@ -59,7 +64,12 @@ from app.financial.errors import (
     FinancialMetricValueAmbiguous,
     FinancialMetricValueNotFound,
 )
-from app.financial.number_parser import normalize_value_cny, parse_financial_number
+from app.financial.number_parser import (
+    find_financial_number_tokens,
+    normalize_value_cny,
+    parse_financial_number,
+    validate_financial_decimal_storage,
+)
 from app.repositories.evidence_card_repository import EvidenceCardRepository
 from app.repositories.financial_metric_observation_repository import (
     FinancialMetricObservationRepository,
@@ -147,18 +157,23 @@ class FinancialMetricService:
 
     @staticmethod
     def _resolve_source_value(card: EvidenceCardModel, source_value_text: str) -> None:
-        """source_value_text 必须是 quote_text 的 exact substring（0 次 / >1 次拒绝）。
+        """source_value_text.strip() 必须是 quote_text 中**一个完整数字 token**。
 
-        禁止 fuzzy / normalize / LLM 修正：quote 是原文切片，source_value_text
-        必须原样出现在其中，出现次数决定唯一性。
+        `find_financial_number_tokens` 与 `parse_financial_number` 同一 grammar
+        扫描 quote_text 的全部完整数字 token；source_value_text 必须原样等于其中
+        一个 token：0 个 → FinancialMetricValueNotFound，>1 个 →
+        FinancialMetricValueAmbiguous。禁止 substring partial match / fuzzy /
+        normalize 后匹配 / 自动纠错：`"收入1000万元"` 里 "1000" 接受而 "100" /
+        "000" 拒绝；"-123.45" / "(123.45)" 的符号与括号属于 token。
         """
         quote = card.quote_text
         if not quote:
             raise FinancialMetricValueNotFound("quote_text 缺失")
-        count = quote.count(source_value_text)
-        if count == 0:
+        tokens = find_financial_number_tokens(quote)
+        matching = [token for token in tokens if token.text == source_value_text]
+        if not matching:
             raise FinancialMetricValueNotFound()
-        if count > 1:
+        if len(matching) > 1:
             raise FinancialMetricValueAmbiguous()
 
     def _derive(self, draft: FinancialMetricDraft, card: EvidenceCardModel) -> _DerivedObservation:
@@ -185,6 +200,10 @@ class FinancialMetricService:
 
         raw_unit = draft.raw_unit.value
         normalized_value_cny = normalize_value_cny(raw_value, raw_unit)
+        # NUMERIC(38,12) 存储契约：raw_value 与 normalized_value_cny 都必须能
+        # 无失真落库（禁止静默 quantize / round / truncate）。
+        validate_financial_decimal_storage(raw_value)
+        validate_financial_decimal_storage(normalized_value_cny)
         metric_fingerprint = compute_metric_fingerprint(
             metric_schema_version=FINANCIAL_METRIC_SCHEMA_VERSION,
             company_id=draft.company_id,
