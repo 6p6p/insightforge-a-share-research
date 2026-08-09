@@ -30,6 +30,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
@@ -41,7 +42,9 @@ from app.evidence.errors import (
 
 # evidence_cards.evidence_schema_version 的当前值（改名或换结构时递增；
 # 已有卡的 evidence_schema_version 原样保留，新语义 → 新 fingerprint）。
-EVIDENCE_SCHEMA_VERSION = 1
+# v2 = 泛化 origin 模型（stage 3C.3A）：fingerprint 加入 origin_type；
+# 旧 v1 行保留不重算，新卡一律用 v2。
+EVIDENCE_SCHEMA_VERSION = 2
 
 _EVIDENCE_TYPES = ("fact", "metric", "event", "statement", "context")
 _CONFIDENCE_LEVELS = ("low", "medium", "high")
@@ -76,6 +79,23 @@ class EvidenceConfidence(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class EvidenceOrigin(StrEnum):
+    """EvidenceCard 的 origin 模型（stage 3C.3A）：**同一 evidence_card_id
+    namespace 下的双 origin，不拆表**。
+
+    - DOCUMENT_CHUNK：经 DocumentChunk → ParsedSource → SourceRecord 链，
+      带精确 quote（默认 / 既有 v1 行回填值）；
+    - MACRO_OBSERVATION：经 MacroObservation → MacroDatasetSnapshot →
+      MacroSeries → SourceProvider → RawArtifact 链，不带 quote。
+
+    **不是** Macro → fake DocumentChunk：macro Evidence 不经过
+    DocumentChunk / ParsedSource / Chroma / quote resolver。
+    """
+
+    DOCUMENT_CHUNK = "document_chunk"
+    MACRO_OBSERVATION = "macro_observation"
 
 
 def _sha256_hex(text: str) -> str:
@@ -264,6 +284,7 @@ class EvidenceCardDraft:
 def compute_evidence_fingerprint(
     *,
     evidence_schema_version: int,
+    origin_type: str,
     company_id: UUID,
     source_id: UUID,
     parsed_source_id: UUID,
@@ -288,19 +309,22 @@ def compute_evidence_fingerprint(
 ) -> str:
     """确定性 SHA-256 指纹（sort_keys + 固定 separators + UTF-8）。
 
-    至少覆盖：evidence_schema_version、company/source/parsed_source/
-    chunk_set/chunk ids、research_question/evidence_statement/evidence_type、
-    quote_start/quote_end/quote_sha256/locator_refs、provider_key/
-    authority_tier_snapshot/critical_claim_eligible_snapshot/
+    至少覆盖：evidence_schema_version、origin_type、company/source/
+    parsed_source/chunk_set/chunk ids、research_question/evidence_statement/
+    evidence_type、quote_start/quote_end/quote_sha256/locator_refs、
+    provider_key/authority_tier_snapshot/critical_claim_eligible_snapshot/
     source_published_at/reporting_period_end、extractor_name/version/
     model_id/confidence。
 
     **不得包含** evidence_id / created_at。同一完全相同 Evidence → 同一
     指纹 → replay 同一卡；语义 / quote / extractor version 任一变化 →
-    新指纹 → 新卡，旧卡保留（修订 = 新 EvidenceCard）。
+    新指纹 → 新卡，旧卡保留（修订 = 新 EvidenceCard）。v2 起加入
+    origin_type（document path 固定为 'document_chunk'）；macro path 用
+    compute_macro_evidence_fingerprint。
     """
     payload = {
         "evidence_schema_version": evidence_schema_version,
+        "origin_type": origin_type,
         "company_id": str(company_id),
         "source_id": str(source_id),
         "parsed_source_id": str(parsed_source_id),
@@ -322,6 +346,168 @@ def compute_evidence_fingerprint(
         "reporting_period_end": (
             reporting_period_end.isoformat() if reporting_period_end is not None else None
         ),
+        "extractor_name": extractor_name,
+        "extractor_version": extractor_version,
+        "extractor_model_id": extractor_model_id,
+        "extractor_confidence": extractor_confidence,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass(frozen=True)
+class MacroEvidenceDraft:
+    """macro Evidence 的语义输入（构造时校验，不可变；stage 3C.3A）。
+
+    只允许提供：company_id（当前研究公司，由调用方上下文提供）、
+    research_question、macro_observation_id、evidence_statement 与 extractor
+    身份。**不得**提供 value / period / provider / snapshot / series /
+    locator / authority tier——这些由 MacroEvidenceService 从真实 Macro
+    provenance 确定性派生。
+
+    - evidence_type 固定为 metric（无字段），调用方不可指定；
+    - quote 字段固定为 NULL（macro 无原文 quote，不经过 quote resolver）。
+    """
+
+    company_id: UUID
+    research_question: str
+    macro_observation_id: UUID
+    evidence_statement: str
+    extractor_name: str
+    extractor_version: int
+    extractor_model_id: str | None = None
+    extractor_confidence: EvidenceConfidence = EvidenceConfidence.MEDIUM
+
+    def __post_init__(self) -> None:
+        question = self.research_question.strip()
+        if not question:
+            raise EvidenceCardDraftError("research_question 不能为空（trim 后）")
+        statement = self.evidence_statement.strip()
+        if not statement:
+            raise EvidenceCardDraftError("evidence_statement 不能为空（trim 后）")
+        if isinstance(self.company_id, bool) or not isinstance(self.company_id, UUID):
+            raise EvidenceCardDraftError("company_id 必须是 UUID")
+        if isinstance(self.macro_observation_id, bool) or not isinstance(
+            self.macro_observation_id, UUID
+        ):
+            raise EvidenceCardDraftError("macro_observation_id 必须是 UUID")
+        name = self.extractor_name.strip()
+        if not name:
+            raise EvidenceCardDraftError("extractor_name 不能为空（trim 后）")
+        if (
+            isinstance(self.extractor_version, bool)
+            or not isinstance(self.extractor_version, int)
+            or self.extractor_version < 1
+        ):
+            raise EvidenceCardDraftError("extractor_version 必须 >= 1")
+        if not isinstance(self.extractor_confidence, EvidenceConfidence):
+            raise EvidenceCardDraftError("extractor_confidence 必须是 EvidenceConfidence")
+        model_id = self.extractor_model_id
+        if model_id is not None:
+            model_id = model_id.strip()
+            if not model_id:
+                model_id = None
+        object.__setattr__(self, "research_question", question)
+        object.__setattr__(self, "evidence_statement", statement)
+        object.__setattr__(self, "extractor_name", name)
+        object.__setattr__(self, "extractor_model_id", model_id)
+
+
+def build_macro_observation_locator(
+    *,
+    provider_key: str,
+    series_id: UUID,
+    snapshot_id: UUID,
+    observation_id: UUID,
+    source_id: str,
+    external_indicator_id: str,
+    geography_code: str,
+    frequency: str,
+    period: str,
+    normalized_period_start: date,
+) -> list[dict]:
+    """macro EvidenceCard 的 deterministic structured locator（单元素 array）。
+
+    locator_refs 契约（CK jsonb_array_length > 0）：macro 保存结构化的
+    provenance 定位器（类型 + provider/series/snapshot/observation identity +
+    period），**不造 fake 文本 / 不经过 Chroma / quote resolver**。只使用
+    Macro models 已有的真实字段。
+    """
+    return [
+        {
+            "type": "macro_observation",
+            "provider_key": provider_key,
+            "series_id": str(series_id),
+            "snapshot_id": str(snapshot_id),
+            "observation_id": str(observation_id),
+            "source_id": source_id,
+            "external_indicator_id": external_indicator_id,
+            "geography_code": geography_code,
+            "frequency": frequency,
+            "period": period,
+            "normalized_period_start": normalized_period_start.isoformat(),
+        }
+    ]
+
+
+def compute_macro_evidence_fingerprint(
+    *,
+    evidence_schema_version: int,
+    origin_type: str,
+    company_id: UUID,
+    research_question: str,
+    evidence_statement: str,
+    evidence_type: str,
+    macro_observation_id: UUID,
+    macro_snapshot_id: UUID,
+    macro_series_id: UUID,
+    period: str,
+    normalized_period_start: date,
+    value_numeric: Decimal | None,
+    is_missing: bool,
+    provider_key: str,
+    authority_tier_snapshot: int,
+    critical_claim_eligible_snapshot: bool,
+    locator_refs: list[dict],
+    extractor_name: str,
+    extractor_version: int,
+    extractor_model_id: str | None,
+    extractor_confidence: str,
+) -> str:
+    """macro Evidence 的确定性 SHA-256 指纹（sort_keys + 固定 separators）。
+
+    至少覆盖：evidence_schema_version、origin_type、company_id、
+    research_question、macro identity（observation/snapshot/series + period
+    + normalized_period_start + value + is_missing）、evidence_statement /
+    evidence_type（固定 metric）、provider_key / authority_tier_snapshot /
+    critical_claim_eligible_snapshot（来自 Macro provenance，不硬编码）、
+    locator_refs、extractor_name/version/model_id/confidence。
+
+    **不得包含** evidence_id / created_at。同一完全相同 macro Evidence →
+    同一指纹 → replay 同一卡；statement / extractor version / 上游 snapshot
+    任一变化 → 新指纹 → 新卡，旧卡保留。value 用 Decimal → str 序列化，
+    避免浮点 / 精度歧义。
+    """
+    payload = {
+        "evidence_schema_version": evidence_schema_version,
+        "origin_type": origin_type,
+        "company_id": str(company_id),
+        "research_question": research_question,
+        "evidence_statement": evidence_statement,
+        "evidence_type": evidence_type,
+        "macro_observation_id": str(macro_observation_id),
+        "macro_snapshot_id": str(macro_snapshot_id),
+        "macro_series_id": str(macro_series_id),
+        "period": period,
+        "normalized_period_start": normalized_period_start.isoformat(),
+        "value_numeric": str(value_numeric) if value_numeric is not None else None,
+        "is_missing": is_missing,
+        "provider_key": provider_key,
+        "authority_tier_snapshot": authority_tier_snapshot,
+        "critical_claim_eligible_snapshot": critical_claim_eligible_snapshot,
+        "locator_refs": locator_refs,
         "extractor_name": extractor_name,
         "extractor_version": extractor_version,
         "extractor_model_id": extractor_model_id,

@@ -38,6 +38,7 @@ from app.db.models.evidence_card import EvidenceCardModel
 from app.evidence.contracts import (
     EVIDENCE_SCHEMA_VERSION,
     EvidenceCardDraft,
+    EvidenceOrigin,
     compute_evidence_fingerprint,
     compute_quote_sha256,
     compute_research_question_sha256,
@@ -58,10 +59,14 @@ from app.repositories.source_record_repository import SourceRecordRepository
 
 @dataclass(frozen=True)
 class EvidenceCardResult:
-    """一次 create_card 的结果摘要（不含任何正文文本 / locator）。"""
+    """一次 create_card 的结果摘要（不含任何正文文本 / locator）。
+
+    chunk_id：document_chunk origin 时为实际 chunk_id；macro_observation
+    origin 时为 None（macro Evidence 不经过 DocumentChunk）。
+    """
 
     evidence_card_id: UUID
-    chunk_id: UUID
+    chunk_id: UUID | None
     evidence_fingerprint: str
     replayed: bool
 
@@ -84,8 +89,9 @@ class _Provenance:
 
 @dataclass(frozen=True)
 class _DerivedEvidence:
-    """从真实 provenance + draft 确定性派生的完整卡字段。"""
+    """从真实 provenance + draft 确定性派生的完整卡字段（document origin）。"""
 
+    origin_type: str
     company_id: UUID
     source_id: UUID
     parsed_source_id: UUID
@@ -114,6 +120,7 @@ class _DerivedEvidence:
 
     def to_model_kwargs(self) -> dict:
         return {
+            "origin_type": self.origin_type,
             "company_id": self.company_id,
             "source_id": self.source_id,
             "parsed_source_id": self.parsed_source_id,
@@ -226,6 +233,7 @@ class EvidenceCardService:
         question_sha256 = compute_research_question_sha256(draft.research_question)
         fingerprint = compute_evidence_fingerprint(
             evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
+            origin_type=EvidenceOrigin.DOCUMENT_CHUNK.value,
             company_id=provenance.company_id,
             source_id=provenance.source_id,
             parsed_source_id=provenance.parsed_source_id,
@@ -249,6 +257,7 @@ class EvidenceCardService:
             extractor_confidence=draft.extractor_confidence.value,
         )
         return _DerivedEvidence(
+            origin_type=EvidenceOrigin.DOCUMENT_CHUNK.value,
             company_id=provenance.company_id,
             source_id=provenance.source_id,
             parsed_source_id=provenance.parsed_source_id,
@@ -284,6 +293,7 @@ class EvidenceCardService:
         新 EvidenceCard）。
         """
         pairs = (
+            ("origin_type", existing.origin_type, derived.origin_type),
             ("company_id", existing.company_id, derived.company_id),
             ("source_id", existing.source_id, derived.source_id),
             ("parsed_source_id", existing.parsed_source_id, derived.parsed_source_id),

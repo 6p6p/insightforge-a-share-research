@@ -17,6 +17,14 @@ class MacroObservationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, observation_id: UUID) -> MacroObservationModel | None:
+        result = await self._session.execute(
+            select(MacroObservationModel).where(
+                MacroObservationModel.observation_id == observation_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def bulk_create(self, observations: list[MacroObservationModel]) -> int:
         if not observations:
             return 0

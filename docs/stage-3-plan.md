@@ -44,7 +44,7 @@
 - 测试：单元 37 项（contracts/validation/where builder/query instruction/token too long/no threshold/collection metadata 校验/重复 chunk_id/非 finite distance）+ 集成 20 项（真实 PG + FakeChroma 零网络：company 隔离 / provider / document_type / source_ids / authority / critical-only / published range / reporting period range / ready-only / failed+building 排除 / 旧 chunker+parser 排除 / 维度、normalize、collection 名不匹配、ready 但 indexed<expected 排除 / 全链路 hydrate / ranking / 篡改 metadata→integrity / Chroma 不可用→稳定错误 / read path 0 manifest）+ 真实 Chroma 1 项（独立 collection，结束删除）。
 - 决策记录：[docs/decisions/0020-filtered-vector-retrieval.md](decisions/0020-filtered-vector-retrieval.md)。
 
-## 3C：EvidenceCard（当前：3C.2 完成）
+## 3C：EvidenceCard（当前：3C.3A 完成）
 
 ### 3C.1：EvidenceCard Provenance（completed）
 
@@ -73,9 +73,21 @@
 - **测试**：122 单元（contracts/quote/prompt 注入边界/service；零 LLM）+ 11 集成（真实 PG：E2E HTML DOM locator + PDF page/bbox、rerun replay、stale 0 写、relevant=false/not-found/ambiguous/malformed 0 写、high confidence 不提升 critical、单 hit 3 卡、0 manifest 无 Stage 4 表；零 Chroma/BGE/LLM/network）。
 - 决策记录：[docs/decisions/0022-structured-evidence-extraction.md](decisions/0022-structured-evidence-extraction.md)。
 
+### 3C.3A：Generic Evidence Origin + Macro Evidence（completed）
+
+- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required**（不开放 Evidence HTTP 端点，宏证据走确定性服务）。
+- 把 EvidenceCard 泛化为**双 origin**（`origin_type ∈ document_chunk / macro_observation`），在 Stage 4（Claim）前完成 origin 模型泛化。**不是 Macro → fake DocumentChunk**：macro Evidence 不经过 DocumentChunk / ParsedSource / Chroma / quote resolver。单表单 namespace（同一 evidence_card_id），不拆两张表。
+- **Migration 0017**（`alembic current` = 0017 head）：`origin_type` NOT NULL server_default 'document_chunk' + 索引（旧 v1 document 行回填 document_chunk，**不重算旧 fingerprint**）；macro_* 三列 UUID NULL（FK RESTRICT macro_observations / macro_dataset_snapshots / macro_series）+ 索引；document-specific 列改可 NULL；3 个新 CHECK（origin 枚举、conditional origin_consistency、`locator_refs` 非空 array）；`provider_key` / `authority_tier_snapshot` / `critical_claim_eligible_snapshot` 保持 NOT NULL。**0017 downgrade guard**：有 macro_observation 行拒绝降级，无 macro 行可安全降级。
+- **MacroEvidenceDraft**（`app/evidence/contracts.py`）：只允许语义输入（company_id/research_question/macro_observation_id/evidence_statement/extractor_name/extractor_version/extractor_model_id?/extractor_confidence）；evidence_type 固定 metric（不是 draft 字段）；调用方**不得提供** value/period/provider/snapshot/series/locator/authority tier/quote/fingerprint。
+- **MacroEvidenceService.create_macro_card(draft)**（`app/services/macro_evidence_service.py`）：真实 provenance load（Company → Observation → Snapshot → Series → Provider → Artifact links → RawArtifact，链断裂 → `EvidenceProvenanceIntegrityError` 不修复）→ 纯函数派生（provider_key 来自 MacroSeries；authority_tier_snapshot / critical_claim_eligible_snapshot **直接复制 MacroDatasetSnapshot 获取时快照，不硬编码 World Bank tier**；deterministic structured macro locator；evidence_type=metric；quote/published/reporting period 固定 NULL）→ create_or_get（PG `ON CONFLICT(evidence_fingerprint)` 并发幂等）→ replay 逐字段校验（损坏 → `EvidenceCardIntegrityError` 不 repair）。**无 LLM、无 Chroma、无 DocumentChunk、无 quote resolver**。
+- **Fingerprint schema v2**：`EVIDENCE_SCHEMA_VERSION = 2`；document + macro fingerprint payload 都加入 `origin_type`；旧 v1 document 卡不重算。`compute_macro_evidence_fingerprint` 含宏身份 / period / value / is_missing / provider 快照 / locator。
+- **Document 回归**：既有 `EvidenceCardService.create_card` 继续只处理 document_chunk origin；3C.1/3C.2 全部语义原样保留（回归由集成测试证明）。
+- **测试**：30 项宏契约单元 + 12 项宏证据集成（真实 PG + MockTransport WorldBank，零 Chroma/LLM）+ 2 项 migration 0017 downgrade guard（isolated 临时 PG）。
+- 决策记录：[docs/decisions/0023-generic-evidence-origin-macro-evidence.md](decisions/0023-generic-evidence-origin-macro-evidence.md)。
+
 ### 3C.3：Evidence 服务收口（next）
 
-- 3C.1 + 3C.2 之后的收口与 E2E 验收（文档、全量验证）。
+- 3C.3A 之后的收口与 E2E 验收（文档、全量验证；3C.3A 已完成对应文档与全量验证）。
 
 ### 3C 之后
 

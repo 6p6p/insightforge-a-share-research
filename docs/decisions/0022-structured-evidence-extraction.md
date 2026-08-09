@@ -50,6 +50,10 @@
 
 14. **Boundary（§14 不做）**：不创建 Claim / ClaimEvidenceLink / Report / Audit；不接 LangGraph node / CrewAI；不自动 Retrieval / reranker / fact cross-check / second LLM judge；不开放 HTTP API。Alembic head = 0016（**无新 migration**）。
 
+## 后续演进（3C.3A）
+
+本 ADR 冻结的 document origin（`alembic head=0016`、无新 migration）已被 [ADR-0023（Generic Evidence Origin + Macro Evidence，阶段 3C.3A）](0023-generic-evidence-origin-macro-evidence.md) 泛化：`evidence_cards` 增加 `origin_type`（migration 0017，`EVIDENCE_SCHEMA_VERSION=2`）。**Extractor 语义不变**：Extractor 仍只产出 document_chunk 语义输入（evidence_statement / evidence_type / quote_text / confidence），`EvidenceExtractionService.extract_from_hit` 仍调用 `EvidenceCardService.create_card`（document path）；macro evidence 不经 Extractor / LLM，由 `MacroEvidenceService.create_macro_card` 独立处理。
+
 ## 后果
 
 - RetrievalHit + 研究问题现在能**以结构化、可校验的方式生成证据卡**：语义由 LLM 负责、quote/locator/provenance 全部由确定性代码推导，证据链可追溯且可 replay。

@@ -46,6 +46,10 @@
 
 14. **Boundary**：不创建 Claim / Report / ReviewIssue；不调用 LLM / LangGraph / CrewAI / BGE / Chroma query；EvidenceCard **不是 RetrievalHit 的自动升级**——Service 构造函数只持有 sessionmaker，只显式接受 `create_card(EvidenceCardDraft)`；Alembic head = 0016。
 
+## 后续演进（3C.3A）
+
+本 ADR 冻结的 document origin（`EVIDENCE_SCHEMA_VERSION=1`、`alembic head=0016`）已被 [ADR-0023（Generic Evidence Origin + Macro Evidence，阶段 3C.3A）](0023-generic-evidence-origin-macro-evidence.md) 泛化：`evidence_cards` 增加 `origin_type ∈ (document_chunk, macro_observation)`（migration 0017，`EVIDENCE_SCHEMA_VERSION=2`），document-specific 列允许 NULL。**本文档的 document 语义不变**：既有 `EvidenceCardService.create_card` 仍只处理 document_chunk origin，draft 输入防御、exact quote、locator projection、provenance load、replay 完整性、并发幂等、无 update API 全部原样保留；新 document 卡使用 schema v2（fingerprint 加入 origin_type），既有 v1 卡不重算。
+
 ## 后果
 
 - Evidence 原子单元落库，具备完整 provenance + 原文定位（DOM / 页面坐标），可**在不重跑 LLM 的情况下确定性 replay / 核对**。

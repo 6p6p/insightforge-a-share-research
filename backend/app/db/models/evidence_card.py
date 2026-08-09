@@ -47,11 +47,38 @@ from app.db.base import Base
 _SHA256_CHECK = "~ '^[0-9a-f]{64}$'"
 _EVIDENCE_TYPE_CHECK = "evidence_type IN ('fact','metric','event','statement','context')"
 _CONFIDENCE_CHECK = "extractor_confidence IN ('low','medium','high')"
+_ORIGIN_TYPE_CHECK = "origin_type IN ('document_chunk','macro_observation')"
+_ORIGIN_CONSISTENCY_CHECK = """
+(
+  (origin_type = 'document_chunk' AND
+     source_id IS NOT NULL AND parsed_source_id IS NOT NULL AND
+     chunk_set_id IS NOT NULL AND chunk_id IS NOT NULL AND
+     quote_start IS NOT NULL AND quote_end IS NOT NULL AND
+     quote_text IS NOT NULL AND quote_sha256 IS NOT NULL AND
+     macro_observation_id IS NULL AND macro_snapshot_id IS NULL AND macro_series_id IS NULL)
+  OR
+  (origin_type = 'macro_observation' AND
+     macro_observation_id IS NOT NULL AND macro_snapshot_id IS NOT NULL AND
+     macro_series_id IS NOT NULL AND
+     source_id IS NULL AND parsed_source_id IS NULL AND
+     chunk_set_id IS NULL AND chunk_id IS NULL AND
+     quote_start IS NULL AND quote_end IS NULL AND
+     quote_text IS NULL AND quote_sha256 IS NULL)
+)
+"""
 
 
 class EvidenceCardModel(Base):
     __tablename__ = "evidence_cards"
     __table_args__ = (
+        CheckConstraint(
+            _ORIGIN_TYPE_CHECK,
+            name="ck_evidence_cards_origin_type",
+        ),
+        CheckConstraint(
+            _ORIGIN_CONSISTENCY_CHECK,
+            name="ck_evidence_cards_origin_consistency",
+        ),
         CheckConstraint(
             "quote_start >= 0",
             name="ck_evidence_cards_quote_start",
@@ -116,6 +143,10 @@ class EvidenceCardModel(Base):
             "jsonb_typeof(locator_refs) = 'array'",
             name="ck_evidence_cards_locator_refs_array",
         ),
+        CheckConstraint(
+            "jsonb_array_length(locator_refs) > 0",
+            name="ck_evidence_cards_locator_refs_nonempty",
+        ),
         UniqueConstraint(
             "evidence_fingerprint",
             name="uq_evidence_cards_evidence_fingerprint",
@@ -126,44 +157,64 @@ class EvidenceCardModel(Base):
         Index("ix_evidence_cards_research_question_sha256", "research_question_sha256"),
         Index("ix_evidence_cards_evidence_type", "evidence_type"),
         Index("ix_evidence_cards_created_at", "created_at"),
+        Index("ix_evidence_cards_origin_type", "origin_type"),
+        Index("ix_evidence_cards_macro_observation_id", "macro_observation_id"),
     )
 
     evidence_card_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    origin_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="document_chunk"
     )
     company_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("companies.company_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    source_id: Mapped[UUID] = mapped_column(
+    source_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("source_records.source_id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
-    parsed_source_id: Mapped[UUID] = mapped_column(
+    parsed_source_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("parsed_sources.parsed_source_id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
-    chunk_set_id: Mapped[UUID] = mapped_column(
+    chunk_set_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("chunk_sets.chunk_set_id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
-    chunk_id: Mapped[UUID] = mapped_column(
+    chunk_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("document_chunks.chunk_id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
+    )
+    macro_observation_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("macro_observations.observation_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    macro_snapshot_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("macro_dataset_snapshots.snapshot_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    macro_series_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("macro_series.series_id", ondelete="RESTRICT"),
+        nullable=True,
     )
     research_question: Mapped[str] = mapped_column(Text, nullable=False)
     research_question_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     evidence_statement: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    quote_start: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    quote_end: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    quote_text: Mapped[str] = mapped_column(Text, nullable=False)
-    quote_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    quote_start: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    quote_end: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    quote_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quote_sha256: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
     locator_refs: Mapped[list] = mapped_column(JSONB, nullable=False)
     provider_key: Mapped[str] = mapped_column(
         String(32),

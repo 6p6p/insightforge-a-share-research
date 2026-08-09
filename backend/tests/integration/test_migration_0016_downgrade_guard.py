@@ -31,7 +31,6 @@ from app.core.config import get_settings
 from app.db.models.chunk_set import ChunkSetModel
 from app.db.models.company import CompanyModel
 from app.db.models.document_chunk import DocumentChunkModel
-from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.parsed_source import ParsedSourceModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_provider import SourceProviderModel
@@ -229,50 +228,46 @@ async def _seed_full_chain(temp_url: str, *, seed_evidence: bool) -> int:
             await session.flush()
 
             if seed_evidence:
-                session.add(
-                    EvidenceCardModel(
-                        evidence_card_id=uuid4(),
-                        company_id=company.company_id,
-                        source_id=record.source_id,
-                        parsed_source_id=parsed.parsed_source_id,
-                        chunk_set_id=chunk_set.chunk_set_id,
-                        chunk_id=chunk.chunk_id,
-                        research_question="测试研究问题",
-                        research_question_sha256=hashlib.sha256(
+                # 0016 schema 下 evidence_cards 没有 origin_type / macro_* 列，
+                # 用 raw SQL 插入 v1 document 卡（与 0017 guard 测试的 v1 路径一致，
+                # 不受当前 EvidenceCardModel 新列影响）。
+                await session.execute(
+                    text(
+                        "INSERT INTO evidence_cards ("
+                        "evidence_card_id, company_id, source_id, parsed_source_id, "
+                        "chunk_set_id, chunk_id, research_question, research_question_sha256, "
+                        "evidence_statement, evidence_type, quote_start, quote_end, quote_text, "
+                        "quote_sha256, locator_refs, provider_key, source_published_at, "
+                        "reporting_period_end, authority_tier_snapshot, "
+                        "critical_claim_eligible_snapshot, extractor_name, extractor_version, "
+                        "extractor_model_id, extractor_confidence, evidence_schema_version, "
+                        "evidence_fingerprint) VALUES ("
+                        ":evidence_card_id, :company_id, :source_id, :parsed_source_id, "
+                        ":chunk_set_id, :chunk_id, :research_question, :research_question_sha256, "
+                        ":evidence_statement, 'fact', 0, 4, :quote_text, :quote_sha256, "
+                        "CAST(:locator_refs AS jsonb), 'xinhuanet', :published_at, NULL, 3, "
+                        "false, 'test-extractor', 1, NULL, 'high', 1, :fingerprint)"
+                    ),
+                    {
+                        "evidence_card_id": str(uuid4()),
+                        "company_id": str(company.company_id),
+                        "source_id": str(record.source_id),
+                        "parsed_source_id": str(parsed.parsed_source_id),
+                        "chunk_set_id": str(chunk_set.chunk_set_id),
+                        "chunk_id": str(chunk.chunk_id),
+                        "research_question": "测试研究问题",
+                        "research_question_sha256": hashlib.sha256(
                             "测试研究问题".encode()
                         ).hexdigest(),
-                        evidence_statement="测试证据陈述",
-                        evidence_type="fact",
-                        quote_start=0,
-                        quote_end=4,
-                        quote_text="测试正文",
-                        quote_sha256=_SHA,
-                        locator_refs=[
-                            {
-                                "block_ordinal": 1,
-                                "char_start": 0,
-                                "char_end": 4,
-                                "locator": {
-                                    "type": "html_dom",
-                                    "ordinal": 1,
-                                    "tag": "p",
-                                    "xpath": "/html/body/article/p[1]",
-                                    "element_id": None,
-                                },
-                            }
-                        ],
-                        provider_key="xinhuanet",
-                        source_published_at=record.published_at,
-                        reporting_period_end=record.reporting_period_end,
-                        authority_tier_snapshot=3,
-                        critical_claim_eligible_snapshot=False,
-                        extractor_name="test-extractor",
-                        extractor_version=1,
-                        extractor_model_id=None,
-                        extractor_confidence="high",
-                        evidence_schema_version=1,
-                        evidence_fingerprint=_HEX64,
-                    )
+                        "evidence_statement": "测试证据陈述",
+                        "quote_text": "测试正文",
+                        "quote_sha256": _SHA,
+                        "locator_refs": '[{"block_ordinal":1,"char_start":0,"char_end":4,'
+                        '"locator":{"type":"html_dom","ordinal":1,"tag":"p",'
+                        '"xpath":"/html/body/article/p[1]","element_id":null}}]',
+                        "published_at": record.published_at,
+                        "fingerprint": _HEX64,
+                    },
                 )
             await session.commit()
 

@@ -363,7 +363,9 @@ async def test_first_create_persists_card(env) -> None:
         assert card.quote_text == chunk.text[0:20]
         assert card.quote_sha256 == _sha(chunk.text[0:20])
         assert card.evidence_fingerprint == result.evidence_fingerprint
-        assert card.evidence_schema_version == 1
+        # 新 document 卡使用 schema v2（origin 模型泛化后 fingerprint 含 origin_type）。
+        assert card.evidence_schema_version == 2
+        assert card.origin_type == "document_chunk"
 
 
 async def test_replay_returns_same_card(env) -> None:

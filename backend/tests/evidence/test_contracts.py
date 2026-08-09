@@ -16,6 +16,7 @@ from app.evidence.contracts import (
     EVIDENCE_SCHEMA_VERSION,
     EvidenceCardDraft,
     EvidenceConfidence,
+    EvidenceOrigin,
     EvidenceType,
     compute_evidence_fingerprint,
     compute_research_question_sha256,
@@ -58,6 +59,7 @@ def _draft(**overrides) -> EvidenceCardDraft:
 def _fingerprint(**overrides) -> str:
     values = dict(
         evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
+        origin_type=EvidenceOrigin.DOCUMENT_CHUNK.value,
         company_id=_COMPANY_ID,
         source_id=_SOURCE_ID,
         parsed_source_id=_PS_ID,
@@ -194,8 +196,9 @@ def test_evidence_confidence_values_frozen() -> None:
     assert {c.value for c in EvidenceConfidence} == {"low", "medium", "high"}
 
 
-def test_schema_version_is_one() -> None:
-    assert EVIDENCE_SCHEMA_VERSION == 1
+def test_schema_version_is_two() -> None:
+    # v2 = 泛化 origin 模型（stage 3C.3A）：document fingerprint 加入 origin_type。
+    assert EVIDENCE_SCHEMA_VERSION == 2
 
 
 # ---------------------------------------------------------------- fingerprint
@@ -257,7 +260,11 @@ def test_fingerprint_sensitive_to_provenance_snapshots() -> None:
 
 
 def test_fingerprint_sensitive_to_schema_version() -> None:
-    assert _fingerprint(evidence_schema_version=2) != _fingerprint()
+    assert _fingerprint(evidence_schema_version=3) != _fingerprint()
+
+
+def test_fingerprint_sensitive_to_origin_type() -> None:
+    assert _fingerprint(origin_type="macro_observation") != _fingerprint()
 
 
 def test_fingerprint_sensitive_to_provenance_ids() -> None:
