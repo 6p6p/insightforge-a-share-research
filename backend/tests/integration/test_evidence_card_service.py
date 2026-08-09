@@ -669,7 +669,13 @@ async def test_missing_chunk_set_row_raises_provenance_integrity_error(env) -> N
 # ---------------------------------------------------------------- boundary
 
 
-async def test_create_card_creates_no_claim_report_reviewissue(env) -> None:
+async def test_create_card_creates_no_stage5_report_tables(env) -> None:
+    """Stage 边界：EvidenceCard 不产生 Stage 5 report 表。
+
+    report_outlines / report_sections / reports / review_issues 是 Stage 5 表。
+    Stage 4 claims 表由 Stage 4A 单独引入，不在这里约束（精确阶段边界名，
+    避免以后过期）。
+    """
     _, _, _, chunks = await _seed_html_source(env)
     chunk = chunks[0]
     await _create_card(env, chunk)
@@ -679,7 +685,8 @@ async def test_create_card_creates_no_claim_report_reviewissue(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' "
-                    "AND table_name IN ('claims','reports','review_issues')"
+                    "AND table_name IN ('report_outlines','report_sections',"
+                    "'reports','review_issues')"
                 )
             )
         ).scalar_one()

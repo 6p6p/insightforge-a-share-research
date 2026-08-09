@@ -1,5 +1,7 @@
 from app.db.models.chunk_set import ChunkSetModel
 from app.db.models.chunk_vector_index import ChunkVectorIndexModel
+from app.db.models.claim import ClaimModel
+from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.document_chunk import DocumentChunkModel
@@ -24,6 +26,8 @@ from app.db.models.workflow_run import WorkflowRunModel
 __all__ = [
     "ChunkSetModel",
     "ChunkVectorIndexModel",
+    "ClaimEvidenceLinkModel",
+    "ClaimModel",
     "CompanyAliasModel",
     "CompanyModel",
     "DocumentChunkModel",

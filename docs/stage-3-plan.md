@@ -95,4 +95,4 @@
 
 ### 3C 之后
 
-- Claim（主张抽取）、Report（研报生成）、Audit（事实审核）属于 Stage 4 及以后。
+- Stage 4 已开始：**4A = Claim Provenance + Persistence Foundation（current/completed）**；4B = next；4C = later；4D = later；Stage 5 不提前标记。详见 [docs/stage-4-plan.md](stage-4-plan.md)。
