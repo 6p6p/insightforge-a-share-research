@@ -6,6 +6,10 @@ from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.document_chunk import DocumentChunkModel
 from app.db.models.evidence_card import EvidenceCardModel
+from app.db.models.financial_calculation import (
+    FinancialCalculationInputModel,
+    FinancialCalculationModel,
+)
 from app.db.models.financial_metric_observation import FinancialMetricObservationModel
 from app.db.models.human_action import HumanActionModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
@@ -33,6 +37,8 @@ __all__ = [
     "CompanyModel",
     "DocumentChunkModel",
     "EvidenceCardModel",
+    "FinancialCalculationInputModel",
+    "FinancialCalculationModel",
     "FinancialMetricObservationModel",
     "HumanActionModel",
     "MacroDatasetSnapshotModel",

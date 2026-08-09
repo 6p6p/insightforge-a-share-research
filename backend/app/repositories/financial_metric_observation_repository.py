@@ -13,6 +13,16 @@ class FinancialMetricObservationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(
+        self, metric_observation_id: object
+    ) -> FinancialMetricObservationModel | None:
+        result = await self._session.execute(
+            select(FinancialMetricObservationModel).where(
+                FinancialMetricObservationModel.metric_observation_id == metric_observation_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_fingerprint(
         self, metric_fingerprint: str
     ) -> FinancialMetricObservationModel | None:
