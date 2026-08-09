@@ -603,6 +603,99 @@ async def test_create_claim_batch_replays_existing_claim(env) -> None:
     assert await _claim_count(env["sessionmaker"]) == 1
 
 
+# ---------------------------------------------------------------- ordered result
+
+
+async def test_batch_ordered_result_matches_draft_order(env) -> None:
+    """items[i] 必须永远对应 drafts[i]（不按 created/replayed 分组重排）。
+
+    构造：draft1 先单独 create（后续 batch 中成为 replay），draft2 全新；
+    batch([draft1, draft2]) → claim_ids 必须为 [claim1, claim2]。
+    """
+    a = await _seed_document_card(env, statement="支持A", source_url=_URL)
+    b = await _seed_document_card(env, statement="支持B", source_url=_URL_2)
+    draft1 = _claim_draft(env, supports=[a["evidence_card_id"]], statement="观点A")
+    draft2 = _claim_draft(env, supports=[b["evidence_card_id"]], statement="观点B")
+    first = await ClaimService(env["sessionmaker"]).create_claim(draft1)
+    batch = await ClaimService(env["sessionmaker"]).create_claim_batch([draft1, draft2])
+
+    # ordered：replay(draft1) 在前、create(draft2) 在后，绝不变成 created+replayed。
+    assert len(batch.items) == 2
+    assert batch.items[0].ordinal == 1
+    assert batch.items[0].claim_id == first.claim_id
+    assert batch.items[0].replayed is True
+    assert batch.items[1].ordinal == 2
+    assert batch.items[1].replayed is False
+    assert batch.claim_ids == (first.claim_id, batch.items[1].claim_id)
+    assert batch.replayed == (first.claim_id,)
+    assert batch.created == (batch.items[1].claim_id,)
+    assert await _claim_count(env["sessionmaker"]) == 2
+
+
+async def test_batch_ordered_result_create_before_replay(env) -> None:
+    """draft1 create、draft2 replay 时，仍按 draft 顺序返回 [claim1, claim2]。"""
+    a = await _seed_document_card(env, statement="支持A", source_url=_URL)
+    b = await _seed_document_card(env, statement="支持B", source_url=_URL_2)
+    draft1 = _claim_draft(env, supports=[a["evidence_card_id"]], statement="观点A")
+    draft2 = _claim_draft(env, supports=[b["evidence_card_id"]], statement="观点B")
+    await ClaimService(env["sessionmaker"]).create_claim(draft2)  # draft2 先存在
+    batch = await ClaimService(env["sessionmaker"]).create_claim_batch([draft1, draft2])
+
+    assert batch.claim_ids[0] != batch.claim_ids[1]
+    assert batch.items[0].replayed is False  # draft1 create
+    assert batch.items[1].replayed is True  # draft2 replay
+    assert batch.created == (batch.claim_ids[0],)
+    assert batch.replayed == (batch.claim_ids[1],)
+    assert await _claim_count(env["sessionmaker"]) == 2
+
+
+async def test_batch_ordered_result_mixed_three(env) -> None:
+    """混合 3 drafts：replay/create/replay → 顺序仍为 draft 顺序。"""
+    a = await _seed_document_card(env, statement="支持A", source_url=_URL)
+    b = await _seed_document_card(env, statement="支持B", source_url=_URL_2)
+    c = await _seed_document_card(env, statement="支持C", source_url=_URL_3)
+    d1 = _claim_draft(env, supports=[a["evidence_card_id"]], statement="观点A")
+    d2 = _claim_draft(env, supports=[b["evidence_card_id"]], statement="观点B")
+    d3 = _claim_draft(env, supports=[c["evidence_card_id"]], statement="观点C")
+    await ClaimService(env["sessionmaker"]).create_claim(d2)  # 中间位 replay
+    batch = await ClaimService(env["sessionmaker"]).create_claim_batch([d1, d2, d3])
+
+    assert [it.replayed for it in batch.items] == [False, True, False]
+    assert [it.ordinal for it in batch.items] == [1, 2, 3]
+    assert len(set(batch.claim_ids)) == 3
+    assert await _claim_count(env["sessionmaker"]) == 3
+
+
+# ---------------------------------------------------------------- 事务阶段原子性
+
+
+async def test_batch_persistence_phase_rollback_on_replay_integrity(env) -> None:
+    """事务阶段失败（replay 校验 → ClaimIntegrityError）必须整批回滚：
+    draft1（新 Claim + links 已写入事务）也不得落库（0 partial write）。
+    """
+    a = await _seed_document_card(env, statement="支持A", source_url=_URL)
+    b = await _seed_document_card(env, statement="支持B", source_url=_URL_2)
+    draft1 = _claim_draft(env, supports=[a["evidence_card_id"]], statement="观点A")
+    draft2 = _claim_draft(env, supports=[b["evidence_card_id"]], statement="观点B")
+    # 让 draft2 已有 fingerprint 落库，再故意篡改 DB 行（fingerprint 列不变）：
+    # batch 处理 draft2 时 _verify_replay 逐字段比对失败 → ClaimIntegrityError。
+    await ClaimService(env["sessionmaker"]).create_claim(draft2)
+    async with env["sessionmaker"]() as session:
+        await session.execute(text("UPDATE claims SET statement = '篡改'"))
+        await session.commit()
+
+    with pytest.raises(ClaimIntegrityError):
+        await ClaimService(env["sessionmaker"]).create_claim_batch([draft1, draft2])
+
+    # draft1 已进入事务（create + links）但随整批回滚 → 0 partial write。
+    assert await _claim_count(env["sessionmaker"]) == 1  # 只有被篡改的 draft2 行
+    async with env["sessionmaker"]() as session:
+        links = (
+            await session.execute(text("SELECT count(*) FROM claim_evidence_links"))
+        ).scalar_one()
+    assert links == 1  # 只有 draft2 的 link，draft1 的 link 已回滚
+
+
 # ---------------------------------------------------------------- integrity
 
 

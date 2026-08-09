@@ -88,22 +88,44 @@ class ClaimResult:
 
 
 @dataclass(frozen=True)
+class ClaimBatchItem:
+    """batch 中单个 draft 的结果（ordinal 从 1 开始，与 input drafts 一一对应）。
+
+    - ordinal：draft 在本次 batch 中的位置（1..len(drafts)）；
+    - claim_id：created 或 replayed 后的 Claim id；
+    - replayed：True=复用既有 fingerprint 的 Claim，False=本次真正新增。
+    """
+
+    ordinal: int
+    claim_id: UUID
+    replayed: bool
+
+
+@dataclass(frozen=True)
 class ClaimBatchResult:
     """一次 create_claim_batch 的结果摘要（不含任何正文文本 / evidence）。
 
-    - created：本次真正新增的 Claim ids（按 drafts 顺序）；
-    - replayed：已有 fingerprint 回放校验通过的 Claim ids（按 drafts 顺序）；
-    - claim_ids：created + replayed，长度 == drafts（1..MAX_CLAIMS_PER_BATCH）；
+    - items：**ordered result**——按 input drafts 顺序的逐条结果，
+      len(items) == len(drafts)，items[i] 永远对应 drafts[i]（不按
+      created/replayed 分组重排）；
+    - claim_ids / created / replayed：由 items 顺序派生（不是各自分组拼接）；
     - fingerprints：claim_id → claim_fingerprint（供上游追溯）。
     """
 
-    created: tuple[UUID, ...]
-    replayed: tuple[UUID, ...]
+    items: tuple[ClaimBatchItem, ...]
     fingerprints: dict[UUID, str]
 
     @property
     def claim_ids(self) -> tuple[UUID, ...]:
-        return self.created + self.replayed
+        return tuple(item.claim_id for item in self.items)
+
+    @property
+    def created(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items if not item.replayed)
+
+    @property
+    def replayed(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items if item.replayed)
 
 
 @dataclass(frozen=True)
@@ -170,21 +192,26 @@ class ClaimService:
             prepared.append(_PreparedClaim(draft, evidence, fingerprint, question_sha256))
 
         # 3. 单 transaction：create_or_get + links；任何 DB 错误 → 整批回滚。
-        created: list[UUID] = []
-        replayed: list[UUID] = []
+        #    items 按 prepared（== input drafts）顺序收集，绝不按 created/replayed
+        #    分组重排——items[i] 永远对应 drafts[i]。
         fingerprints: dict[UUID, str] = {}
+        items: list[ClaimBatchItem] = []
         async with self._sessionmaker() as session:
             try:
                 repo = ClaimRepository(session)
                 link_repo = ClaimEvidenceLinkRepository(session)
-                for prep in prepared:
+                for ordinal, prep in enumerate(prepared, start=1):
                     existing = await repo.get_by_fingerprint(prep.fingerprint)
                     if existing is not None:
                         await self._verify_replay(
                             session, existing, prep.draft, prep.fingerprint, prep.question_sha256
                         )
-                        replayed.append(existing.claim_id)
                         fingerprints[existing.claim_id] = prep.fingerprint
+                        items.append(
+                            ClaimBatchItem(
+                                ordinal=ordinal, claim_id=existing.claim_id, replayed=True
+                            )
+                        )
                         continue
 
                     claim = ClaimModel(
@@ -197,19 +224,24 @@ class ClaimService:
                         await self._verify_replay(
                             session, claim, prep.draft, prep.fingerprint, prep.question_sha256
                         )
-                        replayed.append(claim.claim_id)
                         fingerprints[claim.claim_id] = prep.fingerprint
+                        items.append(
+                            ClaimBatchItem(ordinal=ordinal, claim_id=claim.claim_id, replayed=True)
+                        )
                         continue
 
                     await link_repo.bulk_insert(self._build_links(claim.claim_id, prep.draft))
-                    created.append(claim.claim_id)
                     fingerprints[claim.claim_id] = prep.fingerprint
+                    items.append(
+                        ClaimBatchItem(ordinal=ordinal, claim_id=claim.claim_id, replayed=False)
+                    )
                 await session.commit()
-                return ClaimBatchResult(
-                    created=tuple(created),
-                    replayed=tuple(replayed),
-                    fingerprints=fingerprints,
-                )
+                return ClaimBatchResult(items=tuple(items), fingerprints=fingerprints)
+            except ClaimIntegrityError:
+                # replay 校验发现既有 Claim 数据损坏 → 显式回滚本事务（不依赖
+                # session close 隐式 rollback），然后向上抛出；draft 未落库。
+                await session.rollback()
+                raise
             except SQLAlchemyError as exc:
                 await session.rollback()
                 raise ClaimPersistenceFailed() from exc

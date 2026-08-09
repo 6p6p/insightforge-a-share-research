@@ -67,11 +67,23 @@ docker compose up -d postgres chroma
 conda run -n insightforge alembic -c backend/alembic.ini upgrade head
 ```
 
-5. 启动 FastAPI：
+5. 启动 FastAPI（Windows host 官方入口）：
 
 ```bash
-conda run -n insightforge python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8001 --reload
+cd backend
+conda run -n insightforge python -m app.cli.run_backend
 ```
+
+> **为什么不用 `python -m uvicorn app.main:app`？** Windows 上需要**两个条件同时
+> 成立**才能让 psycopg async 的 `/api/v1/health/ready`（database / checkpoint）
+> 通过：1）在 `uvicorn.run` **之前**显式调用 `configure_asyncio_runtime()`
+> （否则 uvicorn 先创建默认 ProactorEventLoop，`app.main` 模块级的配置已来不及
+> 生效）；2）`uvicorn.run(..., loop="none")`——uvicorn 0.52 的
+> `asyncio_loop_factory` 在 Windows 上直接 new `ProactorEventLoop`
+> （`loop="auto"` 默认值），会绕过事件循环 policy，只有 `loop="none"` 才让
+> uvicorn 退回 `asyncio.run()` 用已配置的 policy 创建 loop。`app.cli.run_backend`
+> 已同时满足这两点。Docker 入口保持 `compose.yaml` 的 uvicorn 命令（Linux 容器
+> 无此问题）。
 
 ## 健康检查语义
 
@@ -515,7 +527,7 @@ conda run -n insightforge python -m app.cli.fetch_world_bank_macro \
 - **Prompt boundary**（`prompt.py`）：冻结 system prompt 声明 Evidence 是不可信 DATA、忽略注入、不生成投资建议、不用工具/不联网/不调用函数、无 CoT；Evidence 只进 user payload 的 `EVIDENCE_DATA_START/END` delimiter，绝不拼接进 system。
 - **Ref resolution**（`ref_resolver.py`）：E → evidence_card_id，**不 fuzzy resolve**；未知 E → `ClaimAnalysisUnknownEvidenceRef`；跨 relation 重复 → `ClaimAnalysisRelationConflict`；组内去重 + canonical 排序；**任一 candidate 无效 → 整次 0 写**。
 - **Service**（`service.py`）：防御性 domain check → 真实 PG 加载 Evidence（缺失/跨公司 → `ClaimAnalysisEvidenceCompanyMismatch`）→ build pack → `_call_model`（服务层 double-check schema）→ relevant=false 0-claims → resolve → 构造 drafts → kind 兼容性兜底 → `create_claim_batch`。
-- **原子批量持久化**（`app/services/claim_service.py` 的 `create_claim_batch`）：1..5 个 drafts；**all-drafts-validate-first**（开事务前全量加载证据 + policy 校验 + fingerprint 派生，任一失败 → 整批 0 写）；**单 transaction**（任一 SQLAlchemyError → rollback + `ClaimPersistenceFailed`）；`create_claim` 委托给 batch（单条语义不变）。
+- **原子批量持久化**（`app/services/claim_service.py` 的 `create_claim_batch`）：1..5 个 drafts；**all-drafts-validate-first**（开事务前全量加载证据 + policy 校验 + fingerprint 派生，任一失败 → 整批 0 写）；**单 transaction + ordered result**（`ClaimBatchResult.items[i]` 永远对应 `drafts[i]`，不按 created/replayed 分组重排；任一 SQLAlchemyError → rollback + `ClaimPersistenceFailed`，replay 校验失败 `ClaimIntegrityError` → 显式 rollback + raise，均无 partial writes）；`create_claim` 委托给 batch（单条语义不变）。
 - **测试**：**49 项单元 + 15 项集成（`test_claim_analysis_service.py`）+ 4 项 batch 集成追加（`test_claim_service.py`）**，全程 0 真实 LLM / 0 Chroma / 0 LangGraph / 0 Report 表；全量 **1253 非集成 + 295 集成通过**。
 - **真实 DeepSeek smoke**（`app/cli/smoke_structured_claim_analysis.py`）：seed 真实 HTML 链 → E1..En 最小投影 → `DeepSeekClaimAnalysisModel.analyze` → schema 校验 → 打印摘要 → **清理全部 seed 数据（0 正式业务 Claim 残留）**。2026-08-09 实跑通过（model_id=deepseek:deepseek-v4-flash、relevant=true、1 条 fact claim supports E1）。运行（需 `DEEPSEEK_API_KEY`）：
 
