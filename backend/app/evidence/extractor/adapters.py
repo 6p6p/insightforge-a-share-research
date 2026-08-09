@@ -5,13 +5,19 @@
 - 使用相同 `prompt.py`（system / user 分离，source 只在 user data delimiter 内）；
 - `async invoke` + `with_structured_output(EvidenceExtractionDecision)`，
   `temperature=0`、`timeout` / `max_retries` 来自 Settings；
+- **显式关闭 thinking**（`extra_body={"thinking": {"type": "disabled"}}`）：
+  DeepSeek V4 Flash 默认开启 thinking，但结构化抽取需要稳定、低成本的
+  受约束输出且不产生 `reasoning_content`；`temperature=0` 不等于关闭
+  thinking，必须显式传参。`thinking` 不是标准 OpenAI 参数，按
+  langchain-deepseek==1.1.0 公开接口经 `extra_body` 传递（库文档明确：
+  非 OpenAI 自定义参数必须走 `extra_body`，`model_kwargs` 会造成 API 错误）；
 - 只启用 structured-output 机制，**不绑定 tools / 不开 web search**（非 agentic）；
 - provider / API / schema 异常映射：
   - provider API / 认证 / 网络异常 → `EvidenceExtractorUnavailable`；
   - 输出无法解析为 `EvidenceExtractionDecision`（schema 校验失败）→
     `EvidenceExtractionMalformedOutput`；
   - **不泄露** raw provider response / key / 完整 prompt；
-- `model_id = {provider}:{model}`（如 `deepseek:deepseek-chat`）；provider 无
+- `model_id = {provider}:{model}`（如 `deepseek:deepseek-v4-flash`）；provider 无
   immutable revision 时**不伪造 revision**（spec 11）。
 
 自动测试仍用 `FakeEvidenceExtractionModel`；真实调用只用于受控 smoke。
@@ -67,6 +73,11 @@ class DeepSeekEvidenceExtractionModel:
             timeout=self._settings.llm_timeout_seconds,
             max_retries=self._settings.llm_max_retries,
             api_key=api_key.get_secret_value() if api_key is not None else None,
+            # 显式关闭 thinking：DeepSeek V4 Flash 默认 thinking，但结构化抽取
+            # 需要稳定受约束输出（无 reasoning_content）；temperature=0 不等于
+            # 关闭 thinking。thinking 非标准 OpenAI 参数，按 langchain-deepseek
+            # ==1.1.0 公开接口经 extra_body 传递（model_kwargs 会造成 API 错误）。
+            extra_body={"thinking": {"type": "disabled"}},
             # 只启用 structured-output；不绑定 tools / web search / function side effects。
         )
         structured = llm.with_structured_output(EvidenceExtractionDecision)

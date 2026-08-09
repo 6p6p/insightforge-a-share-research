@@ -63,8 +63,10 @@ class Settings(BaseSettings):
     # API 的真实模型标识；deepseek_api_key 是 SecretStr，**不进 repr / 日志 /
     # error response / model_id / DB，也不作为 Docker build ARG/ENV**（compose
     # 只做 ${DEEPSEEK_API_KEY:-} 运行时注入）。没有 key 时应用仍允许启动。
+    # DeepSeek 官方已停止 legacy model names（deepseek-chat / deepseek-reasoner），
+    # 当前统一使用 deepseek-v4-flash。
     llm_provider: str = "deepseek"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 1
     deepseek_api_key: SecretStr | None = None
