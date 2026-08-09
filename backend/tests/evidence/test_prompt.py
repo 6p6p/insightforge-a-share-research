@@ -15,7 +15,6 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from app.evidence.extractor.adapters import LangChainStructuredOutputAdapter
 from app.evidence.extractor.errors import EvidenceExtractionInputError
 from app.evidence.extractor.prompt import (
     EXTRACTOR_SYSTEM_PROMPT,
@@ -133,19 +132,8 @@ def test_blank_chunk_text_rejected() -> None:
 
 
 def test_extractor_has_no_tools_or_web_search() -> None:
+    # LLM abstraction 不暴露 tools / web_search（见 test_llm_runtime.py 对
+    # 生产 adapter 的同类断言）；此处用 Fake 守住 EvidenceExtractionModel 契约。
     fake = FakeEvidenceExtractionModel(decision=None)
     assert not hasattr(fake, "tools")
     assert not hasattr(fake, "web_search")
-    adapter = LangChainStructuredOutputAdapter(provider="openai-compatible", model_name="m")
-    assert not hasattr(adapter, "tools")
-    assert not hasattr(adapter, "web_search")
-    assert adapter.model_id == "openai-compatible:m"
-
-
-def test_adapter_model_id_with_revision() -> None:
-    adapter = LangChainStructuredOutputAdapter(
-        provider="deepseek",
-        model_name="deepseek-chat",
-        model_revision="abc123",
-    )
-    assert adapter.model_id == "deepseek:deepseek-chat@abc123"

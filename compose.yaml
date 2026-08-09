@@ -40,6 +40,14 @@ services:
       CHROMA_TIMEOUT_SECONDS: "5"
       RAW_STORAGE_ROOT: /app/data/raw
       SOURCE_MAX_FILE_SIZE_BYTES: "104857600"
+      # LLM runtime：key 通过宿主 ${DEEPSEEK_API_KEY:-} 运行时注入，**不写入
+      # 镜像、不进 build ARG/ENV**；无 key 时为空串（Settings 归一化为 None），
+      # 应用仍允许启动，BGE/LLM 都不进入 /ready。
+      LLM_PROVIDER: deepseek
+      LLM_MODEL: deepseek-chat
+      LLM_TIMEOUT_SECONDS: "60"
+      LLM_MAX_RETRIES: "1"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     volumes:
       - raw_data:/app/data/raw
     ports:

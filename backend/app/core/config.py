@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/core/config.py -> three levels up is the project root
@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     # Macro 原始 JSON 响应单文件字节上限（独立于公司 PDF 上限）
     macro_max_json_response_bytes: int = _DEFAULT_MACRO_MAX_JSON_RESPONSE_BYTES
 
+    # LLM runtime（stage 3C.2.1）：provider 由 factory 分派；model 名对应 provider
+    # API 的真实模型标识；deepseek_api_key 是 SecretStr，**不进 repr / 日志 /
+    # error response / model_id / DB，也不作为 Docker build ARG/ENV**（compose
+    # 只做 ${DEEPSEEK_API_KEY:-} 运行时注入）。没有 key 时应用仍允许启动。
+    llm_provider: str = "deepseek"
+    llm_model: str = "deepseek-chat"
+    llm_timeout_seconds: int = 60
+    llm_max_retries: int = 1
+    deepseek_api_key: SecretStr | None = None
+
     @field_validator("app_port", "chroma_port")
     @classmethod
     def _validate_port(cls, value: int) -> int:
@@ -77,11 +87,29 @@ class Settings(BaseSettings):
         "database_connect_timeout_seconds",
         "chroma_timeout_seconds",
         "workflow_shutdown_timeout_seconds",
+        "llm_timeout_seconds",
     )
     @classmethod
     def _validate_timeout(cls, value: int) -> int:
         if not 1 <= value <= _MAX_TIMEOUT_SECONDS:
             raise ValueError("timeout must be between 1 and 60 seconds")
+        return value
+
+    @field_validator("llm_max_retries")
+    @classmethod
+    def _validate_llm_max_retries(cls, value: int) -> int:
+        if value < 0 or value > 10:
+            raise ValueError("llm_max_retries must be between 0 and 10")
+        return value
+
+    @field_validator("deepseek_api_key", mode="before")
+    @classmethod
+    def _normalize_deepseek_api_key(cls, value):
+        """空串 / 空白 → None（未配置）；真实 key 保持原样交给 SecretStr。"""
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @field_validator("workflow_reconcile_timeout_seconds")

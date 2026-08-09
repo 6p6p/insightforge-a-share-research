@@ -12,6 +12,9 @@ dependencies = [
     "chromadb-client>=1.5.9,<1.6",
     "fastapi>=0.115,<1.0",
     "httpx>=0.27,<1.0",
+    # stage 3C.2.1：DeepSeek 官方 LangChain integration（版本在安装后核实并精确 pin）。
+    # 其依赖 langchain-openai / openai / langchain-core 由 pip 解析，不单独 pin。
+    "langchain-deepseek==1.1.0",
     "langgraph>=1.2.10,<1.3",
     "langgraph-checkpoint-postgres>=3.1.1,<3.2",
     "lxml==5.4.0",
