@@ -13,6 +13,14 @@ class FinancialCalculationRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get_by_id(self, calculation_id: object) -> FinancialCalculationModel | None:
+        result = await self._session.execute(
+            select(FinancialCalculationModel).where(
+                FinancialCalculationModel.calculation_id == calculation_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_fingerprint(
         self, calculation_fingerprint: str
     ) -> FinancialCalculationModel | None:
