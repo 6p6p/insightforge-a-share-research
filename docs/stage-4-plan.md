@@ -3,7 +3,7 @@
 > 阶段 4 目标：把 Stage 3 已确认的 Evidence 单元（EvidenceCard）进一步登记为**可追溯、可回放的 Claim 分析结论**，经结构化 Analyst（4B）、专项分析（4C）与综合（4D）推进；**Report 生成与 Agent Audit 属于 Stage 5**，不在 Stage 4 范围内。详细接口在对应子阶段冻结。
 > 顶层证据链：**Source → Evidence → Claim → Report → Audit**；但**开发阶段不与其混淆**——Stage 4 只能是：**4A Claim provenance / persistence → 4B Structured Analysts → 4C Financial/Macro specialized analysis → 4D Claim synthesis / conflict / evidence gaps → Stage 4 final acceptance**；Stage 5 才是：**ReportOutline / DraftSection / Report / Deterministic Check / Agent Audit / Retry / Human confirmation**。**不得写 4C=Report、4D=Audit，也不得写 Stage 4 = Claim → Report → Audit**。
 >
-> 总进度：**4A = completed**（含 0019 跨 relation 唯一性 closeout），**4B = next（4B.1 Structured Analysts 首期：Business / Event / Risk Claim Analysis）**，**4C = later**，**4D = later**；**Stage 5 不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
+> 总进度：**4A = completed**（含 0019 跨 relation 唯一性 closeout），**4B.1 = completed（Structured Analyst Foundation + Business / Event / Risk Claim Analysis）**，**4B = next（4B.2 Financial Analyst）**，**4C = later**，**4D = later**；**Stage 5 不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
 
 ## 4A：Claim Provenance + Persistence Foundation（当前，completed）
 
@@ -29,13 +29,30 @@
 - **测试**：**24 项契约单元**（`tests/claims/test_claim_contracts.py`：枚举白名单含 prediction/buy/sell/recommendation/price_target/return_forecast 排除、draft 输入防御、evidence id 去重 + canonical 排序、跨 relation 重复拒绝、fingerprint 确定性 / 敏感性与不含 claim_id/created_at、question hash 与 Evidence 同算法）+ **26 项集成**（`tests/integration/test_claim_service.py`：document/macro/mixed relations 持久化、company mismatch / missing / no supports / critical without+with eligible / macro 拒绝 / valid macro structure / supports-contradicts-context links / fingerprint 确定性 / replay / 并发→1 / statement change→新 Claim / evidence relation change→新 Claim / analyst version change→新 Claim / replay corruption→integrity error / EvidenceCard 行永不修改 / document + macro E2E provenance SQL trace / 精确阶段边界 / **0019 跨 relation 重复由数据库拒绝**）+ **2 项 migration 0018 downgrade guard + 3 项 migration 0019**（isolated 临时 PG：0019 无数据降级成功 / 有 link 数据降级拒绝 / 跨 relation 直接 SQL 插入被数据库 UNIQUE 拒绝）。**0 LLM / 0 Chroma query / 0 LangGraph / 0 Claim Agent / 0 Report 表**。
 - 决策记录：[docs/decisions/0024-claim-provenance-foundation.md](decisions/0024-claim-provenance-foundation.md)。
 
-## 4B：Structured Analysts（next）
+## 4B：Structured Analysts
 
 - **定位**：把"EvidenceCard 集合 + research question + analysis domain → 结构化 ClaimCandidate → 确定性 ref resolution → ClaimService 持久化"接入结构化 Analyst 层（LLM 只做判断与综合，不做 Retrieval / 搜索 / 直接写库）。
 - **子阶段**：
-  - **4B.1 Structured Analyst Foundation + Business / Event / Risk Claim Analysis**：首个 analyst 基础设施（ClaimAnalysisRequest / Evidence Pack / 结构化输出 / E-ref resolution / prompt boundary / Fake 模型 / 原子 batch 持久化）。只支持 business / event / risk；financial / macro / valuation → `ClaimAnalysisDomainNotReady`。
+  - **4B.1（completed）Structured Analyst Foundation + Business / Event / Risk Claim Analysis**：见下节。
   - **4B.2（next）= Financial Metric + Financial Analyst**：先有结构化 FinancialMetric、确定性财务计算、期间 / 口径 / 单位、同比 / 环比 / 比率结果，LLM 才解释结果；**Financial Analyst 不得自行成为关键财务计算器**。
 - 不提前实现 4C / 4D / Stage 5。
+
+### 4B.1 Structured Analyst Foundation + Business / Event / Risk Claim Analysis（completed）
+
+- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required（不开放 Claim Analysis HTTP 端点）；real_claim_analysis_smoke = completed（真实 DeepSeek V4 Flash smoke 走生产适配器通过，见下）**。无新 migration（`alembic current` 保持 0019 head；复用 4A 的 `claims` / `claim_evidence_links`）。
+- **链路**：EvidenceCard[] + research question + analysis domain → `ClaimAnalysisRequest` → 真实 PG 加载 → `build_evidence_pack`（E1..En 最小投影）→ `ClaimAnalysisModel.analyze` → `ClaimAnalysisDecision` → `resolve_decision_refs`（E → UUID）→ ClaimDraft[] → `ClaimService.create_claim_batch` 原子持久化。只支持 business / event / risk；financial / macro / valuation → `ClaimAnalysisDomainNotReady`。
+- **契约**（`app/analysis/claims/contracts.py`）：`CLAIM_ANALYST_VERSION = 1`、`MAX_EVIDENCE_PER_REQUEST = 30`、`MAX_CLAIMS_PER_DECISION = 5`；`ClaimCandidate`（claim_kind 只允许 fact/inference/risk，schema 层拒绝 relative_valuation，每条 ≥1 support_ref，ref 格式 E<number>）；`ClaimAnalysisDecision`（relevant=false→空 claims + 可选 reason_code；relevant=true→1..5 claims + 无 reason_code；无完全重复）；`ClaimAnalysisRequest`（company_id UUID / question trim 非空 / evidence 1..30 去重 + canonical 排序）。
+- **Evidence Pack**（`evidence_pack.py`）：最小投影（evidence_ref / statement / type / origin_type / authority_tier / provider_key，document origin 附 quote_text / published_at / reporting_period_end）；**不发送** UUID / fingerprint / locator / raw / Chroma distance；按 `str(evidence_card_id)` 升序编号 E1..En，双向映射可复现。
+- **Strategies**（`strategies.py`）：`business_event_v1`（business/event）、`risk_skeptic_v1`（risk）；persisted `analyst_name` = 具体 strategy，`analyst_version` / `analyst_model_id`（= `provider:model`）一并落库。
+- **LLM 抽象 + 适配器**（`contracts.py` Protocol / `adapters.py` / `factory.py`）：`ClaimAnalysisModel`（model_id + async analyze）；`DeepSeekClaimAnalysisModel` = 懒加载 `ChatDeepSeek` + `with_structured_output`，temperature=0 + **显式关闭 thinking**（`extra_body={"thinking": {"type": "disabled"}}`），只启用 structured-output、不绑定 tools/web search；`OutputParserException`→`ClaimAnalysisMalformedOutput`、其余→`ClaimAnalysisModelUnavailable`。
+- **Prompt boundary**（`prompt.py`）：冻结 system prompt 声明 Evidence 是不可信 DATA、忽略注入、不生成投资建议、不使用工具 / 不联网 / 不调用函数、无 CoT；Evidence 只进 user payload 的 `EVIDENCE_DATA_START/END` delimiter，绝不拼接进 system。
+- **Ref resolution**（`ref_resolver.py`）：E → evidence_card_id，**不 fuzzy resolve**；未知 E → `ClaimAnalysisUnknownEvidenceRef`；跨 relation 重复 → `ClaimAnalysisRelationConflict`；组内去重 + canonical 排序；**任一 candidate 无效 → 整次 0 写**。
+- **Service**（`service.py`）：防御性 domain check → 真实 PG 加载 Evidence（缺失/跨公司 → `ClaimAnalysisEvidenceCompanyMismatch`）→ build pack → `_call_model`（服务层 double-check schema）→ relevant=false 0-claims → resolve → 构造 drafts（analyst 身份确定性派生）→ `_check_kind_compatibility` 兜底 → `create_claim_batch`。
+- **原子批量持久化**（`app/services/claim_service.py` 的 `create_claim_batch`）：1..5 个 drafts；**all-drafts-validate-first**（开事务前全量加载证据 + policy 校验 + fingerprint 派生，任一失败 → 整批 0 写）；**单 transaction**（逐个 create_or_get + bulk insert links，任一 SQLAlchemyError → rollback + `ClaimPersistenceFailed`）；`ClaimBatchResult(created, replayed, fingerprints)`；`create_claim` 委托给 batch（单条语义不变）。
+- **错误分类**（`errors.py`，8 子类 + 稳定 code）：input / domain not ready / company mismatch / unknown ref / relation conflict / malformed output / model unavailable / domain-kind incompatible；错误消息不泄露 evidence 正文、prompt、key、raw response、DB URL。
+- **测试**：**49 项单元**（test_strategies 5 / test_claim_analysis_contracts 23 / test_evidence_pack 5 / test_ref_resolver 6 / test_prompt 10）+ **15 项集成**（test_claim_analysis_service.py：端到端 + analyst 身份落库 + domain→strategy + relevant=false 0-claims + unknown ref/cross-relation conflict 0 写 + company mismatch + domain not ready + critical 政策 + replay + malformed + relative_valuation 拒绝 + model unavailable + 最小投影 + Stage 5 表不存在）+ **4 项 batch 集成追加**（test_claim_service.py）。全程 0 真实 LLM / 0 Chroma / 0 LangGraph / 0 Report 表。全量 **1253 非集成 + 295 集成通过**。
+- **真实 DeepSeek smoke**（`app/cli/smoke_structured_claim_analysis.py`）：seed 真实 HTML 链 → E1..En 最小投影 → `DeepSeekClaimAnalysisModel.analyze` → schema 校验 → 打印摘要 → **清理全部 seed 数据（0 正式业务 Claim 残留）**。2026-08-09 实跑通过（model_id=deepseek:deepseek-v4-flash、relevant=true、1 条 fact claim supports E1）。
+- 决策记录：[docs/decisions/0025-structured-claim-analysis.md](decisions/0025-structured-claim-analysis.md)。
 
 ## 4C：Financial / Macro 专项分析（later）
 

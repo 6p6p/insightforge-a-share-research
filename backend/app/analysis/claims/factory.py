@@ -1,0 +1,21 @@
+"""LLM factory (stage 4B.1): Settings → ClaimAnalysisModel。
+
+- `deepseek` → `DeepSeekClaimAnalysisModel`（官方 langchain-deepseek
+  integration）；
+- 未知 provider → `UnsupportedLLMProviderError`；
+- 无 key 时**仍允许构造**（应用启动不调用工厂；调用时才由 provider 层报错）。
+"""
+
+from app.analysis.claims.adapters import DeepSeekClaimAnalysisModel
+from app.analysis.claims.contracts import ClaimAnalysisModel
+from app.core.config import Settings
+from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
+from app.llm.errors import UnsupportedLLMProviderError
+
+
+def create_claim_analysis_model(settings: Settings) -> ClaimAnalysisModel:
+    """根据 Settings.llm_provider 构造 ClaimAnalysisModel。"""
+    provider = (settings.llm_provider or "").strip().lower()
+    if provider == LLM_PROVIDER_DEEPSEEK:
+        return DeepSeekClaimAnalysisModel(settings)
+    raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")

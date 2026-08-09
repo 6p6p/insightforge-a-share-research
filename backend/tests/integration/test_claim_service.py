@@ -41,6 +41,7 @@ from app.claims.contracts import (
 )
 from app.claims.errors import (
     ClaimCriticalEvidenceInsufficient,
+    ClaimDraftError,
     ClaimEvidenceCompanyMismatch,
     ClaimEvidenceInsufficient,
     ClaimIntegrityError,
@@ -547,6 +548,59 @@ async def test_analyst_version_change_creates_new_claim(env) -> None:
     )
     assert a.claim_id != b.claim_id
     assert await _claim_count(env["sessionmaker"]) == 2
+
+
+# ---------------------------------------------------------------- create_claim_batch
+
+
+async def test_create_claim_batch_multiple_claims(env) -> None:
+    a = await _seed_document_card(env, statement="支持A", source_url=_URL)
+    b = await _seed_document_card(env, statement="支持B", source_url=_URL_2)
+    drafts = [
+        _claim_draft(env, supports=[a["evidence_card_id"]], statement="观点A"),
+        _claim_draft(env, supports=[b["evidence_card_id"]], statement="观点B"),
+    ]
+    batch = await ClaimService(env["sessionmaker"]).create_claim_batch(drafts)
+    assert len(batch.claim_ids) == 2
+    assert len(batch.created) == 2
+    assert len(batch.replayed) == 0
+    assert await _claim_count(env["sessionmaker"]) == 2
+    for claim_id in batch.claim_ids:
+        links = await _link_rows(env["sessionmaker"], claim_id)
+        assert len(links) == 1
+        assert links[0][1] == "supports"
+
+
+async def test_create_claim_batch_rejects_out_of_range(env) -> None:
+    doc = await _seed_document_card(env)
+    draft = _claim_draft(env, supports=[doc["evidence_card_id"]])
+    service = ClaimService(env["sessionmaker"])
+    with pytest.raises(ClaimDraftError):
+        await service.create_claim_batch([])
+    with pytest.raises(ClaimDraftError):
+        await service.create_claim_batch([draft] * 6)
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_create_claim_batch_all_or_nothing_on_policy_failure(env) -> None:
+    a = await _seed_document_card(env, statement="支持A", source_url=_URL)
+    good = _claim_draft(env, supports=[a["evidence_card_id"]], statement="观点A")
+    bad = _claim_draft(env, supports=[], statement="无证据观点")  # no supports
+    with pytest.raises(ClaimEvidenceInsufficient):
+        await ClaimService(env["sessionmaker"]).create_claim_batch([good, bad])
+    # all-drafts-validate-first：good 也未写入 → 0 写（无 partial writes）。
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_create_claim_batch_replays_existing_claim(env) -> None:
+    doc = await _seed_document_card(env)
+    draft = _claim_draft(env, supports=[doc["evidence_card_id"]])
+    first = await ClaimService(env["sessionmaker"]).create_claim_batch([draft])
+    second = await ClaimService(env["sessionmaker"]).create_claim_batch([draft])
+    assert first.claim_ids == second.claim_ids
+    assert len(second.replayed) == 1
+    assert len(second.created) == 0
+    assert await _claim_count(env["sessionmaker"]) == 1
 
 
 # ---------------------------------------------------------------- integrity
