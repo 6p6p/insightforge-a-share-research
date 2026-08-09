@@ -1,0 +1,270 @@
+"""Structured financial analysis service (stage 4B.2C.2): Calculation Pack → LLM → Claim。
+
+流程（10 步）：
+1. 防御性 request 校验（构造已校验，服务层再兜底）；
+2. 短 DB session：加载全部 Calculation（FinancialCalculationService.
+   verify_calculation_integrity 逐条校验：缺失 → CalculationNotFound、company
+   != request → CompanyMismatch、重放损坏 → Corrupted）+ 加载 inputs →
+   Observations（company 一致）+ 加载 additional Evidence（存在 + company 一致）；
+3. 关闭 DB session（**LLM 调用期间不持有 DB transaction / connection**）；
+4. 构造 C/E alias（Calculation Pack + Evidence Pack）；
+5. 调 FinancialAnalysisModel.analyze → FinancialAnalysisDecision（provider 失败
+   → ModelUnavailable；输出无法解析 → MalformedOutput）；
+6. 防御性 double-check（模型可能返回 raw dict，再做一次 schema 校验）；
+7. numeric-literal guard（任一 Claim statement 含数字/百分比 →
+   FinancialAnalysisNumericLiteralForbidden，整次失败 0 写；**不自动删数字 /
+   不改写 / 不让第二个 LLM 修正**）；
+8. C/E ref resolution（未知 C/E → UnknownRef；跨 relation → RelationConflict；
+   全部 candidate 先完成，任一失败 → 整次 0 写）；
+9. 构造全部 FinancialClaimDraft（v3；固定 analysis_domain=financial、
+   analyst_name=FINANCIAL_ANALYST_NAME、analyst_version=1、
+   analyst_model_id=model.model_id）+ claim_kind policy；
+10. FinancialClaimService.create_claim_batch（1..3 drafts，单 transaction）→
+    FinancialAnalysisResult（relevant / claim_ids ordered / created_count /
+    replayed_count / reason_code）。
+
+**不创建 Report / DraftSection / ReviewIssue**；不接 LangGraph 分析节点；
+不调用 Retrieval / Chroma / RawArtifact / tools / web search。Financial Analyst
+不计算任何财务指标、不修改公式结果、不做宏观因果 / 估值。
+"""
+
+from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.analysis.claims.contracts import EvidencePack
+from app.analysis.claims.evidence_pack import EvidencePackSource
+from app.analysis.financial.contracts import (
+    _ALLOWED_KINDS_FINANCIAL_ANALYST,
+    FINANCIAL_ANALYST_FOCUS,
+    FINANCIAL_ANALYST_NAME,
+    FINANCIAL_ANALYST_VERSION,
+    CalculationPack,
+    FinancialAnalysisContext,
+    FinancialAnalysisDecision,
+    FinancialAnalysisModel,
+    FinancialAnalysisRequest,
+    FinancialAnalysisResult,
+)
+from app.analysis.financial.errors import (
+    FinancialAnalysisCalculationCompanyMismatch,
+    FinancialAnalysisCalculationCorrupted,
+    FinancialAnalysisCalculationNotFound,
+    FinancialAnalysisClaimKindPolicy,
+    FinancialAnalysisEvidenceCompanyMismatch,
+    FinancialAnalysisInputError,
+    FinancialAnalysisMalformedOutput,
+)
+from app.analysis.financial.packs import (
+    CalculationPackSource,
+    InputSummarySource,
+    ResolvedFinancialClaim,
+    assert_statement_has_no_numeric_literals,
+    build_calculation_pack,
+    build_evidence_pack_allowing_empty,
+    resolve_decision_refs,
+)
+from app.claims.financial_contracts import FinancialClaimDraft
+from app.db.models.evidence_card import EvidenceCardModel
+from app.financial.calculations.errors import FinancialCalculationError
+from app.financial.calculations.service import FinancialCalculationService
+from app.repositories.financial_calculation_input_repository import (
+    FinancialCalculationInputRepository,
+)
+from app.repositories.financial_metric_observation_repository import (
+    FinancialMetricObservationRepository,
+)
+from app.services.financial_claim_service import FinancialClaimService
+
+
+class FinancialAnalysisService:
+    def __init__(self, sessionmaker: async_sessionmaker, model: FinancialAnalysisModel) -> None:
+        self._sessionmaker = sessionmaker
+        self._model = model
+
+    async def analyze(self, request: FinancialAnalysisRequest) -> FinancialAnalysisResult:
+        # 1. 防御性 request 校验（构造已校验，服务层再兜底）。
+        self._check_request(request)
+
+        # 2. 短 DB session：加载并校验全部 Calculation + additional Evidence
+        #    （任一 missing / company mismatch / corruption → 稳定错误，不调用 LLM）。
+        calculation_sources = await self._load_calculation_sources(request)
+        evidence_sources = await self._load_evidence_sources(request)
+
+        # 3. DB session 已关闭（上面的 context manager 退出）；构造 C/E alias。
+        calculation_pack = build_calculation_pack(calculation_sources)
+        evidence_pack = build_evidence_pack_allowing_empty(evidence_sources)
+
+        # 4-5. 调模型（结构化决策；LLM 调用期间不持有 DB transaction）。
+        context = FinancialAnalysisContext(
+            research_question=request.research_question,
+            strategy=FINANCIAL_ANALYST_FOCUS,
+        )
+        decision = await self._call_model(context, calculation_pack, evidence_pack)
+
+        # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
+        if not decision.relevant:
+            return FinancialAnalysisResult(
+                relevant=False,
+                claim_ids=[],
+                created_count=0,
+                replayed_count=0,
+                reason_code=decision.reason_code,
+            )
+
+        # 7. numeric-literal guard（任一 Claim 含数字/百分比 → 整次失败 0 写；
+        #    不自动删数字 / 不改写 / 不让第二个 LLM 修正）。
+        for candidate in decision.claims:
+            assert_statement_has_no_numeric_literals(candidate.statement)
+
+        # 8. C/E ref resolution（全部 candidate 先完成，任一失败 → 整次 0 写）。
+        resolved = resolve_decision_refs(decision, calculation_pack, evidence_pack)
+
+        # 9. 构造全部 FinancialClaimDraft(v3) + claim_kind policy。
+        drafts = self._build_drafts(request, resolved)
+        self._check_kind_policy(drafts)
+
+        # 10. 原子持久化（create_claim_batch：全部 draft 先 validate，单 transaction）。
+        batch = await FinancialClaimService(self._sessionmaker).create_claim_batch(drafts)
+        return FinancialAnalysisResult(
+            relevant=True,
+            claim_ids=list(batch.claim_ids),
+            created_count=len(batch.created),
+            replayed_count=len(batch.replayed),
+            reason_code=None,
+        )
+
+    # ------------------------------------------------------------------ 内部
+
+    @staticmethod
+    def _check_request(request: FinancialAnalysisRequest) -> None:
+        # 构造时已做校验；此处仅防御性确认关键不变量（避免绕过 dataclass）。
+        if not request.research_question.strip() or not request.calculation_ids:
+            raise FinancialAnalysisInputError("invalid financial analysis request")
+
+    async def _load_calculation_sources(
+        self, request: FinancialAnalysisRequest
+    ) -> list[CalculationPackSource]:
+        """短 DB session 加载并校验全部 Calculation（不调用 LLM 时先验证上游）。
+
+        每个 Calculation 走 FinancialCalculationService.verify_calculation_integrity
+        （missing → None、重放损坏 → FinancialCalculationError）；company !=
+        request → CompanyMismatch；再加载 inputs → Observations（company 一致）。
+        """
+        async with self._sessionmaker() as session:
+            calc_svc = FinancialCalculationService(self._sessionmaker)
+            input_repo = FinancialCalculationInputRepository(session)
+            obs_repo = FinancialMetricObservationRepository(session)
+            sources: list[CalculationPackSource] = []
+            for calc_id in request.calculation_ids:
+                try:
+                    calc = await calc_svc.verify_calculation_integrity(session, calc_id)
+                except FinancialCalculationError as exc:
+                    raise FinancialAnalysisCalculationCorrupted() from exc
+                if calc is None:
+                    raise FinancialAnalysisCalculationNotFound()
+                if calc.company_id != request.company_id:
+                    raise FinancialAnalysisCalculationCompanyMismatch()
+                rows = await input_repo.get_by_calculation_id(calc_id)
+                inputs: list[InputSummarySource] = []
+                for row in rows:
+                    obs = await obs_repo.get_by_id(row.metric_observation_id)
+                    if obs is None or obs.company_id != request.company_id:
+                        raise FinancialAnalysisCalculationCorrupted(
+                            "financial analysis calculation input observation corrupted"
+                        )
+                    inputs.append(InputSummarySource.from_model(row.input_role, obs))
+                sources.append(CalculationPackSource.from_model(calc, inputs))
+            return sources
+
+    async def _load_evidence_sources(
+        self, request: FinancialAnalysisRequest
+    ) -> list[EvidencePackSource]:
+        """加载 additional Evidence（document_chunk / macro_observation 皆可）；
+        缺失 / 跨公司 → CompanyMismatch。空 → []。"""
+        if not request.additional_evidence_ids:
+            return []
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                select(EvidenceCardModel).where(
+                    EvidenceCardModel.evidence_card_id.in_(request.additional_evidence_ids)
+                )
+            )
+            rows = list(result.scalars().all())
+        by_id = {card.evidence_card_id: card for card in rows}
+        if len(by_id) != len(request.additional_evidence_ids):
+            raise FinancialAnalysisEvidenceCompanyMismatch()
+        for card in by_id.values():
+            if card.company_id != request.company_id:
+                raise FinancialAnalysisEvidenceCompanyMismatch()
+        return [
+            EvidencePackSource.from_model(by_id[card_id])
+            for card_id in request.additional_evidence_ids
+        ]
+
+    async def _call_model(
+        self,
+        context: FinancialAnalysisContext,
+        calculation_pack: CalculationPack,
+        evidence_pack: EvidencePack,
+    ) -> FinancialAnalysisDecision:
+        """调用模型并归一到 FinancialAnalysisDecision（防御性 double-check）。
+
+        模型层负责解析；这里再对返回结果做一次 schema 校验（provider 可能
+        返回 raw dict / 已构造对象），ValidationError → MalformedOutput。
+        """
+        raw = await self._model.analyze(context, calculation_pack, evidence_pack)
+        if isinstance(raw, FinancialAnalysisDecision):
+            return raw
+        try:
+            return FinancialAnalysisDecision.model_validate(raw)
+        except ValidationError as exc:
+            raise FinancialAnalysisMalformedOutput() from exc
+
+    def _build_drafts(
+        self,
+        request: FinancialAnalysisRequest,
+        resolved: list[ResolvedFinancialClaim],
+    ) -> list[FinancialClaimDraft]:
+        """把解析后的 Claim 候选构造为 FinancialClaimDraft（v3；analyst 身份固定）。
+
+        FinancialClaimDraft 构造时已做去重 + canonical 排序（幂等）。
+        """
+        drafts: list[FinancialClaimDraft] = []
+        for claim in resolved:
+            drafts.append(
+                FinancialClaimDraft(
+                    company_id=request.company_id,
+                    research_question=request.research_question,
+                    statement=claim.statement,
+                    confidence=claim.confidence,
+                    importance=claim.importance,
+                    claim_kind=claim.claim_kind,
+                    support_calculation_ids=list(claim.supports_calculations),
+                    contradict_calculation_ids=list(claim.contradicts_calculations),
+                    context_calculation_ids=list(claim.context_calculations),
+                    additional_support_evidence_ids=list(claim.additional_supports),
+                    additional_contradict_evidence_ids=list(claim.additional_contradicts),
+                    additional_context_evidence_ids=list(claim.additional_context),
+                    analyst_name=FINANCIAL_ANALYST_NAME,
+                    analyst_version=FINANCIAL_ANALYST_VERSION,
+                    analyst_model_id=self._model.model_id,
+                )
+            )
+        return drafts
+
+    @staticmethod
+    def _check_kind_policy(drafts: list[FinancialClaimDraft]) -> None:
+        """claim_kind 防线：Financial Analyst 只允许 inference / risk。
+
+        FinancialClaimCandidate schema 已拒绝 fact / relative_valuation；此处对
+        最终 FinancialClaimDraft 再做一次兜底（即使绕过 Pydantic，fact 也会 →
+        FinancialAnalysisClaimKindPolicy）。FinancialClaimDraft 本身仍支持 fact
+        （更低层 domain contract，供确定性 producer 使用），本防线只作用于
+        Financial Analysis 路径。
+        """
+        for draft in drafts:
+            if draft.claim_kind not in _ALLOWED_KINDS_FINANCIAL_ANALYST:
+                raise FinancialAnalysisClaimKindPolicy(
+                    f"claim_kind {draft.claim_kind.value} incompatible with financial analysis"
+                )
