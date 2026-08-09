@@ -15,6 +15,7 @@
    - CHECK：analysis_domain / claim_kind / confidence / importance / relation 枚举白名单、claim_schema_version ≥ 1、analyst_version ≥ 1、research_question / statement / analyst_name `btrim <> ''`、research_question_sha256 / claim_fingerprint `^[0-9a-f]{64}$`。
    - 索引：claims.company_id / created_at / research_question_sha256；claim_evidence_links.evidence_card_id / relation。
    - **0018 downgrade guard**：存在任何 Claim / Link 数据时拒绝降级（不静默丢弃 Claim 证据链）；无数据时允许回到 0017（isolated 临时 PG 集成测试覆盖两条路径，错误消息 `"claims/claim_evidence_links rows present"`）。
+   - **Migration 0019 closeout（阶段 4A 收尾）**：把"同一 EvidenceCard 对同一 Claim 只能有一种 relation（supports / contradicts / context 中恰好一种）"下沉到数据库层强制——新增 `UNIQUE(claim_id, evidence_card_id)`（`uq_claim_evidence_links_claim_evidence`）；**不修改已落地的 0018**。此前该不变量只在 ClaimDraft 构造时约束，DB 层允许直接 SQL 写入互相矛盾的 relation；0019 之后由数据库直接拒绝。**0019 downgrade guard**：`claim_evidence_links` 有行时拒绝降级（删除约束会静默允许跨 relation 重复、改变 v1 语义，错误消息 `"claim_evidence_links rows present"`）；无数据时才允许回到 0018。
 
 3. **领域契约（`app/claims/contracts.py`）**。
    - `CLAIM_SCHEMA_VERSION = 1`（冻结）。
@@ -41,8 +42,9 @@
 
 6. **测试**。
    - 单元（`tests/claims/test_claim_contracts.py`，24 项）：枚举白名单（claim_kind **不含** prediction/buy/sell/recommendation/price_target/return_forecast）、draft 输入防御（blank question/statement/analyst_name、analyst_version 0/负数/非 int、str 非 StrEnum、model_id 空白→None）、evidence id 去重 + canonical 排序 + 顺序无关、跨 relation 重复拒绝、supports 契约层允许空（"至少 1 个 supports"由 ClaimService 强制）、fingerprint 确定性 / statement/relation/confidence/analyst version/company 敏感性 / 不含 claim_id/created_at / 64-hex、question hash 与 Evidence 同算法。
-   - 集成（`tests/integration/test_claim_service.py`，25 项，真实 PG + 真实 SourceParsingService/ChunkingService/MacroEvidenceService，零 Chroma/LLM/embedding）：document / macro / mixed relations 持久化；company mismatch / missing / no supports / critical without eligible / critical with eligible / macro 拒绝 / valid macro structure；supports-contradicts-context links；fingerprint 确定性 / replay / 并发→1 / statement change→新 Claim / evidence relation change→新 Claim / analyst version change→新 Claim；replay corruption（link 篡改、claim row 篡改）→ `ClaimIntegrityError`；无 update API；**EvidenceCard 行永不修改**；document + macro E2E provenance SQL trace；精确阶段边界（claims 表允许存在、Stage-5 report 表不存在）。
+   - 集成（`tests/integration/test_claim_service.py`，26 项，真实 PG + 真实 SourceParsingService/ChunkingService/MacroEvidenceService，零 Chroma/LLM/embedding）：document / macro / mixed relations 持久化；company mismatch / missing / no supports / critical without eligible / critical with eligible / macro 拒绝 / valid macro structure；supports-contradicts-context links；fingerprint 确定性 / replay / 并发→1 / statement change→新 Claim / evidence relation change→新 Claim / analyst version change→新 Claim；replay corruption（link 篡改、claim row 篡改）→ `ClaimIntegrityError`；无 update API；**EvidenceCard 行永不修改**；document + macro E2E provenance SQL trace；精确阶段边界（claims 表允许存在、Stage-5 report 表不存在）；**0019 跨 relation 重复由数据库拒绝**（同 claim + 同 evidence 已有 supports 后直接 SQL 插入 contradicts → IntegrityError）。
    - migration 0018 guard（`tests/integration/test_migration_0018_downgrade_guard.py`，2 项，isolated 临时 PG）：A 升级 0018 → 无数据降级 0017 成功、claims 表删除；B 升级 0018 → 真实服务链 seed Claim（SourceRecord → Parsing → Chunking → EvidenceCardService → ClaimService）→ 降级被 RuntimeError 拒绝、版本保持 0018、Claim + link 完整保留。
+   - migration 0019 guard（`tests/integration/test_migration_0019_downgrade_guard.py`，3 项，isolated 临时 PG）：A 升级 0019 → 约束存在 → 无数据降级 0018 成功、约束移除；B 升级 0019 → seed Claim+link → 降级被 RuntimeError 拒绝、版本保持 0019；C **Gate 0A 核心**：同 claim + 同 evidence 已存在 supports 行后，直接 SQL 插入 contradicts 必须被数据库 UNIQUE 拒绝、不残留 contradicts 行、原 supports 行保留。
    - 全程 0 LLM / 0 Chroma query / 0 LangGraph / 0 Claim Agent / 0 Report 表。
 
 7. **阶段边界（精确命名）**：Stage 4A 允许 `claims` / `claim_evidence_links` 存在；`report_outlines` / `report_sections` / `reports` / `review_issues` **不得存在**。既有 Stage-3 边界测试已改用精确的 Stage-5 表名（`test_zero_chroma_and_no_stage5_report_tables` / `test_no_stage5_report_tables`），避免"Stage 4 tables must not exist"这类随进度过期的名字。
@@ -53,7 +55,7 @@
 - **Claim 与 Evidence 的关系显式持久化**：supports / contradicts / context 三个 relation 由 `claim_evidence_links` 承载，不在 evidence_cards 上增加语义列；EvidenceCard 保持"来源事实"单一职责。
 - **修改观点 = 新 Claim**：fingerprint 只由语义输入决定，statement / evidence relations / confidence / analyst version 任一变化 → 新指纹 → 新行，旧行保留；无 update API，历史观点不可变。
 - **来源政策在持久化层强制执行**：critical 只认 `critical_claim_eligible_snapshot` 的真实快照，macro Claim 必须同时具备宏观支持与公司文档传导链证据；replay 时政策不满足 = 数据损坏，不静默放过。
-- **为 4B（Claim 语义抽取 / Analyst 接入）提供稳定输入形态**：Analyst 只需把"判断"作为语义输入交给 create_claim，provenance / 政策 / fingerprint / persistence 全部由确定性代码负责。
+- **为 4B（Structured Analysts）提供稳定输入形态**：Analyst 只需把"判断"作为语义输入交给 create_claim，provenance / 政策 / fingerprint / persistence 全部由确定性代码负责；4B.1 在此基础上以 `create_claim_batch` 原子登记 1..5 个 Claim + links。
 
 ## 明确不做（边界）
 

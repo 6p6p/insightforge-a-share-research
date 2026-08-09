@@ -6,6 +6,8 @@ supports_claim / contradicts_claim。
 
 - PK (claim_id, evidence_card_id, relation)：同一 Claim 对同一 Evidence 每个
   relation 只能一条（v1 禁止同一卡跨 relation 重复，ClaimDraft 构造时拒绝）；
+- UNIQUE(claim_id, evidence_card_id)（migration 0019）：同 claim + 同 evidence
+  的跨 relation 重复由数据库层强制拒绝，不再只依赖应用层约束；
 - claim_id FK CASCADE（删 Claim 删 links）；
 - evidence_card_id FK RESTRICT（证据存在期间 link 不静默消失）。
 """
@@ -19,6 +21,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -33,6 +36,11 @@ class ClaimEvidenceLinkModel(Base):
     __tablename__ = "claim_evidence_links"
     __table_args__ = (
         CheckConstraint(_RELATION_CHECK, name="ck_claim_evidence_links_relation"),
+        UniqueConstraint(
+            "claim_id",
+            "evidence_card_id",
+            name="uq_claim_evidence_links_claim_evidence",
+        ),
         Index("ix_claim_evidence_links_evidence_card_id", "evidence_card_id"),
         Index("ix_claim_evidence_links_relation", "relation"),
     )

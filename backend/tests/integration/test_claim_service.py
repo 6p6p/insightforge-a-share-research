@@ -28,6 +28,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.claims.contracts import (
     CLAIM_SCHEMA_VERSION,
@@ -435,6 +436,38 @@ async def test_macro_valid_transmission_structure_accepted(env, monkeypatch) -> 
     )
     assert result.replayed is False
     assert await _claim_count(env["sessionmaker"]) == 1
+
+
+async def test_cross_relation_duplicate_rejected_by_database(env) -> None:
+    """DB 层 UNIQUE(claim_id, evidence_card_id)（migration 0019）强制：
+    同 claim + 同 evidence 已存在 supports 后，直接 SQL 插入 contradicts 被拒。
+    """
+    doc = await _seed_document_card(env)
+    result = await _create_claim(env, _claim_draft(env, supports=[doc["evidence_card_id"]]))
+    with pytest.raises(IntegrityError):
+        async with env["sessionmaker"]() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO claim_evidence_links (claim_id, evidence_card_id, relation) "
+                    "VALUES (CAST(:c AS uuid), CAST(:e AS uuid), 'contradicts')"
+                ).bindparams(c=result.claim_id, e=doc["evidence_card_id"])
+            )
+            await session.commit()
+    # 拒绝后不残留 contradicts 行，原 supports 行保留。
+    async with env["sessionmaker"]() as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT relation FROM claim_evidence_links "
+                        "WHERE claim_id = :c AND evidence_card_id = :e"
+                    ).bindparams(c=result.claim_id, e=doc["evidence_card_id"])
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == ["supports"]
 
 
 # ---------------------------------------------------------------- replay / 并发
