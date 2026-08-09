@@ -62,7 +62,7 @@
 
 ### 3C.2：Structured Evidence Extractor（completed）
 
-- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required（不开放 Evidence HTTP 端点）；real_llm_smoke = pending_environment（本环境无 LLM 凭据，一次性人工 smoke 未执行，不阻塞提交）**。
+- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required（不开放 Evidence HTTP 端点）；real_evidence_extractor_smoke = completed（2026-08-09，真实 DeepSeek V4 Flash smoke 走生产路径通过：provider=deepseek、request_model=deepseek-v4-flash、thinking 显式 disabled、relevant=true、1 item、quote 精确解析成功；一次性受控 smoke，见 ADR-0022 §13）**。
 - 把 `RetrievalHit + research question` 经 LLM 结构化语义抽取接入 `EvidenceCardService.create_card(draft)`。角色边界：**Extractor 只做语义**（相关性、原子 evidence_statement、evidence_type、low/medium/high confidence、逐字 quote_text）；确定性代码负责 quote_start/end、locator、provenance IDs、authority tier、critical eligibility、fingerprint、Claim、投资建议；Extractor 不调用 RetrievalService / 不重新检索 / 不读 Chroma。
 - **契约**（`app/evidence/extractor/`）：`EVIDENCE_EXTRACTOR_NAME="structured_llm"`、`EVIDENCE_EXTRACTOR_VERSION=1`、`MAX_EXTRACTION_ITEMS_PER_HIT=3`；`EvidenceExtractionItem` + `EvidenceExtractionDecision`（relevant=false→items 空；true→1..3 且 reason_code=None；无完全重复 item；无 reasoning/CoT 字段）。
 - **LLM 抽象**：最小 `EvidenceExtractionModel` Protocol（model_id + async extract）；自动测试用 `FakeEvidenceExtractionModel`；可选 `LangChainStructuredOutputAdapter`（lazy import，langchain 非必需依赖；model_id 不伪造 revision）；temperature=0，禁止 tools/web search。
@@ -85,9 +85,13 @@
 - **测试**：30 项宏契约单元 + 12 项宏证据集成（真实 PG + MockTransport WorldBank，零 Chroma/LLM）+ 2 项 migration 0017 downgrade guard（isolated 临时 PG）。
 - 决策记录：[docs/decisions/0023-generic-evidence-origin-macro-evidence.md](decisions/0023-generic-evidence-origin-macro-evidence.md)。
 
-### 3C.3：Evidence 服务收口（next）
+### 3C.3：Evidence 服务收口 + Stage 3 Final Acceptance（completed）
 
-- 3C.3A 之后的收口与 E2E 验收（文档、全量验证；3C.3A 已完成对应文档与全量验证）。
+- **状态（2026-08-09）：Stage 3 Final Acceptance completed**。本轮收口包含：DeepSeek V4 Flash 运行时迁移（Gate A/B）、真实 LLM smoke（Gate D，completed）、HTML/PDF/Macro 三链 E2E（Gate E）、acceptance 不变量验证（Gate F）、全量验证（Gate G）。
+- 迁移：DeepSeek 官方已停止 legacy model names（deepseek-chat / deepseek-reasoner）；当前统一 `LLM_PROVIDER=deepseek`、`LLM_MODEL=deepseek-v4-flash`（model_id = `deepseek:deepseek-v4-flash`，不伪造 revision）。生产 adapter 显式 `extra_body={"thinking": {"type": "disabled"}}` 关闭 thinking（V4 Flash 默认 thinking；`temperature=0` 不等于关闭；`thinking` 非标准 OpenAI 参数按 langchain-deepseek==1.1.0 公开接口经 `extra_body` 传递）。
+- 真实 LLM smoke（恰好 1 次，生产路径）：provider=deepseek、request_model=deepseek-v4-flash、thinking disabled、relevant=true、item_count=1、`resolve_exact_quote` 成功；**不记录** API key / 完整 prompt / reasoning_content / provider raw response；认证失败立即停止不重试、临时故障最多额外重试 1 次。
+- 全量验证：pip check ✓；ruff check / format --check ✓；1180 非集成 + 242 集成测试全部通过；Alembic current = 0017 (head)；`docker compose up -d --force-recreate backend` 后容器 healthy，`/health/live` 200、`/health/ready` 200（configuration/database/chroma/checkpoint/raw_storage 全 ok）；**LLM 不加入 /ready**。
+- Stage 3 完成单元：3A / 3B.1 / 3B.2 / 3C.1 / 3C.2 / 3C.2.1 / 3C.3A / Stage 3 Final Acceptance 全部 completed。**不开始 Stage 4（Claim）**。
 
 ### 3C 之后
 

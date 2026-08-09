@@ -42,7 +42,7 @@ def _draft(**overrides) -> MacroEvidenceDraft:
         evidence_statement=_STATEMENT,
         extractor_name="macro-extractor",
         extractor_version=1,
-        extractor_model_id="deepseek:deepseek-chat",
+        extractor_model_id="deepseek:deepseek-v4-flash",
         extractor_confidence=EvidenceConfidence.HIGH,
     )
     values.update(overrides)
@@ -87,7 +87,7 @@ def _fingerprint(**overrides) -> str:
         locator_refs=_locator(),
         extractor_name="macro-extractor",
         extractor_version=1,
-        extractor_model_id="deepseek:deepseek-chat",
+        extractor_model_id="deepseek:deepseek-v4-flash",
         extractor_confidence=EvidenceConfidence.HIGH.value,
     )
     values.update(overrides)

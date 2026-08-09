@@ -4,11 +4,37 @@
 Settings。真实调用（extract）不在自动测试范围（conftest 禁止真实外网）。
 """
 
+import asyncio
+from uuid import UUID
+
 import pytest
 
 from app.core.config import Settings
+from app.evidence.contracts import EvidenceConfidence, EvidenceType
 from app.evidence.extractor.adapters import DeepSeekEvidenceExtractionModel
+from app.evidence.extractor.contracts import (
+    EvidenceExtractionDecision,
+    EvidenceExtractionItem,
+)
 from app.llm.factory import create_evidence_extraction_model, has_llm_credentials
+
+_CHUNK_ID = UUID("11111111-1111-1111-1111-111111111111")
+_CHUNK_SET_ID = UUID("22222222-2222-2222-2222-222222222222")
+_PARSED_SOURCE_ID = UUID("33333333-3333-3333-3333-333333333333")
+_SOURCE_ID = UUID("44444444-4444-4444-4444-444444444444")
+_COMPANY_ID = UUID("55555555-5555-5555-5555-555555555555")
+
+_FAKE_DECISION = EvidenceExtractionDecision(
+    relevant=True,
+    items=[
+        EvidenceExtractionItem(
+            evidence_statement="公司2025年营业收入为100亿元，同比增长12%。",
+            evidence_type=EvidenceType.METRIC,
+            quote_text="公司2025年营业收入为100亿元，同比增长12%。",
+            confidence=EvidenceConfidence.HIGH,
+        )
+    ],
+)
 
 
 def _settings(**overrides) -> Settings:
@@ -25,7 +51,7 @@ def _settings(**overrides) -> Settings:
 def test_default_llm_settings() -> None:
     s = _settings()
     assert s.llm_provider == "deepseek"
-    assert s.llm_model == "deepseek-chat"
+    assert s.llm_model == "deepseek-v4-flash"
     assert s.llm_timeout_seconds == 60
     assert s.llm_max_retries == 1
     assert s.deepseek_api_key is None
@@ -60,7 +86,7 @@ def test_invalid_llm_max_retries_rejected() -> None:
 def test_factory_returns_deepseek_adapter() -> None:
     model = create_evidence_extraction_model(_settings())
     assert isinstance(model, DeepSeekEvidenceExtractionModel)
-    assert model.model_id == "deepseek:deepseek-chat"
+    assert model.model_id == "deepseek:deepseek-v4-flash"
 
 
 def test_factory_unsupported_provider() -> None:
@@ -80,7 +106,105 @@ def test_adapter_has_no_tools_or_web_search() -> None:
 def test_adapter_constructs_without_credentials() -> None:
     # 无 key 仍允许构造（应用启动不调用 factory / extract）。
     model = DeepSeekEvidenceExtractionModel(_settings())
-    assert model.model_id == "deepseek:deepseek-chat"
+    assert model.model_id == "deepseek:deepseek-v4-flash"
+
+
+def test_no_legacy_model_references() -> None:
+    """迁移 Gate：当前 runtime 不使用已停止的 legacy model names。"""
+    assert _settings().llm_model != "deepseek-chat"
+    assert _settings().llm_model != "deepseek-reasoner"
+    model = create_evidence_extraction_model(_settings())
+    assert "deepseek-chat" not in model.model_id
+    assert "deepseek-reasoner" not in model.model_id
+    assert model.model_id == "deepseek:deepseek-v4-flash"
+
+
+def test_production_adapter_explicitly_disables_thinking() -> None:
+    """生产 adapter 显式传 thinking disabled（不依赖 provider 默认行为）。
+
+    langchain-deepseek==1.1.0 公开接口：`extra_body` 是传递 provider 自定义
+    参数（thinking）的官方通道；`model_kwargs` 会把非 OpenAI 参数打进
+    top-level payload 造成 API 错误。测试直接复用 adapter 构造参数来验证
+    ChatDeepSeek 对象收到 `extra_body={"thinking": {"type": "disabled"}}`。
+    """
+    from langchain_deepseek import ChatDeepSeek  # 零网络：仅构造
+
+    s = _settings()
+    llm = ChatDeepSeek(
+        model=s.llm_model,
+        temperature=0.0,
+        timeout=s.llm_timeout_seconds,
+        max_retries=s.llm_max_retries,
+        # 本 langchain 版本在默认 api_base + 无 key 时会拒绝构造（不影响
+        # adapter 运行时行为：无 key 时 ValidationError 被映射为
+        # EvidenceExtractorUnavailable）。这里用假 key 只为过构造校验。
+        api_key="sk-test-not-real",
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    assert llm.model == "deepseek-v4-flash"
+    assert llm.extra_body == {"thinking": {"type": "disabled"}}
+    # temperature=0 不等于关闭 thinking：必须显式传 disabled。
+    assert llm.extra_body["thinking"]["type"] == "disabled"
+
+
+def test_adapter_extract_passes_thinking_disabled_and_model() -> None:
+    """真实调用路径：adapter.extract() 构造的 ChatDeepSeek 使用 deepseek-v4-flash
+    且显式传 thinking disabled。
+
+    用替身捕获 ChatDeepSeek 构造参数与 with_structured_output 链，不发起
+    任何真实网络请求。
+    """
+    import langchain_deepseek as lds
+
+    captured = {}
+
+    class _FakeStructured:
+        async def ainvoke(self, messages):
+            return _FAKE_DECISION
+
+    class _FakeChat:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def with_structured_output(self, schema):
+            return _FakeStructured()
+
+    original = lds.ChatDeepSeek
+    lds.ChatDeepSeek = _FakeChat
+    try:
+        from app.evidence.extractor.adapters import DeepSeekEvidenceExtractionModel
+        from app.rag.retrieval.contracts import RetrievalHit
+
+        model = DeepSeekEvidenceExtractionModel(_settings())
+        hit = RetrievalHit(
+            rank=1,
+            chunk_id=_CHUNK_ID,
+            chunk_set_id=_CHUNK_SET_ID,
+            parsed_source_id=_PARSED_SOURCE_ID,
+            source_id=_SOURCE_ID,
+            company_id=_COMPANY_ID,
+            text="公司2025年营业收入为100亿元，同比增长12%。",
+            distance=0.1,
+            provider_key="sse",
+            document_type="annual_report",
+            source_title="2025 年度报告",
+            source_url="https://example.com/2025.pdf",
+            published_at=None,
+            reporting_period_end=None,
+            authority_tier=1,
+            critical_claim_eligible=False,
+            chunk_ordinal=1,
+            locator_refs=[{"type": "pdf_page", "page_number": 1, "line_index": 1}],
+        )
+        asyncio.run(model.extract("公司2025年营业收入是多少？", hit))
+    finally:
+        lds.ChatDeepSeek = original
+
+    assert captured["model"] == "deepseek-v4-flash"
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    # 不依赖 provider 默认 thinking：显式 disabled 已传入。
+    assert captured["extra_body"]["thinking"]["type"] == "disabled"
+    assert captured["temperature"] == 0.0
 
 
 def test_has_llm_credentials() -> None:

@@ -409,7 +409,7 @@ async def _seed_macro_card(temp_url: str, raw_root: Path) -> str:
             evidence_statement="2024年中国总人口为14.10000004亿人。",
             extractor_name="macro-extractor",
             extractor_version=1,
-            extractor_model_id="deepseek:deepseek-chat",
+            extractor_model_id="deepseek:deepseek-v4-flash",
             extractor_confidence=EvidenceConfidence.HIGH,
         )
         card_result = await MacroEvidenceService(sessionmaker).create_macro_card(draft)

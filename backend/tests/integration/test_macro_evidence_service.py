@@ -235,7 +235,7 @@ def _draft(env: dict, chain: dict, **overrides) -> MacroEvidenceDraft:
         evidence_statement=_STATEMENT,
         extractor_name="macro-extractor",
         extractor_version=1,
-        extractor_model_id="deepseek:deepseek-chat",
+        extractor_model_id="deepseek:deepseek-v4-flash",
         extractor_confidence=EvidenceConfidence.HIGH,
     )
     values.update(overrides)
