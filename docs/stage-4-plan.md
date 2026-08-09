@@ -3,7 +3,7 @@
 > 阶段 4 目标：把 Stage 3 已确认的 Evidence 单元（EvidenceCard）进一步登记为**可追溯、可回放的 Claim 分析结论**，经结构化 Analyst（4B）、专项分析（4C）与综合（4D）推进；**Report 生成与 Agent Audit 属于 Stage 5**，不在 Stage 4 范围内。详细接口在对应子阶段冻结。
 > 顶层证据链：**Source → Evidence → Claim → Report → Audit**；但**开发阶段不与其混淆**——Stage 4 只能是：**4A Claim provenance / persistence → 4B Structured Analysts → 4C Financial/Macro specialized analysis → 4D Claim synthesis / conflict / evidence gaps → Stage 4 final acceptance**；Stage 5 才是：**ReportOutline / DraftSection / Report / Deterministic Check / Agent Audit / Retry / Human confirmation**。**不得写 4C=Report、4D=Audit，也不得写 Stage 4 = Claim → Report → Audit**。
 >
-> 总进度：**4A = completed**（含 0019 跨 relation 唯一性 closeout），**4B.1 = completed（Structured Analyst Foundation + Business / Event / Risk Claim Analysis）**，**4B = next（4B.2 Financial Analyst）**，**4C = later**，**4D = later**；**Stage 5 不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
+> 总进度：**4A = completed（Claim Foundation）**，**4B.1 = completed（Business / Event / Risk Claim Analysis）**，**4B.2A = completed（Financial Metric Observation Foundation）**，**4B.2B = next（Deterministic Financial Calculation）**，**4B.2C = later（Financial Analyst）**，**4C = later（Macro Context / Valuation）**，**4D = later（Claim Synthesis / Conflict / Evidence Gap）**；**Stage 5 = Report + Audit，不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
 
 ## 4A：Claim Provenance + Persistence Foundation（当前，completed）
 
@@ -34,8 +34,10 @@
 - **定位**：把"EvidenceCard 集合 + research question + analysis domain → 结构化 ClaimCandidate → 确定性 ref resolution → ClaimService 持久化"接入结构化 Analyst 层（LLM 只做判断与综合，不做 Retrieval / 搜索 / 直接写库）。
 - **子阶段**：
   - **4B.1（completed）Structured Analyst Foundation + Business / Event / Risk Claim Analysis**：见下节。
-  - **4B.2（next）= Financial Metric + Financial Analyst**：先有结构化 FinancialMetric、确定性财务计算、期间 / 口径 / 单位、同比 / 环比 / 比率结果，LLM 才解释结果；**Financial Analyst 不得自行成为关键财务计算器**。
-- 不提前实现 4C / 4D / Stage 5。
+  - **4B.2A（completed）Financial Metric Observation Foundation**：把来源于真实财务 Evidence 的**原始财务数值**登记为 `FinancialMetricObservation`（Document Evidence → Observation），**不计算**同比 / 环比 / margin / ratio、**不调用 LLM**、不自动从 PDF 表格猜财务数字。见下节。
+  - **4B.2B（next）Deterministic Financial Calculation**：先有结构化 FinancialMetric、确定性财务计算（期间 / 口径 / 单位、同比 / 环比 / 比率结果），LLM 才解释结果；**Financial Analyst 不得自行成为关键财务计算器**。
+  - **4B.2C（later）Financial Analyst**：LLM 基于 4B.2A/4B.2B 的确定性数值结果做解释与 Claim 化。
+- **Financial 归属 4B.2**（4B.2A/4B.2B/4B.2C）；**4C 只保留 Macro Context / Valuation**，不重复 Financial。不提前实现 4C / 4D / Stage 5。
 
 ### 4B.1 Structured Analyst Foundation + Business / Event / Risk Claim Analysis（completed）
 
@@ -54,9 +56,24 @@
 - **真实 DeepSeek smoke**（`app/cli/smoke_structured_claim_analysis.py`）：seed 真实 HTML 链 → E1..En 最小投影 → `DeepSeekClaimAnalysisModel.analyze` → schema 校验 → 打印摘要 → **清理全部 seed 数据（0 正式业务 Claim 残留）**。2026-08-09 实跑通过（model_id=deepseek:deepseek-v4-flash、relevant=true、1 条 fact claim supports E1）。
 - 决策记录：[docs/decisions/0025-structured-claim-analysis.md](decisions/0025-structured-claim-analysis.md)。
 
-## 4C：Financial / Macro 专项分析（later）
+### 4B.2A Financial Metric Observation Foundation（completed）
 
-- **状态：未开始（later）**。Financial / Macro 专项 Analyst（如 Macro Context Analyst）在 4B 之后推进；**本阶段不是 Report 生成**。
+- **状态（2026-08-09）：implementation completed / automated tests completed / live acceptance not required（不开放 Financial Metric HTTP 端点）**。把来源于真实财务 Evidence 的**原始财务数值**登记为 `FinancialMetricObservation`（Document Evidence → Observation），**不计算**同比 / 环比 / margin / ratio、**不调用 LLM**、不自动从 PDF 表格猜财务数字。角色边界：**代码登记数值，LLM 不参与数值输入**（后续 4B.2B/4B.2C 只能基于这些确定性 Observation）。
+- **Migration 0020**（`alembic current` = 0020 head）：`financial_metric_observations` 表（metric_observation_id PK、company_id FK RESTRICT、source_evidence_card_id FK RESTRICT、metric_code、statement_scope、period_start NULL、period_end、period_kind、source_value_text、raw_value Numeric(38,12)、raw_unit、normalized_value_cny Numeric(38,12)、metric_schema_version、metric_fingerprint CHAR(64) UNIQUE、created_at）+ 8 CHECK + 4 索引（company_id / source_evidence_card_id / metric_code / period_end）。**downgrade guard**：有行拒绝降级（不静默丢弃已登记数值事实）、空表允许（isolated 临时 PG 验证两条路径）。
+- **Metric v1 taxonomy**（`app/financial/contracts.py`）：`FINANCIAL_METRIC_SCHEMA_VERSION = 1`、**11 个 metric_code**（revenue / operating_cost / operating_profit / profit_before_tax / net_profit / net_profit_parent / net_profit_parent_excl_nonrecurring / operating_cash_flow_net / total_assets / total_liabilities / equity_parent）；`statement_scope`（consolidated / parent）；`period_kind`（duration / instant）；`raw_unit` 4 档（yuan / thousand_yuan / ten_thousand_yuan / hundred_million_yuan）；**货币 v1 只支持 CNY**。metric_code → statement family 用确定性 mapping，**caller 不传 statement_type**。
+- **Period 规则**：balance sheet → `period_kind=instant`、`period_start=NULL`；income / cash-flow → `period_kind=duration`、`period_start NOT NULL 且 <= period_end`；违反 → `FinancialMetricPeriodError`（DB CHECK 再兜底）。
+- **Source value exactness**：`source_value_text` 必须是 `quote_text` 的 **exact substring**（`count`）；0 次 → `FinancialMetricValueNotFound`、>1 次 → `FinancialMetricValueAmbiguous`；**不 fuzzy / 不 normalize / 不自动纠错**。
+- **确定性数字解析**（`app/financial/number_parser.py`）：`Decimal` 全程、**零 float**；严格语法（千分位 / 小数 / 符号 / 括号负号 / 首尾空白），拒绝科学计数法 / 百分号 / 中文数字 / 约数 / 带单位 / 畸形千分位等；`normalize_value_cny` = ×1 / ×1000 / ×10000 / ×100000000。
+- **Fingerprint / replay**：`compute_metric_fingerprint` = canonical JSON + SHA-256（含 schema_version / company / source_evidence / metric_code / scope / period / source_value_text / raw_value / raw_unit / normalized_value_cny；**不含 metric_observation_id / created_at**）；同一完全相同 observation → replay 同一行；value / unit / period / metric code / scope / source evidence / company 任一变化 → 新行，旧行保留；**无 update API**。Replay 逐 13 项派生值比对，损坏 → `FinancialMetricIntegrityError`，**不自动 repair**。
+- **Service**（`app/financial/service.py` + `app/repositories/financial_metric_observation_repository.py`）：构造函数只持有 sessionmaker；`create_observation(draft)` 短 DB session 校验 EvidenceCard（缺失 / origin != document_chunk / evidence_type != metric / company 不一致 → `FinancialMetricEvidenceMismatch`）→ 纯函数派生 → `create_or_get`（PG `ON CONFLICT(metric_fingerprint)` 并发幂等）→ replay 校验；`FinancialMetricIntegrityError → rollback + raise`；`SQLAlchemyError → rollback + FinancialMetricPersistenceFailed`。
+- **Provenance**：Observation → EvidenceCard → DocumentChunk → ChunkSet → ParsedSource → SourceRecord → RawArtifact 全链路可回溯；**不复制 locator_refs**、不访问 Chroma / BGE / LLM / RawArtifact bytes。
+- **测试**：**56 项单元**（test_contracts 27 / test_number_parser 29）+ **22 项集成**（test_financial_metric_service.py：HTML / PDF 创建、missing / wrong company / non-document origin / non-metric evidence / not found / ambiguous 拒绝、balance instant / duration requires period_start、replay / 并发→1 / value·unit·period 变化→新行、replay 篡改 → IntegrityError、EvidenceCard 行永不修改、provenance 全链路、精确阶段边界 `claims==2 / report 表==0`、Service 只持有 sessionmaker）+ **2 项 migration 0020 downgrade guard**。全程 0 LLM / 0 Chroma / 0 Claim / 0 Report 表。全量 **1311 非集成 + 323 集成通过**。
+- **边界**：不实现 Financial calculation（4B.2B）；不实现 Financial Analyst（4B.2C）；不接 LangGraph 分析节点；不开放 HTTP API；不自动从 PDF 表格猜财务数字；**不开始 4B.2B**。
+- 决策记录：[docs/decisions/0026-financial-metric-observation-foundation.md](decisions/0026-financial-metric-observation-foundation.md)。
+
+## 4C：Macro Context / Valuation（later）
+
+- **状态：未开始（later）**。Macro Context Analyst 与 Valuation Analyst 在 4B 之后推进；**Financial 属于 4B.2，不在 4C**；**本阶段不是 Report 生成**。
 
 ## 4D：Claim 综合 / 冲突 / 证据缺口（later）
 
