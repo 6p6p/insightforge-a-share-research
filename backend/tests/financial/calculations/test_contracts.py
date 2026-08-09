@@ -24,7 +24,10 @@ from app.financial.calculations.contracts import (
     expected_metric_code,
     supported_calculation_codes,
 )
-from app.financial.calculations.errors import FinancialCalculationInputError
+from app.financial.calculations.errors import (
+    FinancialCalculationInputError,
+    FinancialCalculationInputMismatch,
+)
 from app.financial.contracts import MetricCode
 
 
@@ -172,6 +175,20 @@ def test_draft_rejects_bool_observation_id() -> None:
 def test_draft_rejects_non_dict_inputs() -> None:
     with pytest.raises(FinancialCalculationInputError):
         _draft(input_observation_ids=[uuid4()])  # type: ignore[arg-type]
+
+
+def test_draft_rejects_duplicate_observation_across_roles() -> None:
+    """Gate 0 C：同一 Observation 充当 current + baseline → InputMismatch。"""
+    obs_id = uuid4()
+    with pytest.raises(FinancialCalculationInputMismatch):
+        FinancialCalculationDraft(
+            company_id=uuid4(),
+            calculation_code=CalculationCode.ABSOLUTE_CHANGE_CNY,
+            input_observation_ids={
+                InputRole.CURRENT: obs_id,
+                InputRole.BASELINE: obs_id,
+            },
+        )
 
 
 # ---------------------------------------------------------------- fingerprint

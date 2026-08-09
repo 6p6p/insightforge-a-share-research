@@ -55,6 +55,7 @@ from app.financial.errors import (
     FinancialMetricEvidenceMismatch,
     FinancialMetricIntegrityError,
     FinancialMetricPeriodError,
+    FinancialMetricScopeError,
     FinancialMetricStorageRangeError,
     FinancialMetricValueAmbiguous,
     FinancialMetricValueNotFound,
@@ -686,6 +687,85 @@ async def test_storage_overflow_after_unit_normalize_rejected(env) -> None:
                 raw_unit=RawUnit.HUNDRED_MILLION_YUAN,
             )
         )
+
+
+# ---------------------------------------------------------------- Gate 0 B：metric/scope policy
+
+
+async def test_net_profit_parent_consolidated_success(env) -> None:
+    """net_profit_parent + consolidated → 成功（母公司指标的合并口径是白名单内）。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_SINGLE_VALUE_P))
+    card = await _card_for_value(env, chunks, "123,456")
+    result = await _service(env).create_observation(
+        _obs_draft(
+            env,
+            card["evidence_card_id"],
+            metric_code=MetricCode.NET_PROFIT_PARENT,
+            statement_scope=StatementScope.CONSOLIDATED,
+        )
+    )
+    assert result.replayed is False
+
+
+async def test_net_profit_parent_parent_scope_rejected(env) -> None:
+    """net_profit_parent + parent → FinancialMetricScopeError。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_SINGLE_VALUE_P))
+    card = await _card_for_value(env, chunks, "123,456")
+    with pytest.raises(FinancialMetricScopeError):
+        await _service(env).create_observation(
+            _obs_draft(
+                env,
+                card["evidence_card_id"],
+                metric_code=MetricCode.NET_PROFIT_PARENT,
+                statement_scope=StatementScope.PARENT,
+            )
+        )
+
+
+async def test_net_profit_parent_excl_nonrecurring_parent_scope_rejected(env) -> None:
+    """net_profit_parent_excl_nonrecurring + parent → FinancialMetricScopeError。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_SINGLE_VALUE_P))
+    card = await _card_for_value(env, chunks, "123,456")
+    with pytest.raises(FinancialMetricScopeError):
+        await _service(env).create_observation(
+            _obs_draft(
+                env,
+                card["evidence_card_id"],
+                metric_code=MetricCode.NET_PROFIT_PARENT_EXCL_NONRECURRING,
+                statement_scope=StatementScope.PARENT,
+            )
+        )
+
+
+async def test_equity_parent_parent_scope_rejected(env) -> None:
+    """equity_parent + parent → FinancialMetricScopeError（balance sheet instant）。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_SINGLE_VALUE_P))
+    card = await _card_for_value(env, chunks, "123,456")
+    with pytest.raises(FinancialMetricScopeError):
+        await _service(env).create_observation(
+            _obs_draft(
+                env,
+                card["evidence_card_id"],
+                metric_code=MetricCode.EQUITY_PARENT,
+                statement_scope=StatementScope.PARENT,
+                period_start=None,
+                period_end=date(2024, 12, 31),
+            )
+        )
+
+
+async def test_revenue_both_scopes_structurally_allowed(env) -> None:
+    """revenue 不在 consolidated-only 白名单 → consolidated / parent 都 structurally 允许。"""
+    _, _, _, chunks = await _seed_html(env, _fin_html(_SINGLE_VALUE_P))
+    card = await _card_for_value(env, chunks, "123,456")
+    svc = _service(env)
+    cons = await svc.create_observation(
+        _obs_draft(env, card["evidence_card_id"], statement_scope=StatementScope.CONSOLIDATED)
+    )
+    parent = await svc.create_observation(
+        _obs_draft(env, card["evidence_card_id"], statement_scope=StatementScope.PARENT)
+    )
+    assert cons.metric_observation_id != parent.metric_observation_id
 
 
 # ---------------------------------------------------------------- period 规则

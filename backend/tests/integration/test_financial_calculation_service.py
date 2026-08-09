@@ -29,6 +29,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
@@ -593,6 +594,240 @@ async def test_result_storage_range_rejected(env) -> None:
                 {InputRole.CURRENT: current, InputRole.BASELINE: baseline},
             )
         )
+
+
+# ---------------------------------------------------------------- Gate 0 A：same-period ratio
+
+
+async def test_margin_cross_period_rejected(env) -> None:
+    """gross_margin 输入跨期（2025 revenue ÷ 2024 operating_cost）→ PeriodMismatch。"""
+    revenue = await _insert_observation(
+        env,
+        metric_code="revenue",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        period_kind="duration",
+        normalized="10000000000",
+    )
+    operating_cost = await _insert_observation(
+        env,
+        metric_code="operating_cost",
+        period_start=date(2024, 1, 1),
+        period_end=date(2024, 12, 31),
+        period_kind="duration",
+        normalized="6000000000",
+    )
+    service = FinancialCalculationService(env["sessionmaker"])
+    with pytest.raises(FinancialCalculationPeriodMismatch):
+        await service.create_calculation(
+            _draft(
+                env["company_id"],
+                CalculationCode.GROSS_MARGIN,
+                {InputRole.REVENUE: revenue, InputRole.OPERATING_COST: operating_cost},
+            )
+        )
+
+
+async def test_margin_same_period_success(env) -> None:
+    """gross_margin 同期（2025 revenue ÷ 2025 operating_cost）→ 成功。"""
+    revenue = await _insert_observation(
+        env,
+        metric_code="revenue",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        period_kind="duration",
+        normalized="10000000000",
+    )
+    operating_cost = await _insert_observation(
+        env,
+        metric_code="operating_cost",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        period_kind="duration",
+        normalized="6000000000",
+    )
+    service = FinancialCalculationService(env["sessionmaker"])
+    result = await service.create_calculation(
+        _draft(
+            env["company_id"],
+            CalculationCode.GROSS_MARGIN,
+            {InputRole.REVENUE: revenue, InputRole.OPERATING_COST: operating_cost},
+        )
+    )
+    value, unit = await _result(env, result.calculation_id)
+    assert value == Decimal("0.4")
+    assert unit == "ratio"
+
+
+async def test_margin_requires_duration(env) -> None:
+    """margin 输入必须是 duration 期间（instant 输入 → PeriodMismatch）。"""
+    revenue = await _insert_observation(
+        env,
+        metric_code="revenue",
+        period_start=None,
+        period_end=date(2025, 12, 31),
+        period_kind="instant",
+        normalized="10000000000",
+    )
+    operating_cost = await _insert_observation(
+        env,
+        metric_code="operating_cost",
+        period_start=None,
+        period_end=date(2025, 12, 31),
+        period_kind="instant",
+        normalized="6000000000",
+    )
+    service = FinancialCalculationService(env["sessionmaker"])
+    with pytest.raises(FinancialCalculationPeriodMismatch):
+        await service.create_calculation(
+            _draft(
+                env["company_id"],
+                CalculationCode.GROSS_MARGIN,
+                {InputRole.REVENUE: revenue, InputRole.OPERATING_COST: operating_cost},
+            )
+        )
+
+
+async def test_debt_ratio_cross_date_rejected(env) -> None:
+    """debt_to_assets_ratio 跨报告日（2025-12-31 assets ÷ 2024-12-31 liabilities）→
+    PeriodMismatch。"""
+    assets = await _insert_observation(
+        env,
+        metric_code="total_assets",
+        period_start=None,
+        period_end=date(2025, 12, 31),
+        period_kind="instant",
+        normalized="20000000000",
+    )
+    liabilities = await _insert_observation(
+        env,
+        metric_code="total_liabilities",
+        period_start=None,
+        period_end=date(2024, 12, 31),
+        period_kind="instant",
+        normalized="10000000000",
+    )
+    service = FinancialCalculationService(env["sessionmaker"])
+    with pytest.raises(FinancialCalculationPeriodMismatch):
+        await service.create_calculation(
+            _draft(
+                env["company_id"],
+                CalculationCode.DEBT_TO_ASSETS_RATIO,
+                {InputRole.TOTAL_ASSETS: assets, InputRole.TOTAL_LIABILITIES: liabilities},
+            )
+        )
+
+
+async def test_debt_ratio_same_date_success(env) -> None:
+    """debt_to_assets_ratio 同报告日（2025-12-31 assets ÷ liabilities）→ 成功。"""
+    assets = await _insert_observation(
+        env,
+        metric_code="total_assets",
+        period_start=None,
+        period_end=date(2025, 12, 31),
+        period_kind="instant",
+        normalized="20000000000",
+    )
+    liabilities = await _insert_observation(
+        env,
+        metric_code="total_liabilities",
+        period_start=None,
+        period_end=date(2025, 12, 31),
+        period_kind="instant",
+        normalized="10000000000",
+    )
+    service = FinancialCalculationService(env["sessionmaker"])
+    result = await service.create_calculation(
+        _draft(
+            env["company_id"],
+            CalculationCode.DEBT_TO_ASSETS_RATIO,
+            {InputRole.TOTAL_ASSETS: assets, InputRole.TOTAL_LIABILITIES: liabilities},
+        )
+    )
+    value, unit = await _result(env, result.calculation_id)
+    assert value == Decimal("0.5")
+    assert unit == "ratio"
+
+
+async def test_debt_ratio_requires_instant(env) -> None:
+    """debt_to_assets_ratio 输入必须是 instant 时点（duration 输入 → PeriodMismatch）。"""
+    assets = await _insert_observation(
+        env,
+        metric_code="total_assets",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        period_kind="duration",
+        normalized="20000000000",
+    )
+    liabilities = await _insert_observation(
+        env,
+        metric_code="total_liabilities",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 12, 31),
+        period_kind="duration",
+        normalized="10000000000",
+    )
+    service = FinancialCalculationService(env["sessionmaker"])
+    with pytest.raises(FinancialCalculationPeriodMismatch):
+        await service.create_calculation(
+            _draft(
+                env["company_id"],
+                CalculationCode.DEBT_TO_ASSETS_RATIO,
+                {InputRole.TOTAL_ASSETS: assets, InputRole.TOTAL_LIABILITIES: liabilities},
+            )
+        )
+
+
+# ---------------------------------------------------------------- Gate 0 C：input distinctness
+
+
+async def test_duplicate_observation_draft_rejected(env) -> None:
+    """同一 Observation 充当 current + baseline → Draft 构造即拒绝（InputMismatch）。"""
+    obs = await _annual_revenue_pair(env)
+    with pytest.raises(FinancialCalculationInputMismatch):
+        FinancialCalculationDraft(
+            company_id=env["company_id"],
+            calculation_code=CalculationCode.ABSOLUTE_CHANGE_CNY,
+            input_observation_ids={
+                InputRole.CURRENT: obs[InputRole.CURRENT],
+                InputRole.BASELINE: obs[InputRole.CURRENT],
+            },
+        )
+
+
+async def test_duplicate_observation_db_unique_rejected(env) -> None:
+    """直接 SQL：同一 calculation + 同一 observation + 不同 role →
+    uq_financial_calculation_inputs_calc_observation DB 拒绝。"""
+    obs = await _annual_revenue_pair(env)
+    calc_id = uuid4()
+    fingerprint = "a" * 64
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "INSERT INTO financial_calculations (calculation_id, company_id, "
+                "calculation_code, result_value, result_unit, calculation_schema_version, "
+                "formula_version, calculation_fingerprint) VALUES "
+                "(:cid, :company, 'gross_margin', 0.4, 'ratio', 1, 1, :fp)"
+            ).bindparams(cid=calc_id, company=env["company_id"], fp=fingerprint)
+        )
+        await session.execute(
+            text(
+                "INSERT INTO financial_calculation_inputs "
+                "(calculation_id, input_role, metric_observation_id) VALUES "
+                "(:cid, 'revenue', :oid)"
+            ).bindparams(cid=calc_id, oid=obs[InputRole.CURRENT])
+        )
+        # 同一 observation 用另一 role 再插 → UNIQUE(calculation_id, metric_observation_id) 冲突。
+        with pytest.raises(IntegrityError):
+            await session.execute(
+                text(
+                    "INSERT INTO financial_calculation_inputs "
+                    "(calculation_id, input_role, metric_observation_id) VALUES "
+                    "(:cid, 'operating_cost', :oid)"
+                ).bindparams(cid=calc_id, oid=obs[InputRole.CURRENT])
+            )
+            await session.commit()
+        await session.rollback()
 
 
 # ---------------------------------------------------------------- FK 行为

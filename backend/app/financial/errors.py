@@ -32,6 +32,17 @@ class FinancialMetricPeriodError(FinancialMetricError):
     code = "financial_metric_period_error"
 
 
+class FinancialMetricScopeError(FinancialMetricError):
+    """母公司指标只能登记 consolidated 口径。
+
+    net_profit_parent / net_profit_parent_excl_nonrecurring / equity_parent
+    只允许 statement_scope=consolidated。这是**结构化口径语义政策**（结构化
+    策略约束），不自动识别报表口径——只做白名单口径校验，不推断真实口径。
+    """
+
+    code = "financial_metric_scope_error"
+
+
 class FinancialMetricValueNotFound(FinancialMetricError):
     """source_value_text.strip() 不是 quote_text 中任何一个完整数字 token。
 

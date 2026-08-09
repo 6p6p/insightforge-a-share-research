@@ -15,7 +15,7 @@
 
 3. **冻结契约（`app/financial/calculations/contracts.py`）**：`FINANCIAL_CALCULATION_SCHEMA_VERSION = 1`、`FORMULA_VERSION = 1`；**7 个 calculation_code**（absolute_change_cny / yoy_growth_rate / qoq_growth_rate / gross_margin / operating_margin / net_margin_parent / debt_to_assets_ratio）；`CalculationResultUnit`（cny / ratio）；`InputRole` 8 个（current / baseline / revenue / operating_cost / operating_profit / net_profit_parent / total_assets / total_liabilities）。**deterministic mapping**：`calculation_input_roles(code)`（每个 code → 固定 role 集合）、`expected_metric_code(role)`（fixed role → 期望 metric_code；current / baseline → None，由输入一致决定）、`calculation_result_unit(code)`。
 
-4. **`FinancialCalculationDraft` 只允许语义输入**：company_id / calculation_code / input_observation_ids（每个 input_role **恰好**一个已登记 Observation 的 ID）。构造时校验 role 集合必须与 code 的 `calculation_input_roles` **完全一致**（不多不少）、company / obs_id 必须是 UUID（bool 拒绝）。调用方**不得提供** result_value / result_unit / formula / Evidence ID / source ID / period metadata / fingerprint——全部由 Service 从已登记 Observation **确定性派生**。draft 没有 result_value / normalized_value 字段（不存在"手工传结果"通道）。
+4. **`FinancialCalculationDraft` 只允许语义输入**：company_id / calculation_code / input_observation_ids（每个 input_role **恰好**一个已登记 Observation 的 ID）。构造时校验 role 集合必须与 code 的 `calculation_input_roles` **完全一致**（不多不少）、company / obs_id 必须是 UUID（bool 拒绝）、**所有 obs_id 必须互不相同**（同一 Observation 不能充当多个 role → `FinancialCalculationInputMismatch`，Gate 0 C）。调用方**不得提供** result_value / result_unit / formula / Evidence ID / source ID / period metadata / fingerprint——全部由 Service 从已登记 Observation **确定性派生**。draft 没有 result_value / normalized_value 字段（不存在"手工传结果"通道）。
 
 5. **Comparability 规则（I）**（`_validate_comparability`，不自动纠错）：每个 Observation 的 `company_id` 必须 == draft.company_id（否则 `FinancialCalculationCompanyMismatch`）；全部输入 `statement_scope` 必须完全相同（`FinancialCalculationScopeMismatch`）；growth 类（absolute / YoY / QoQ）要求 current 与 baseline 的 `metric_code` 相同（`FinancialCalculationInputMismatch`），fixed-role 类要求每个 role 的 `metric_code` 精确等于 `expected_metric_code`（`FinancialCalculationInputMismatch`）。
 
@@ -23,7 +23,8 @@
    - **absolute_change**：current 与 baseline 的 `period_kind` 必须相同（duration / instant），不做其它 period 校验。
    - **YoY**：baseline 年份 = current 年份 - 1，且月/日对应（`_same_month_day`：duration 同时要求 period_start 月/日对应；instant 两者 period_start 均为 None）。
    - **QoQ**：duration 必须是**标准单季度**（period_start 为季首日 01/04/07/10 的 1 号、period_end 为同一季末 03-31 / 06-30 / 09-30 / 12-31）；instant 的 period_end 必须是 03-31 / 06-30 / 09-30 / 12-31 且 period_start 为 None。两者都必须**连续季度**（`_quarter_index = year*4 + quarter`，baseline = current - 1，跨年正确）。
-   - margin / ratio 类**无 period 要求**。
+   - **margin（gross_margin / operating_margin / net_margin_parent，Gate 0 A）**：必须 `period_kind=duration` 且所有输入的 `period_start` / `period_end` 完全相同（同期口径，禁止跨期比例——如 2025 revenue ÷ 2024 operating_cost 拒绝）。
+   - **debt_to_assets_ratio（Gate 0 A）**：必须 `period_kind=instant` 且所有输入 `period_start` 为 None、`period_end` 完全相同（同一报告日，禁止跨时点比例——如 2025-12-31 assets ÷ 2024-12-31 liabilities 拒绝）。
    - 任一违反 → `FinancialCalculationPeriodMismatch`。
 
 7. **公式（L-M，`app/financial/calculations/formulas.py`，全程 Decimal、禁止 float）**：

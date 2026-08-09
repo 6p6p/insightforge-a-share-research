@@ -52,7 +52,9 @@ from app.financial.contracts import (
     FINANCIAL_METRIC_SCHEMA_VERSION,
     FinancialMetricDraft,
     FinancialMetricResult,
+    MetricCode,
     PeriodKind,
+    StatementScope,
     compute_metric_fingerprint,
     expected_period_kind,
 )
@@ -61,6 +63,7 @@ from app.financial.errors import (
     FinancialMetricIntegrityError,
     FinancialMetricPeriodError,
     FinancialMetricPersistenceFailed,
+    FinancialMetricScopeError,
     FinancialMetricValueAmbiguous,
     FinancialMetricValueNotFound,
 )
@@ -77,6 +80,18 @@ from app.repositories.financial_metric_observation_repository import (
 
 _ORIGIN_DOCUMENT_CHUNK = "document_chunk"
 _EVIDENCE_TYPE_METRIC = "metric"
+
+# 只允许 consolidated 口径的母公司指标（结构化口径语义政策）。
+# net_profit_parent / net_profit_parent_excl_nonrecurring / equity_parent
+# 的命名即"归属母公司"，母公司口径下不提供；不自动识别报表口径，只做白名单
+# 校验。
+_SCOPE_CONSOLIDATED_ONLY_CODES = frozenset(
+    (
+        MetricCode.NET_PROFIT_PARENT,
+        MetricCode.NET_PROFIT_PARENT_EXCL_NONRECURRING,
+        MetricCode.EQUITY_PARENT,
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -177,7 +192,16 @@ class FinancialMetricService:
             raise FinancialMetricValueAmbiguous()
 
     def _derive(self, draft: FinancialMetricDraft, card: EvidenceCardModel) -> _DerivedObservation:
-        """纯函数派生：exact-match → parse → period rule → normalize → fingerprint。"""
+        """纯函数派生：scope policy → exact-match → parse → period rule →
+        normalize → fingerprint。"""
+        if (
+            draft.metric_code in _SCOPE_CONSOLIDATED_ONLY_CODES
+            and draft.statement_scope != StatementScope.CONSOLIDATED
+        ):
+            raise FinancialMetricScopeError(
+                "net_profit_parent / net_profit_parent_excl_nonrecurring / equity_parent "
+                "只允许 consolidated 口径"
+            )
         self._resolve_source_value(card, draft.source_value_text)
         raw_value = parse_financial_number(draft.source_value_text)
 

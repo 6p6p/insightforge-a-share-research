@@ -15,7 +15,10 @@ Calculation → Observation → EvidenceCard → Source 证据链。**0 LLM / 0 
      role 期望 / current==baseline（InputMismatch）；
    - period 规则：absolute_change 要求 period_kind 相同；YoY 要求月/日对应 +
      baseline 年份 = current 年份 - 1；QoQ 只允许标准单季度（duration）或
-     03-31/06-30/09-30/12-31（instant）且连续季度（PeriodMismatch）；
+     03-31/06-30/09-30/12-31（instant）且连续季度；margin 必须 duration 且
+     所有输入 period_start / period_end 完全相同；debt_to_assets_ratio 必须
+     instant 且 period_start 全为 None、period_end 完全相同
+     （PeriodMismatch）；
    - 公式：absolute_change = current - baseline（精确减法）；增长率 baseline
      必须 > 0（GrowthBaseNotPositive）；ratio 分母必须 > 0
      （ZeroDenominator）；除法 quantize 到 CALCULATION_SCALE=12 位、
@@ -40,6 +43,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -93,6 +97,16 @@ _GROWTH_CODES = frozenset(
         CalculationCode.ABSOLUTE_CHANGE_CNY,
         CalculationCode.YOY_GROWTH_RATE,
         CalculationCode.QOQ_GROWTH_RATE,
+    )
+)
+
+# margin 类：gross_margin / operating_margin / net_margin_parent。
+# 必须 duration 且所有输入属于同一期间（跨期比例在语义上无意义）。
+_MARGIN_CODES = frozenset(
+    (
+        CalculationCode.GROSS_MARGIN,
+        CalculationCode.OPERATING_MARGIN,
+        CalculationCode.NET_MARGIN_PARENT,
     )
 )
 
@@ -203,6 +217,37 @@ class FinancialCalculationService:
             replayed=not created,
         )
 
+    async def verify_calculation_integrity(
+        self, session: AsyncSession, calculation_id: UUID
+    ) -> FinancialCalculationModel | None:
+        """重新加载既有 calculation + inputs + Observation，重新派生并逐项核实。
+
+        供 FinancialClaimService（4B.2C.1）加载 Calculation refs 时校验上游
+        计算未被篡改：缺失返回 None（由调用方按缺引用处理）；任一损坏 →
+        FinancialCalculationIntegrityError（不 repair）。调用方复用本
+        session，不新开连接。
+        """
+        calc_repo = FinancialCalculationRepository(session)
+        calc = await calc_repo.get_by_id(calculation_id)
+        if calc is None:
+            return None
+        input_repo = FinancialCalculationInputRepository(session)
+        rows = await input_repo.get_by_calculation_id(calculation_id)
+        bindings = {row.input_role: row.metric_observation_id for row in rows}
+        try:
+            code = CalculationCode(calc.calculation_code)
+        except ValueError as exc:
+            raise FinancialCalculationIntegrityError(
+                "financial calculation replay integrity check failed on calculation_code"
+            ) from exc
+        draft = FinancialCalculationDraft(
+            company_id=calc.company_id,
+            calculation_code=code,
+            input_observation_ids={InputRole(role): obs_id for role, obs_id in bindings.items()},
+        )
+        await self._verify_replay(session, calc, draft)
+        return calc
+
     # ------------------------------------------------------------------ 内部
 
     @staticmethod
@@ -258,37 +303,83 @@ class FinancialCalculationService:
         code: CalculationCode,
         observations: dict[InputRole, FinancialMetricObservationModel],
     ) -> None:
-        """period 可比性规则（absolute / YoY / QoQ；margin / ratio 无 period 要求）。"""
-        if code not in _GROWTH_CODES:
-            return
-        current = observations[InputRole.CURRENT]
-        baseline = observations[InputRole.BASELINE]
-        if current.period_kind != baseline.period_kind:
-            raise FinancialCalculationPeriodMismatch("current 与 baseline 的 period_kind 必须相同")
-        if code == CalculationCode.ABSOLUTE_CHANGE_CNY:
-            return
-        if code == CalculationCode.YOY_GROWTH_RATE:
-            if not _yoy_comparable(current, baseline):
+        """period 可比性规则。
+
+        - growth（absolute / YoY / QoQ）：period_kind 必须相同；YoY 要求月/日
+          对应且 baseline 年份 = current 年份 - 1；QoQ 只允许标准单季度
+          （duration）或 03-31/06-30/09-30/12-31（instant）且连续季度；
+        - margin（gross_margin / operating_margin / net_margin_parent）：必须
+          duration 且所有输入的 period_start / period_end 完全相同（同期口径，
+          禁止跨期比例）；
+        - debt_to_assets_ratio：必须 instant 且所有输入 period_start 为 None、
+          period_end 完全相同（同一报告日，禁止跨时点比例）。
+        """
+        if code in _GROWTH_CODES:
+            current = observations[InputRole.CURRENT]
+            baseline = observations[InputRole.BASELINE]
+            if current.period_kind != baseline.period_kind:
                 raise FinancialCalculationPeriodMismatch(
-                    "YoY 必须月/日对应且 baseline 年份 = current 年份 - 1"
+                    "current 与 baseline 的 period_kind 必须相同"
+                )
+            if code == CalculationCode.ABSOLUTE_CHANGE_CNY:
+                return
+            if code == CalculationCode.YOY_GROWTH_RATE:
+                if not _yoy_comparable(current, baseline):
+                    raise FinancialCalculationPeriodMismatch(
+                        "YoY 必须月/日对应且 baseline 年份 = current 年份 - 1"
+                    )
+                return
+            # QoQ：只允许标准单季度（duration）或 03-31/06-30/09-30/12-31（instant），
+            # 且连续季度。
+            if current.period_kind == PeriodKind.INSTANT.value:
+                if current.period_start is not None or baseline.period_start is not None:
+                    raise FinancialCalculationPeriodMismatch(
+                        "instant QoQ 的 period_start 必须为 None"
+                    )
+                if not _is_quarter_end(current.period_end) or not _is_quarter_end(
+                    baseline.period_end
+                ):
+                    raise FinancialCalculationPeriodMismatch(
+                        "instant QoQ 的 period_end 必须是 03-31/06-30/09-30/12-31"
+                    )
+            else:
+                if not _is_single_quarter(current) or not _is_single_quarter(baseline):
+                    raise FinancialCalculationPeriodMismatch(
+                        "duration QoQ 必须是标准单季度"
+                        "（period_start 为季首日、period_end 为季末日）"
+                    )
+            if not _consecutive(current.period_end, baseline.period_end):
+                raise FinancialCalculationPeriodMismatch("QoQ 必须是连续季度")
+            return
+        if code in _MARGIN_CODES:
+            for obs in observations.values():
+                if obs.period_kind != PeriodKind.DURATION.value:
+                    raise FinancialCalculationPeriodMismatch(
+                        "margin 输入必须是 duration 期间（跨期比例禁止）"
+                    )
+            if len({obs.period_start for obs in observations.values()}) != 1:
+                raise FinancialCalculationPeriodMismatch(
+                    "margin 输入必须属于同一期间（period_start 完全相同）"
+                )
+            if len({obs.period_end for obs in observations.values()}) != 1:
+                raise FinancialCalculationPeriodMismatch(
+                    "margin 输入必须属于同一期间（period_end 完全相同）"
                 )
             return
-        # QoQ：只允许标准单季度（duration）或 03-31/06-30/09-30/12-31（instant），
-        # 且连续季度。
-        if current.period_kind == PeriodKind.INSTANT.value:
-            if current.period_start is not None or baseline.period_start is not None:
-                raise FinancialCalculationPeriodMismatch("instant QoQ 的 period_start 必须为 None")
-            if not _is_quarter_end(current.period_end) or not _is_quarter_end(baseline.period_end):
+        # debt_to_assets_ratio：instant 且同一报告日（period_end 完全相同）。
+        for obs in observations.values():
+            if obs.period_kind != PeriodKind.INSTANT.value:
                 raise FinancialCalculationPeriodMismatch(
-                    "instant QoQ 的 period_end 必须是 03-31/06-30/09-30/12-31"
+                    "debt_to_assets_ratio 输入必须是 instant 时点（跨时点比例禁止）"
                 )
-        else:
-            if not _is_single_quarter(current) or not _is_single_quarter(baseline):
+            if obs.period_start is not None:
                 raise FinancialCalculationPeriodMismatch(
-                    "duration QoQ 必须是标准单季度（period_start 为季首日、period_end 为季末日）"
+                    "debt_to_assets_ratio 输入的 period_start 必须为 None"
                 )
-        if not _consecutive(current.period_end, baseline.period_end):
-            raise FinancialCalculationPeriodMismatch("QoQ 必须是连续季度")
+        if len({obs.period_end for obs in observations.values()}) != 1:
+            raise FinancialCalculationPeriodMismatch(
+                "debt_to_assets_ratio 输入的 period_end 必须完全相同"
+            )
 
     def _derive(
         self,

@@ -31,7 +31,10 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from app.financial.calculations.errors import FinancialCalculationInputError
+from app.financial.calculations.errors import (
+    FinancialCalculationInputError,
+    FinancialCalculationInputMismatch,
+)
 from app.financial.contracts import MetricCode
 
 # financial_calculations.calculation_schema_version 的当前值（改结构时递增）。
@@ -139,6 +142,8 @@ class FinancialCalculationDraft:
 
     - input_observation_ids 的 role 集合必须与 calculation_code 的
       `calculation_input_roles` 完全一致（不多不少）；
+    - 所有 metric_observation_id 必须互不相同（同一 Observation 不能充当多个
+      role → FinancialCalculationInputMismatch）；
     - Observation 的 company / statement_scope / metric_code / period
       可比性由 Service 校验并抛对应 FinancialCalculationError。
     """
@@ -165,6 +170,14 @@ class FinancialCalculationDraft:
                 raise FinancialCalculationInputError(
                     f"input_observation_ids[{role.value}] 必须是 UUID"
                 )
+        # 同一 Observation 不能充当多个 role（输入去重语义）：draft 内所有
+        # metric_observation_id 必须互不相同，避免同源数值被重复当作两个输入。
+        obs_ids = list(self.input_observation_ids.values())
+        if len(set(obs_ids)) != len(obs_ids):
+            raise FinancialCalculationInputMismatch(
+                "input_observation_ids 的 observation 必须互不相同"
+                "（同一 observation 不能充当多个 role）"
+            )
 
 
 @dataclass(frozen=True)
