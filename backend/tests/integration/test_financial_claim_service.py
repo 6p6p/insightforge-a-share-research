@@ -77,7 +77,11 @@ from app.repositories.claim_repository import ClaimRepository
 from app.repositories.company_repository import CompanyRepository
 from app.services.claim_service import ClaimService
 from app.services.evidence_card_service import EvidenceCardService
-from app.services.financial_claim_service import FinancialClaimService
+from app.services.financial_claim_service import (
+    MAX_FINANCIAL_CLAIMS_PER_BATCH,
+    FinancialClaimBatchResult,
+    FinancialClaimService,
+)
 from tests.integration.test_evidence_card_service import _seed_html_source
 from tests.integration.test_migration_0018_downgrade_guard import _seed_document_claim
 
@@ -344,15 +348,16 @@ async def _create_fin(env: dict, draft: FinancialClaimDraft):
 
 
 async def _fin_claim_count(sessionmaker) -> int:
-    """financial Claim（claim_schema_version=2）数量。
+    """financial Claim（claim_schema_version >= 2）数量。
 
-    `_seed_document_claim` 会 seed 一条 v1 通用 Claim，因此只统计 v2，排除种子。
+    `_seed_document_claim` 会 seed 一条 v1 通用 Claim，因此只统计 v2/v3，
+    排除种子。
     """
     async with sessionmaker() as session:
         return int(
             (
                 await session.execute(
-                    text("SELECT count(*) FROM claims WHERE claim_schema_version = 2")
+                    text("SELECT count(*) FROM claims WHERE claim_schema_version >= 2")
                 )
             ).scalar_one()
         )
@@ -399,9 +404,11 @@ async def test_create_financial_claim_persists_claim_evidence_calc_links(env) ->
     assert await _fin_link_rows(env["sessionmaker"], result.claim_id) == [
         (str(calc.calculation_id), "supports")
     ]
-    # ClaimEvidenceLink：自动展开 calc 的 source Evidence → supports。
+    # ClaimEvidenceLink：v3 下自动展开 calc 的 source Evidence 一律 relation=context
+    # （Calculation 承担 supports/contradicts/context 语义，source Evidence 只提供
+    # provenance context）。
     assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == [
-        (str(env["evidence_card_id"]), "supports")
+        (str(env["evidence_card_id"]), "context")
     ]
 
 
@@ -500,7 +507,7 @@ async def test_automatic_evidence_expansion_dedupes_across_calculations(env) -> 
         env, _fin_draft(env, supports=[calc_a.calculation_id, calc_b.calculation_id])
     )
     assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == [
-        (str(env["evidence_card_id"]), "supports")
+        (str(env["evidence_card_id"]), "context")
     ]
     assert await _fin_link_rows(env["sessionmaker"], result.claim_id) == sorted(
         [
@@ -510,8 +517,9 @@ async def test_automatic_evidence_expansion_dedupes_across_calculations(env) -> 
     )
 
 
-async def test_conflicting_propagated_relation_rejected(env) -> None:
-    """同一 source Evidence 被两个 Calculations 推导成不同 relation → 拒绝。"""
+async def test_v2_conflicting_propagated_relation_rejected(env) -> None:
+    """v2（legacy relation propagation）：同一 source Evidence 被两个 Calculations
+    推导成不同 relation → 拒绝。"""
     obs_a = await _annual_revenue_pair(env)
     calc_a = await _calc(env, obs_a)
     # 两个 calc 都用同一 source card（env card），但 obs 数值不同（fingerprint 不同）。
@@ -534,10 +542,56 @@ async def test_conflicting_propagated_relation_rejected(env) -> None:
     obs_b = {InputRole.CURRENT: new_current, InputRole.BASELINE: new_baseline}
     calc_b = await _calc(env, obs_b)
 
-    draft = _fin_draft(env, supports=[calc_a.calculation_id], contradicts=[calc_b.calculation_id])
+    draft = _fin_draft(
+        env,
+        supports=[calc_a.calculation_id],
+        contradicts=[calc_b.calculation_id],
+        claim_schema_version=2,
+    )
     with pytest.raises(FinancialClaimRelationConflict):
         await _create_fin(env, draft)
     assert await _fin_claim_count(env["sessionmaker"]) == 0
+
+
+async def test_v3_shared_source_evidence_never_conflicts(env) -> None:
+    """v3：两个 Calculations 共享同一 source Evidence 即使 Calculation relation
+    不同（supports + contradicts）也不冲突——source Evidence 一律 context，去重
+    为 1 条 context link；Calculation 承担语义 relation。"""
+    obs_a = await _annual_revenue_pair(env)
+    calc_a = await _calc(env, obs_a)
+    new_current = await _insert_observation(
+        env,
+        metric_code="revenue",
+        period_start=date(2024, 1, 1),
+        period_end=date(2024, 12, 31),
+        period_kind="duration",
+        normalized="13000000000",
+    )
+    new_baseline = await _insert_observation(
+        env,
+        metric_code="revenue",
+        period_start=date(2023, 1, 1),
+        period_end=date(2023, 12, 31),
+        period_kind="duration",
+        normalized="9000000000",
+    )
+    obs_b = {InputRole.CURRENT: new_current, InputRole.BASELINE: new_baseline}
+    calc_b = await _calc(env, obs_b)
+
+    result = await _create_fin(
+        env,
+        _fin_draft(env, supports=[calc_a.calculation_id], contradicts=[calc_b.calculation_id]),
+    )
+    # source Evidence 去重为 1 条 context link；Calculation links 保留两个 relation。
+    assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == [
+        (str(env["evidence_card_id"]), "context")
+    ]
+    assert await _fin_link_rows(env["sessionmaker"], result.claim_id) == sorted(
+        [
+            (str(calc_a.calculation_id), "supports"),
+            (str(calc_b.calculation_id), "contradicts"),
+        ]
+    )
 
 
 async def test_additional_evidence_merged(env) -> None:
@@ -549,7 +603,7 @@ async def test_additional_evidence_merged(env) -> None:
     )
     assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == sorted(
         [
-            (str(env["evidence_card_id"]), "supports"),
+            (str(env["evidence_card_id"]), "context"),
             (str(extra), "supports"),
         ]
     )
@@ -560,10 +614,12 @@ async def test_additional_evidence_merged(env) -> None:
 
 
 async def test_additional_evidence_conflict_rejected(env) -> None:
-    """additional Evidence 与自动展开的 source Evidence relation 冲突 → 拒绝。"""
+    """v3：additional Evidence 保持调用方指定 relation；与 automatic source
+    Evidence 的 context relation 冲突（additional_supports 指定 source card）→
+    拒绝。"""
     obs = await _annual_revenue_pair(env)
     calc = await _calc(env, obs)
-    draft = _fin_draft(env, supports=[calc.calculation_id], add_context=[env["evidence_card_id"]])
+    draft = _fin_draft(env, supports=[calc.calculation_id], add_supports=[env["evidence_card_id"]])
     with pytest.raises(FinancialClaimRelationConflict):
         await _create_fin(env, draft)
     assert await _fin_claim_count(env["sessionmaker"]) == 0
@@ -599,9 +655,10 @@ async def test_critical_with_eligible_source_accepted(env) -> None:
         claim = await ClaimRepository(session).get_by_id(result.claim_id)
     assert claim is not None
     assert claim.importance == "critical"
-    # 自动展开的 source Evidence（eligible）进入 supports 链路。
+    # v3：source Evidence（eligible）进入 context 链路；critical source policy
+    # 由"任一 support Calculation 的 source Evidence eligible"满足。
     assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == [
-        (str(eligible), "supports")
+        (str(eligible), "context")
     ]
 
 
@@ -615,6 +672,99 @@ async def test_critical_without_eligible_source_rejected(env) -> None:
                 env,
                 supports=[calc.calculation_id],
                 importance=FinancialClaimImportance.CRITICAL,
+            ),
+        )
+    assert await _fin_claim_count(env["sessionmaker"]) == 0
+
+
+async def test_v3_critical_additional_support_eligible_accepted(env) -> None:
+    """v3 critical source policy ②：additional_support_evidence_ids 中存在
+    critical_claim_eligible_snapshot=true → accept（即使 support calc 的 source
+    不 eligible）。"""
+    eligible = await _seed_card(env, critical_claim_eligible=True)
+    obs = await _annual_revenue_pair(env)  # env card 不 eligible
+    calc = await _calc(env, obs)
+    result = await _create_fin(
+        env,
+        _fin_draft(
+            env,
+            supports=[calc.calculation_id],
+            add_supports=[eligible],
+            importance=FinancialClaimImportance.CRITICAL,
+        ),
+    )
+    async with env["sessionmaker"]() as session:
+        claim = await ClaimRepository(session).get_by_id(result.claim_id)
+    assert claim is not None
+    assert claim.importance == "critical"
+    # eligible 卡进入 supports；自动展开的 env card 进入 context。
+    assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == sorted(
+        [
+            (str(env["evidence_card_id"]), "context"),
+            (str(eligible), "supports"),
+        ]
+    )
+
+
+async def test_v3_critical_context_eligible_does_not_satisfy(env) -> None:
+    """v3 critical：eligible Evidence 只在 context（additional_context）不能满足
+    critical 要求——v3 只认 support Calculation 的 source Evidence 与
+    additional_support_evidence_ids。"""
+    eligible = await _seed_card(env, critical_claim_eligible=True)
+    obs = await _annual_revenue_pair(env)  # env card 不 eligible
+    calc = await _calc(env, obs)
+    with pytest.raises(FinancialClaimCriticalEvidenceInsufficient):
+        await _create_fin(
+            env,
+            _fin_draft(
+                env,
+                supports=[calc.calculation_id],
+                add_context=[eligible],
+                importance=FinancialClaimImportance.CRITICAL,
+            ),
+        )
+    assert await _fin_claim_count(env["sessionmaker"]) == 0
+
+
+async def test_v2_critical_legacy_supports_links_policy(env) -> None:
+    """v2（legacy）：critical 检查最终 supports evidence links（relation
+    propagation 使 source Evidence 进入 supports）中任一 eligible。"""
+    eligible = await _seed_card(env, critical_claim_eligible=True)
+    obs = await _annual_revenue_pair(env, source_card_id=eligible)
+    calc = await _calc(env, obs)
+    result = await _create_fin(
+        env,
+        _fin_draft(
+            env,
+            supports=[calc.calculation_id],
+            importance=FinancialClaimImportance.CRITICAL,
+            claim_schema_version=2,
+        ),
+    )
+    async with env["sessionmaker"]() as session:
+        claim = await ClaimRepository(session).get_by_id(result.claim_id)
+    assert claim is not None
+    assert claim.claim_schema_version == 2
+    assert claim.importance == "critical"
+    # v2 propagation：source Evidence（eligible）进入 supports links。
+    assert await _evidence_link_rows(env["sessionmaker"], result.claim_id) == [
+        (str(eligible), "supports")
+    ]
+
+
+async def test_v2_critical_rejects_without_eligible_supports(env) -> None:
+    """v2（legacy）：supports links 中无 eligible → reject（与 v3 一致，但走旧
+    policy 代码路径）。"""
+    obs = await _annual_revenue_pair(env)  # env card 不 eligible
+    calc = await _calc(env, obs)
+    with pytest.raises(FinancialClaimCriticalEvidenceInsufficient):
+        await _create_fin(
+            env,
+            _fin_draft(
+                env,
+                supports=[calc.calculation_id],
+                importance=FinancialClaimImportance.CRITICAL,
+                claim_schema_version=2,
             ),
         )
     assert await _fin_claim_count(env["sessionmaker"]) == 0
@@ -727,7 +877,7 @@ async def test_concurrent_create_yields_single_financial_claim(env) -> None:
         (str(calc.calculation_id), "supports")
     ]
     assert await _evidence_link_rows(env["sessionmaker"], claim_id) == [
-        (str(env["evidence_card_id"]), "supports")
+        (str(env["evidence_card_id"]), "context")
     ]
 
 
@@ -765,7 +915,48 @@ async def test_schema_v1_generic_claim_replay_unchanged(env) -> None:
     async with env["sessionmaker"]() as session:
         fin_claim = await ClaimRepository(session).get_by_id(fin.claim_id)
     assert fin_claim is not None
-    assert fin_claim.claim_schema_version == FINANCIAL_CLAIM_SCHEMA_VERSION  # 2
+    assert fin_claim.claim_schema_version == FINANCIAL_CLAIM_SCHEMA_VERSION  # 3
+
+
+async def test_v2_financial_claim_replay_compatible(env) -> None:
+    """v2 已落地 Claim 必须继续可读/replay：以 claim_schema_version=2 创建 →
+    再次同 draft 创建 → replay 同一行，schema_version=2 原样保留。"""
+    obs = await _annual_revenue_pair(env)
+    calc = await _calc(env, obs)
+    draft = _fin_draft(env, supports=[calc.calculation_id], claim_schema_version=2)
+    first = await _create_fin(env, draft)
+    second = await _create_fin(env, draft)
+    assert first.claim_id == second.claim_id
+    assert second.replayed is True
+    async with env["sessionmaker"]() as session:
+        claim = await ClaimRepository(session).get_by_id(first.claim_id)
+    assert claim is not None
+    assert claim.claim_schema_version == 2
+    # v2 propagation：source Evidence 进入 supports links。
+    assert await _evidence_link_rows(env["sessionmaker"], first.claim_id) == [
+        (str(env["evidence_card_id"]), "supports")
+    ]
+
+
+async def test_v2_v3_schema_versions_do_not_collide(env) -> None:
+    """同一 draft（仅 claim_schema_version 不同）→ 不同 fingerprint → 两行，
+    不错误 collision。"""
+    obs = await _annual_revenue_pair(env)
+    calc = await _calc(env, obs)
+    v2 = await _create_fin(
+        env, _fin_draft(env, supports=[calc.calculation_id], claim_schema_version=2)
+    )
+    v3 = await _create_fin(env, _fin_draft(env, supports=[calc.calculation_id]))
+    assert v2.claim_id != v3.claim_id
+    assert v2.claim_fingerprint != v3.claim_fingerprint
+    assert v2.replayed is False
+    assert v3.replayed is False
+    assert await _fin_claim_count(env["sessionmaker"]) == 2
+    async with env["sessionmaker"]() as session:
+        v2_claim = await ClaimRepository(session).get_by_id(v2.claim_id)
+        v3_claim = await ClaimRepository(session).get_by_id(v3.claim_id)
+    assert v2_claim.claim_schema_version == 2
+    assert v3_claim.claim_schema_version == 3
 
 
 # ---------------------------------------------------------------- integrity
@@ -835,7 +1026,7 @@ async def test_financial_claim_e2e_provenance_trace(env) -> None:
             .all()
         )
     assert len(rows) == 2  # absolute_change 有 current + baseline 两个 inputs
-    assert all(r["claim_schema_version"] == 2 for r in rows)
+    assert all(r["claim_schema_version"] == FINANCIAL_CLAIM_SCHEMA_VERSION for r in rows)
     assert all(r["calc_rel"] == "supports" for r in rows)
     assert all(r["calculation_id"] == calc.calculation_id for r in rows)
     assert all(r["calculation_code"] == "absolute_change_cny" for r in rows)
@@ -881,3 +1072,90 @@ async def test_financial_claim_tables_exist_and_no_stage5_report_tables(env) -> 
 async def test_financial_claim_service_takes_only_sessionmaker(env) -> None:
     service = FinancialClaimService(env["sessionmaker"])
     assert set(service.__dict__) == {"_sessionmaker"}
+
+
+# ---------------------------------------------------------------- create_claim_batch
+
+
+async def _second_calc(env: dict, obs: dict):
+    """用不同 baseline 数值创建第二个 Calculation（不同 fingerprint，source card 相同）。"""
+    new_baseline = await _insert_observation(
+        env,
+        metric_code="revenue",
+        period_start=date(2023, 1, 1),
+        period_end=date(2023, 12, 31),
+        period_kind="duration",
+        normalized="9000000000",
+    )
+    obs_b = {**obs, InputRole.BASELINE: new_baseline}
+    return await _calc(env, obs_b)
+
+
+async def test_create_claim_batch_creates_two_claims_ordered(env) -> None:
+    obs = await _annual_revenue_pair(env)
+    calc_a = await _calc(env, obs)
+    calc_b = await _second_calc(env, obs)
+    draft_a = _fin_draft(env, supports=[calc_a.calculation_id], statement="结论A。")
+    draft_b = _fin_draft(env, supports=[calc_b.calculation_id], statement="结论B。")
+
+    service = FinancialClaimService(env["sessionmaker"])
+    batch: FinancialClaimBatchResult = await service.create_claim_batch([draft_a, draft_b])
+
+    assert [item.ordinal for item in batch.items] == [1, 2]
+    assert len(batch.claim_ids) == 2
+    assert batch.created_count == 2
+    assert batch.replayed_count == 0
+    async with env["sessionmaker"]() as session:
+        statements = []
+        for claim_id in batch.claim_ids:
+            claim = await ClaimRepository(session).get_by_id(claim_id)
+            statements.append(claim.statement)
+    assert statements == ["结论A。", "结论B。"]
+
+
+async def test_create_claim_batch_mixed_replay_and_create_ordered(env) -> None:
+    """混合 draft1 replay + draft2 create 时 items 仍按 drafts 顺序 → [draft1, draft2]。"""
+    obs = await _annual_revenue_pair(env)
+    calc_a = await _calc(env, obs)
+    calc_b = await _second_calc(env, obs)
+    draft_a = _fin_draft(env, supports=[calc_a.calculation_id], statement="结论A。")
+    draft_b = _fin_draft(env, supports=[calc_b.calculation_id], statement="结论B。")
+
+    service = FinancialClaimService(env["sessionmaker"])
+    # 先单独创建 draft_a（其 fingerprint 已存在）。
+    first = await service.create_claim(draft_a)
+    # batch [draft_a（replay）, draft_b（create）] → 顺序仍是 [draft_a_id, draft_b_id]。
+    batch = await service.create_claim_batch([draft_a, draft_b])
+
+    assert batch.claim_ids[0] == first.claim_id
+    assert batch.items[0].replayed is True
+    assert batch.items[1].replayed is False
+    assert batch.created_count == 1
+    assert batch.replayed_count == 1
+    assert await _fin_claim_count(env["sessionmaker"]) == 2
+
+
+async def test_create_claim_batch_all_or_nothing(env) -> None:
+    """batch 中任一 draft 失效（calc 缺失）→ 整批拒绝，0 写（draft1 也不落库）。"""
+    obs = await _annual_revenue_pair(env)
+    calc_a = await _calc(env, obs)
+    ghost = uuid4()
+    draft_a = _fin_draft(env, supports=[calc_a.calculation_id], statement="结论A。")
+    draft_b = _fin_draft(env, supports=[ghost], statement="结论B。")
+
+    service = FinancialClaimService(env["sessionmaker"])
+    with pytest.raises(FinancialClaimCalculationNotFound):
+        await service.create_claim_batch([draft_a, draft_b])
+    assert await _fin_claim_count(env["sessionmaker"]) == 0
+
+
+async def test_create_claim_batch_rejects_out_of_range(env) -> None:
+    obs = await _annual_revenue_pair(env)
+    calc = await _calc(env, obs)
+    service = FinancialClaimService(env["sessionmaker"])
+    with pytest.raises(FinancialClaimDraftError):
+        await service.create_claim_batch([])
+    draft = _fin_draft(env, supports=[calc.calculation_id])
+    with pytest.raises(FinancialClaimDraftError):
+        await service.create_claim_batch([draft] * (MAX_FINANCIAL_CLAIMS_PER_BATCH + 1))
+    assert await _fin_claim_count(env["sessionmaker"]) == 0

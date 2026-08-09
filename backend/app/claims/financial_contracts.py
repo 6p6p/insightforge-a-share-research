@@ -1,4 +1,4 @@
-"""Financial Claim contracts (stage 4B.2C.1): schema v2 + FinancialClaimDraft + fingerprint.
+"""Financial Claim contracts (stage 4B.2C.1): schema v3 + FinancialClaimDraft + fingerprint.
 
 4B.2C.1 持久化 **Claim ↔ FinancialCalculation** 链接
 （Claim → ClaimFinancialCalculationLink → FinancialCalculation →
@@ -7,21 +7,27 @@ FinancialMetricObservation → EvidenceCard → Source），使 Audit 可确定�
 deterministic fact，EvidenceCard = source-backed fact，保持分层。
 
 本模块冻结：
-- `FINANCIAL_CLAIM_SCHEMA_VERSION = 2`——只有存在 FinancialCalculation links
-  的 financial Claim 用 v2（FinancialClaimService 总是 v2，因为至少 1 个
-  support_calculation）。**禁止回头改变 v1 Claim fingerprint**；已有 v1 Claims
-  继续用 `compute_claim_fingerprint` 正常 replay（v2 是新函数新 payload）。
+- `FINANCIAL_CLAIM_SCHEMA_VERSION = 3`——**source Evidence relation semantics
+  修正**：Calculation 承担 supports/contradicts/context 的 Claim 语义关系，
+  underlying source Evidence 自动展开到 ClaimEvidenceLinks 时**一律
+  relation=context**（不是 propagation）。不要"support calculation → raw revenue
+  Evidence supports Claim"，也不要"contradict calculation → raw cost Evidence
+  contradicts Claim"：原始 metric Evidence 通常不能单独证明 derived financial
+  conclusion。additional Evidence 保持调用方指定的 supports/contradicts/context。
+- `FINANCIAL_CLAIM_SCHEMA_VERSION_V2 = 2`——v2 已落地（原 relation propagation
+  + 原 critical policy），**保持其 replay 语义，不静默修改历史 v2 rows、不重新
+  计算旧 fingerprint**。已有 v2 Claims 必须继续可读/replay。
 - `FinancialClaimDraft`：**专用新类，不污染 ClaimDraft**。语义输入 = company_id /
   research_question / statement / confidence / importance / claim_kind /
   support/contradict/context calculation ids / additional support/contradict/
   context evidence ids / analyst_name / analyst_version / analyst_model_id
-  optional。**固定 analysis_domain=financial**；claim_kind ∈ fact / inference /
-  risk（**不做 relative_valuation**，估值留 4C）。至少 1 support_calculation_id。
-  同一 calculation 不能跨 relation 重复。
-- v2 fingerprint：在 v1 内容基础上额外加入**按 relation 排序**的
-  supports_calculations / contradicts_calculations / context_calculations，
-  每 entry 至少 calculation_id + calculation_fingerprint。同一完全相同
-  Financial Claim → 同一指纹 → replay 同一行；任一变化 → 新指纹 → 新行。
+  optional / claim_schema_version（2 或 3，默认 3）。**固定 analysis_domain=
+  financial**；claim_kind ∈ fact / inference / risk（**不做 relative_valuation**，
+  估值留 4C）。至少 1 support_calculation_id。同一 calculation 不能跨 relation
+  重复。
+- v2/v3 fingerprint 都包含 claim_schema_version + claim semantic fields +
+  evidence links + calculation links/fingerprints，因此 **v2/v3 不会错误
+  collision**（同 draft 以不同 schema_version 创建 → 不同指纹 → 两行）。
 """
 
 import hashlib
@@ -33,8 +39,18 @@ from uuid import UUID
 from app.claims.contracts import ClaimKind, _normalize_evidence_ids
 from app.claims.financial_errors import FinancialClaimDraftError
 
-# claims.claim_schema_version 的 v2 值（financial Claim；含 Calculation links）。
-FINANCIAL_CLAIM_SCHEMA_VERSION = 2
+# claims.claim_schema_version 的当前值（financial Claim；含 Calculation links）。
+# v3 修正 source Evidence 语义：Calculation 承担 supports/contradicts/context，
+# 自动展开的 source Evidence 一律 relation=context；additional Evidence 保持
+# 调用方指定的 relation。
+FINANCIAL_CLAIM_SCHEMA_VERSION = 3
+# v2 是已落地的 legacy schema（原 relation propagation + 原 critical policy），
+# 保持 replay 语义；不修改历史 v2 rows、不重新计算旧 fingerprint。
+FINANCIAL_CLAIM_SCHEMA_VERSION_V2 = 2
+# financial Claim 支持的 schema 版本集合（禁止其他版本混入）。
+_FINANCIAL_CLAIM_SCHEMA_VERSIONS = frozenset(
+    (FINANCIAL_CLAIM_SCHEMA_VERSION_V2, FINANCIAL_CLAIM_SCHEMA_VERSION)
+)
 
 _FINANCIAL_CLAIM_KINDS = frozenset((ClaimKind.FACT, ClaimKind.INFERENCE, ClaimKind.RISK))
 _RELATIONS = ("supports", "contradicts", "context")
@@ -87,7 +103,10 @@ class FinancialClaimDraft:
       additional_context_evidence_ids：**只用于管理层解释 / 业务事件 / 风险
       说明等额外定性 Evidence**（与自动展开的 source Evidence 分开）；去重 +
       canonical 排序；同一 Evidence 不能跨 relation 重复；
-    - analyst_version >= 1；analyst_model_id 可选（trim，空串 → None）。
+    - analyst_version >= 1；analyst_model_id 可选（trim，空串 → None）；
+    - claim_schema_version：2 或 3（默认 3）。v3 用新 context propagation +
+      新 critical source policy；v2 沿用原 relation propagation + 原 policy
+      （仅用于既有 v2 Claim 的 replay 兼容，业务新创建一律 v3）。
     """
 
     company_id: UUID
@@ -105,6 +124,7 @@ class FinancialClaimDraft:
     analyst_name: str
     analyst_version: int
     analyst_model_id: str | None = None
+    claim_schema_version: int = FINANCIAL_CLAIM_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if isinstance(self.company_id, bool) or not isinstance(self.company_id, UUID):
@@ -139,6 +159,12 @@ class FinancialClaimDraft:
             model_id = model_id.strip()
             if not model_id:
                 model_id = None
+        if (
+            isinstance(self.claim_schema_version, bool)
+            or not isinstance(self.claim_schema_version, int)
+            or self.claim_schema_version not in _FINANCIAL_CLAIM_SCHEMA_VERSIONS
+        ):
+            raise FinancialClaimDraftError("claim_schema_version 必须是 2 或 3")
 
         supports = _normalize_calculation_ids(self.support_calculation_ids)
         contradicts = _normalize_calculation_ids(self.contradict_calculation_ids)
@@ -171,6 +197,7 @@ class FinancialClaimDraft:
 
 def compute_financial_claim_fingerprint(
     *,
+    claim_schema_version: int,
     company_id: UUID,
     research_question: str,
     statement: str,
@@ -189,18 +216,24 @@ def compute_financial_claim_fingerprint(
 ) -> str:
     """确定性 SHA-256 指纹（sort_keys + 固定 separators + UTF-8）。
 
-    v2 = v1 内容（claim_schema_version=2 / company / research_question /
+    = v1 内容（claim_schema_version / company / research_question /
     statement / analysis_domain=financial / claim_kind / confidence /
     importance / analyst 身份 / 按 relation 分组的 ordered evidence_card_ids）+
     **按 relation 排序的 supports_calculations / contradicts_calculations /
     context_calculations**（每 entry 至少 calculation_id +
     calculation_fingerprint）。
 
+    `claim_schema_version` 由调用方传入（2 或 3）：**v2/v3 fingerprint 都包含
+    schema version + claim semantic fields + evidence links + calculation
+    links/fingerprints**，因此同 draft 以不同 schema_version 派生 → 不同指纹 →
+    不会错误 collision。v3 的 evidence_by_relation 因 context propagation 天然
+    与 v2 不同（source Evidence 在 context 而非 supports），进一步隔离。
+
     **不得包含** claim_id / created_at。同一完全相同 Financial Claim → 同一指纹
     → replay 同一行；任一变化 → 新指纹 → 新行，旧行保留（修改 = 新 Claim）。
     """
     payload = {
-        "claim_schema_version": FINANCIAL_CLAIM_SCHEMA_VERSION,
+        "claim_schema_version": claim_schema_version,
         "company_id": str(company_id),
         "research_question": research_question,
         "statement": statement,

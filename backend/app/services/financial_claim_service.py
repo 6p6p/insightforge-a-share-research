@@ -1,7 +1,8 @@
 """Financial claim service (stage 4B.2C.1): provenance + persistence + replay.
 
-`create_claim(draft)` 把**引用已登记 FinancialCalculation** 的 Financial Claim
-确定性登记为 Claim + ClaimEvidenceLink（自动展开 source Evidence）+
+`create_claim(draft)` / `create_claim_batch(drafts)` 把**引用已登记
+FinancialCalculation** 的 Financial Claim 确定性登记为 Claim +
+ClaimEvidenceLink（自动展开 source Evidence）+
 ClaimFinancialCalculationLink，形成 **Claim → ClaimFinancialCalculationLink →
 FinancialCalculation → FinancialMetricObservation → EvidenceCard → Source**
 完整可重算证据链。**0 LLM / 0 Chroma / 0 Report / 0 Audit / 0 LangGraph**。
@@ -15,16 +16,27 @@ FinancialCalculation → FinancialMetricObservation → EvidenceCard → Source*
    DB 连接）。
 2. 纯函数派生（无 DB）：
    - **自动 Evidence expansion**：调用方/未来 LLM 只选 Calculation refs；程序
-     加载每个 Calculation 的 source Evidence，按 Calculation relation 传播
-     （supports→supports / contradicts→contradicts / context→context）；
+     加载每个 Calculation 的 source Evidence；
+   - **relation semantics（schema 版本化）**：
+     * v3（默认）：Calculation 承担 supports/contradicts/context 的语义关系，
+       automatic source Evidence 展开到 ClaimEvidenceLinks 时**一律
+       relation=context**（不是 propagation）；additional Evidence 保持调用方
+       指定的 relation。
+     * v2（legacy replay）：沿用原 relation propagation（calculation relation →
+       source Evidence 同 relation）。
    - **relation conflict**：同一 Evidence 因多个 Calculations / additional
      Evidence 被推导成不同 relation → FinancialClaimRelationConflict（不静默
      选一个）；
-   - **critical policy**：importance=critical 时 ≥1 最终 supports Evidence
-     满足 critical_claim_eligible_snapshot=true（**复用 ClaimService source
-     policy**——FinancialCalculation 本身不能升级 source authority），否则
-     FinancialClaimCriticalEvidenceInsufficient；
-   - **v2 fingerprint**：v1 内容 + 按 relation 排序的 calculation lists。
+   - **critical policy（schema 版本化）**：
+     * v3：critical financial Claim 不能再依赖 ClaimEvidenceLink.supports 中的
+       automatic source Evidence（现在都是 context）。deterministic source
+       policy——至少满足其一：① 任一 support Calculation 展开得到的 source
+       Evidence 中存在 critical_claim_eligible_snapshot=true；②
+       additional_support_evidence_ids 中存在该属性。**Calculation 本身绝不
+       提升 authority**。否则 FinancialClaimCriticalEvidenceInsufficient。
+     * v2：沿用旧 policy（最终 supports evidence links 中任一 eligible）。
+   - **v3 fingerprint**：claim_schema_version + claim semantic fields +
+     evidence links + calculation links/fingerprints（v2/v3 不 collision）。
 3. 短 DB transaction：create_or_get（ON CONFLICT(claim_fingerprint)，无进程锁）
    → created=True 时 bulk insert evidence links + calculation links；created=False
    时 **重新加载 Claim / links / Calculations / inputs / Observations /
@@ -32,6 +44,8 @@ FinancialCalculation → FinancialMetricObservation → EvidenceCard → Source*
    **不自动 repair**）。任何 SQLAlchemyError → 整条 rollback +
    FinancialClaimPersistenceFailed（0 partial write）。并发 → 最终 1 Claim + 1
    套 links。无 update API（修改 = 新 Claim = 新 fingerprint = 新行）。
+   create_claim_batch 为 **all-drafts-validate-first + 单 transaction**（任一
+   draft 校验失败 → 整批拒绝，0 写；items 按 input drafts 顺序返回）。
 
 **不创建 Report / DraftSection / ReviewIssue**；不接 LangGraph 分析节点。
 """
@@ -46,7 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.claims.contracts import ClaimAnalysisDomain, compute_research_question_sha256
 from app.claims.financial_contracts import (
-    FINANCIAL_CLAIM_SCHEMA_VERSION,
+    FINANCIAL_CLAIM_SCHEMA_VERSION_V2,
     FinancialClaimDraft,
     FinancialClaimImportance,
     compute_financial_claim_fingerprint,
@@ -55,6 +69,7 @@ from app.claims.financial_errors import (
     FinancialClaimCalculationMismatch,
     FinancialClaimCalculationNotFound,
     FinancialClaimCriticalEvidenceInsufficient,
+    FinancialClaimDraftError,
     FinancialClaimEvidenceCompanyMismatch,
     FinancialClaimIntegrityError,
     FinancialClaimPersistenceFailed,
@@ -80,6 +95,10 @@ from app.repositories.financial_metric_observation_repository import (
 
 _RELATIONS = ("supports", "contradicts", "context")
 
+# 单次 create_claim_batch 最多 3 条 Financial Claim（与 4B.2C.2 的
+# MAX_CLAIMS_PER_DECISION 一致）。
+MAX_FINANCIAL_CLAIMS_PER_BATCH = 3
+
 
 @dataclass(frozen=True)
 class FinancialClaimResult:
@@ -88,6 +107,56 @@ class FinancialClaimResult:
     claim_id: UUID
     claim_fingerprint: str
     replayed: bool
+
+
+@dataclass(frozen=True)
+class FinancialClaimBatchItem:
+    """batch 中单个 draft 的结果（ordinal 从 1 开始，与 input drafts 一一对应）。
+
+    - ordinal：draft 在本次 batch 中的位置（1..len(drafts)）；
+    - claim_id：created 或 replayed 后的 Claim id；
+    - replayed：True=复用既有 fingerprint 的 Claim，False=本次真正新增。
+    """
+
+    ordinal: int
+    claim_id: UUID
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class FinancialClaimBatchResult:
+    """一次 create_claim_batch 的结果摘要（不含任何正文文本 / evidence）。
+
+    - items：**ordered result**——按 input drafts 顺序的逐条结果，
+      len(items) == len(drafts)，items[i] 永远对应 drafts[i]（不按
+      created/replayed 分组重排）；
+    - fingerprints：claim_id → claim_fingerprint（供上游追溯）；
+    - claim_ids / created / replayed / created_count / replayed_count：由
+      items 顺序派生（不是各自分组拼接）。
+    """
+
+    items: tuple[FinancialClaimBatchItem, ...]
+    fingerprints: dict[UUID, str]
+
+    @property
+    def claim_ids(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items)
+
+    @property
+    def created(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items if not item.replayed)
+
+    @property
+    def replayed(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items if item.replayed)
+
+    @property
+    def created_count(self) -> int:
+        return len(self.created)
+
+    @property
+    def replayed_count(self) -> int:
+        return len(self.replayed)
 
 
 @dataclass(frozen=True)
@@ -128,28 +197,96 @@ class FinancialClaimService:
 
     async def create_claim(self, draft: FinancialClaimDraft) -> FinancialClaimResult:
         """登记一条引用已登记 Calculations 的 Financial Claim（0 partial write）。"""
-        # 1. 短 DB session：加载并校验全部 Calculation / Observation / Evidence。
-        loaded = await self._load_validate(draft)
+        batch = await self.create_claim_batch([draft])
+        claim_id = batch.claim_ids[0]
+        return FinancialClaimResult(
+            claim_id=claim_id,
+            claim_fingerprint=batch.fingerprints[claim_id],
+            replayed=claim_id in batch.replayed,
+        )
 
-        # 2. 纯函数派生（不持有 DB 连接）。
-        derived = self._derive(draft, loaded)
+    async def create_claim_batch(
+        self, drafts: list[FinancialClaimDraft]
+    ) -> FinancialClaimBatchResult:
+        """把 1..MAX_FINANCIAL_CLAIMS_PER_BATCH 条 Financial Claim 原子登记。
 
-        # 3. 短 DB transaction：create_or_get + links / replay 校验。
+        两步提交结构（镜像 ClaimService.create_claim_batch）：
+        1. **all-drafts-validate-first**——开事务前，对全部 drafts 加载引用并完成
+           派生（自动展开 / relation semantics / critical policy / fingerprint）；
+           任何一条失败 → 整批拒绝（0 写），**不允许 candidate 1 创建、
+           candidate 2 才失败**。
+        2. **单 transaction**——逐个 create_or_get + bulk insert links / replay
+           校验；任一 SQLAlchemyError / FinancialClaimIntegrityError → 整批回滚，
+           不留下半批 Claim（禁止 compensating delete）。
+        items 按 input drafts 顺序返回（ordinal 一一对应）。
+        """
+        if not isinstance(drafts, list) or not (1 <= len(drafts) <= MAX_FINANCIAL_CLAIMS_PER_BATCH):
+            raise FinancialClaimDraftError(f"drafts 必须在 1..{MAX_FINANCIAL_CLAIMS_PER_BATCH} 条")
+
+        # 1. 短 DB session：一次性加载并校验全部 drafts 的 Calculation/Evidence 引用。
+        async with self._sessionmaker() as session:
+            loaded_list = [await self._load_validate_session(session, draft) for draft in drafts]
+
+        # 2. 全部 drafts 先完成派生（任何一条失败 → 整批拒绝，0 写）。
+        derived_list = [
+            self._derive(draft, loaded) for draft, loaded in zip(drafts, loaded_list, strict=True)
+        ]
+
+        # 3. 单 transaction：逐个 create_or_get + links / replay。
+        #    items 按 prepared（== input drafts）顺序收集，绝不按 created/replayed
+        #    分组重排——items[i] 永远对应 drafts[i]。
+        fingerprints: dict[UUID, str] = {}
+        items: list[FinancialClaimBatchItem] = []
         async with self._sessionmaker() as session:
             try:
                 repo = ClaimRepository(session)
                 link_repo = ClaimEvidenceLinkRepository(session)
                 calc_link_repo = ClaimFinancialCalculationLinkRepository(session)
-                claim = ClaimModel(claim_id=uuid.uuid4(), **self._claim_kwargs(draft, derived))
-                persisted, created = await repo.create_or_get(claim)
-                if created:
+                for ordinal, (draft, derived) in enumerate(
+                    zip(drafts, derived_list, strict=True), start=1
+                ):
+                    existing = await repo.get_by_fingerprint(derived.fingerprint)
+                    if existing is not None:
+                        await self._verify_replay(session, existing, draft)
+                        fingerprints[existing.claim_id] = derived.fingerprint
+                        items.append(
+                            FinancialClaimBatchItem(
+                                ordinal=ordinal,
+                                claim_id=existing.claim_id,
+                                replayed=True,
+                            )
+                        )
+                        continue
+
+                    claim = ClaimModel(claim_id=uuid.uuid4(), **self._claim_kwargs(draft, derived))
+                    persisted, created = await repo.create_or_get(claim)
+                    if not created:
+                        # 并发输家：复用既有 Claim（replay 校验后返回）。
+                        await self._verify_replay(session, persisted, draft)
+                        fingerprints[persisted.claim_id] = derived.fingerprint
+                        items.append(
+                            FinancialClaimBatchItem(
+                                ordinal=ordinal,
+                                claim_id=persisted.claim_id,
+                                replayed=True,
+                            )
+                        )
+                        continue
+
                     await link_repo.bulk_insert(self._evidence_links(persisted.claim_id, derived))
                     await calc_link_repo.bulk_insert(
                         self._calculation_links(persisted.claim_id, derived)
                     )
-                else:
-                    await self._verify_replay(session, persisted, draft)
+                    fingerprints[persisted.claim_id] = derived.fingerprint
+                    items.append(
+                        FinancialClaimBatchItem(
+                            ordinal=ordinal,
+                            claim_id=persisted.claim_id,
+                            replayed=False,
+                        )
+                    )
                 await session.commit()
+                return FinancialClaimBatchResult(items=tuple(items), fingerprints=fingerprints)
             except FinancialClaimIntegrityError:
                 # replay 校验发现既有 Claim 数据损坏 → 显式回滚本事务，然后抛出。
                 await session.rollback()
@@ -158,17 +295,7 @@ class FinancialClaimService:
                 await session.rollback()
                 raise FinancialClaimPersistenceFailed() from exc
 
-        return FinancialClaimResult(
-            claim_id=persisted.claim_id,
-            claim_fingerprint=persisted.claim_fingerprint,
-            replayed=not created,
-        )
-
     # ------------------------------------------------------------------ 加载校验
-
-    async def _load_validate(self, draft: FinancialClaimDraft) -> _LoadedReferences:
-        async with self._sessionmaker() as session:
-            return await self._load_validate_session(session, draft)
 
     async def _load_validate_session(
         self,
@@ -266,20 +393,42 @@ class FinancialClaimService:
         draft: FinancialClaimDraft,
         loaded: _LoadedReferences,
     ) -> _DerivedFinancialClaim:
-        """纯函数派生：自动展开 → relation 传播/冲突 → critical policy → fingerprint。"""
-        # 1. 自动 Evidence expansion + relation propagation（supports→supports 等）。
+        """纯函数派生：自动展开 → relation semantics → critical policy → fingerprint。
+
+        按 `draft.claim_schema_version` 分支：
+        - v3（默认）：automatic source Evidence 一律 relation=context（Calculation
+          承担 supports/contradicts/context 语义）；critical 用 deterministic
+          source policy（任一 support Calculation 的 source Evidence eligible，或
+          additional_support_evidence_ids 中存在 eligible）。
+        - v2（legacy replay）：沿用原 relation propagation（calculation relation →
+          source Evidence 同 relation）+ 旧 critical policy（最终 supports links
+          中任一 eligible）。
+        """
         auto: dict[UUID, str] = {}
         calc_ids_by_relation = {
             "supports": draft.support_calculation_ids,
             "contradicts": draft.contradict_calculation_ids,
             "context": draft.context_calculation_ids,
         }
-        for relation, calc_ids in calc_ids_by_relation.items():
-            for calc_id in calc_ids:
-                for card_id in loaded.source_evidence_ids[calc_id]:
-                    _assign_relation(auto, card_id, relation)
+        if draft.claim_schema_version == FINANCIAL_CLAIM_SCHEMA_VERSION_V2:
+            # v2：legacy relation propagation（calculation relation → source
+            # Evidence 同 relation），保持既有 v2 Claim 的 replay 语义。
+            for relation, calc_ids in calc_ids_by_relation.items():
+                for calc_id in calc_ids:
+                    for card_id in loaded.source_evidence_ids[calc_id]:
+                        _assign_relation(auto, card_id, relation)
+        else:
+            # v3：Calculation 承担 supports/contradicts/context 的语义关系；
+            # automatic source Evidence 展开到 ClaimEvidenceLinks 时**一律
+            # relation=context**（不是 propagation）。原始 metric Evidence 通常
+            # 不能单独证明 derived financial conclusion。
+            for calc_ids in calc_ids_by_relation.values():
+                for calc_id in calc_ids:
+                    for card_id in loaded.source_evidence_ids[calc_id]:
+                        _assign_relation(auto, card_id, "context")
 
-        # 2. additional Evidence（管理层解释 / 业务事件 / 风险说明）合并进同一 map。
+        # additional Evidence（管理层解释 / 业务事件 / 风险说明）保持调用方指定的
+        # supports/contradicts/context（v2/v3 一致）。
         additional_by_relation = {
             "supports": draft.additional_support_evidence_ids,
             "contradicts": draft.additional_contradict_evidence_ids,
@@ -297,23 +446,44 @@ class FinancialClaimService:
             for relation in _RELATIONS
         }
 
-        # 3. critical policy：复用 ClaimService 的 source policy（Calculation 本身
-        #    不能升级 source authority；critical 需 ≥1 最终 supports eligible）。
+        # critical policy（schema 版本化）。
         if draft.importance == FinancialClaimImportance.CRITICAL:
-            supports_cards = [
-                loaded.evidence[card_id] for card_id in evidence_by_relation["supports"]
-            ]
-            if not any(card.critical_claim_eligible_snapshot for card in supports_cards):
-                raise FinancialClaimCriticalEvidenceInsufficient()
+            if draft.claim_schema_version == FINANCIAL_CLAIM_SCHEMA_VERSION_V2:
+                # v2：沿用旧 policy——最终 supports evidence links（自动展开 +
+                # additional 合并）中任一 eligible。
+                supports_cards = [
+                    loaded.evidence[card_id] for card_id in evidence_by_relation["supports"]
+                ]
+                if not any(card.critical_claim_eligible_snapshot for card in supports_cards):
+                    raise FinancialClaimCriticalEvidenceInsufficient()
+            else:
+                # v3：不再依赖 ClaimEvidenceLink.supports 中的 automatic source
+                # Evidence（现在都是 context）。deterministic source policy——至少
+                # 满足其一：① 任一 support Calculation 展开得到的 source Evidence
+                # 中存在 critical_claim_eligible_snapshot=true；②
+                # additional_support_evidence_ids 中存在该属性。**Calculation 本身
+                # 绝不提升 authority**。
+                eligible = any(
+                    loaded.evidence[card_id].critical_claim_eligible_snapshot
+                    for calc_id in draft.support_calculation_ids
+                    for card_id in loaded.source_evidence_ids[calc_id]
+                ) or any(
+                    loaded.evidence[card_id].critical_claim_eligible_snapshot
+                    for card_id in draft.additional_support_evidence_ids
+                )
+                if not eligible:
+                    raise FinancialClaimCriticalEvidenceInsufficient()
 
-        # 4. calculation lists（按 relation 分组，canonical 排序）。
+        # calculation lists（按 relation 分组，canonical 排序）。
         calculations_by_relation: dict[str, list[UUID]] = {
             relation: sorted(calc_ids, key=str)
             for relation, calc_ids in calc_ids_by_relation.items()
         }
 
-        # 5. v2 fingerprint：v1 内容 + 按 relation 排序的 calculation entries。
+        # fingerprint：v3 = claim_schema_version + claim semantic fields + evidence
+        # links + calculation links/fingerprints（v2/v3 不 collision）。
         fingerprint = compute_financial_claim_fingerprint(
+            claim_schema_version=draft.claim_schema_version,
             company_id=draft.company_id,
             research_question=draft.research_question,
             statement=draft.statement,
@@ -369,7 +539,7 @@ class FinancialClaimService:
             "analyst_name": draft.analyst_name,
             "analyst_version": draft.analyst_version,
             "analyst_model_id": draft.analyst_model_id,
-            "claim_schema_version": FINANCIAL_CLAIM_SCHEMA_VERSION,
+            "claim_schema_version": draft.claim_schema_version,
             "claim_fingerprint": derived.fingerprint,
         }
 
@@ -418,9 +588,9 @@ class FinancialClaimService:
 
         重新加载 Claim / evidence links / calculation links / Calculations /
         inputs / Observations / EvidenceCards，重新执行 Calculation integrity、
-        自动 Evidence expansion、critical policy、relation conflict、v2
-        fingerprint，逐项核实。任一损坏 → FinancialClaimIntegrityError，
-        **不自动 repair**。
+        自动 Evidence expansion、relation semantics / critical policy / relation
+        conflict、按 draft.claim_schema_version 版本化的 fingerprint，逐项核实。
+        任一损坏 → FinancialClaimIntegrityError，**不自动 repair**。
         """
         loaded = await self._load_validate_session(session, draft)
         try:
@@ -483,7 +653,7 @@ class FinancialClaimService:
             (
                 "claim_schema_version",
                 existing.claim_schema_version,
-                FINANCIAL_CLAIM_SCHEMA_VERSION,
+                draft.claim_schema_version,
             ),
             ("claim_fingerprint", existing.claim_fingerprint, derived.fingerprint),
         )
