@@ -1,4 +1,4 @@
-"""Evidence-bound section writer service (stage 5B, spec C/I/J/K/L/M/N/O/P).
+"""Evidence-bound section writer service (stage 5B, spec C/I/J/K/L/M/N/O/P; Gate 0 E).
 
 流程（两步提交，镜像 SynthesisAnalysisService / ReportOutlineService）：
 1. 防御性 request 校验（构造已校验，服务层再兜底）；
@@ -6,23 +6,30 @@
    （read-side 公共 API）→ 关闭 session → 定位 section（缺失 →
    `DraftSectionNotFound`）→ 恢复 allowed Claim 集 + conflict/gap；
 3. 短 DB session：加载 section 允许的 Claims（含 fingerprint）+ 真实绑定
-   Evidence（含 fingerprint）+ company name → 关闭 session；
+   Evidence（含 fingerprint + per-Claim relation）+ company name → 关闭 session；
 4. 纯函数构造 deterministic Section Input Pack（C/E/X/G alias，**LLM 永不看
-   UUID / fingerprint / provenance id**）；
+   UUID / fingerprint / provenance id**；Evidence 按 per-Claim relation 投影）；
 5. `compute_writer_input_fingerprint`（outline + section 身份 + allowed
-   Claim/Evidence fingerprints + conflict/gap 数据 + writer 身份）；
+   Claim/Evidence fingerprints + **Evidence–Claim relation mapping** +
+   conflict/gap 数据 + writer 身份）；
 6. **replay check**（短 session，0 LLM）：已存在同指纹行 → 完整 replay 校验
    （verify_resolved_payload + 重算 section_fingerprint + 身份字段）→ 0 次模型
    调用直接返回；损坏 → `DraftSectionIntegrityError`（**不自动 repair**）；
 7. 关闭 session → 调 Writer 模型（structured output）→ `WriterDecision`；
 8. hard provenance validation（`validate_decision`：known / cross-section /
-   unbound / numeric grounding / forbidden language）→ `resolve_decision`
-   把 alias / index 解析回真实 ID，产出规范化 persisted payload；
+   unbound / Section-aware paragraph contract / inline alias leak / numeric
+   grounding / forbidden language）→ `resolve_decision` 把 alias / index 解析回
+   真实 ID，产出规范化 persisted payload；
 9. `compute_section_fingerprint`（writer_input_fingerprint + payload）；
 10. 短 DB transaction：create_or_get（ON CONFLICT(writer_input_fingerprint)，
     无进程锁）→ 命中时完整 replay 校验；SQLAlchemyError → rollback +
     `DraftSectionPersistenceFailed`；
 11. 返回 `DraftSectionResult`（不含正文段落 / prompt / raw response）。
+
+**公共 read-side**：`verify_draft_section_integrity(draft_section_id)`——完整重建
+输入、重放验证（身份 / 输入指纹 / payload scope / Section-aware contract /
+binding / numeric / forbidden / inline alias / section_fingerprint），供 Stage 5C
+使用；v1 旧行 → `DraftSectionLegacyVersionUnsupported`（**不假验证**）。
 
 **不创建 Report / DraftSection 之外的行 / Audit**；不接 LangGraph；不调用
 Retrieval / Chroma / tools / web search；Writer 无法自主扩大 Outline scope
@@ -51,6 +58,7 @@ from app.draft_section.contracts import (
     WRITER_VERSION,
     DraftSectionRequest,
     DraftSectionResult,
+    VerifiedDraftSection,
     WriterDecision,
     compute_section_fingerprint,
     compute_writer_input_fingerprint,
@@ -59,6 +67,7 @@ from app.draft_section.errors import (
     DraftSectionError,
     DraftSectionInputError,
     DraftSectionIntegrityError,
+    DraftSectionLegacyVersionUnsupported,
     DraftSectionMalformedOutput,
     DraftSectionModelUnavailable,
     DraftSectionNotFound,
@@ -77,6 +86,7 @@ from app.draft_section.repository import DraftSectionRepository
 from app.draft_section.validate import (
     resolve_decision,
     validate_decision,
+    verify_payload_contracts,
     verify_resolved_payload,
 )
 from app.report_outline.contracts import (
@@ -87,9 +97,6 @@ from app.report_outline.contracts import (
 )
 from app.report_outline.errors import ReportOutlineNotFound
 from app.report_outline.service import ReportOutlineService
-
-# Evidence 多 (claim, evidence) 关系时取确定性最强关系（spec H）。
-_RELATION_ORDER = {"supports": 0, "contradicts": 1, "context": 2}
 
 
 @dataclass(frozen=True)
@@ -143,7 +150,7 @@ class DraftSectionService:
             gaps=loaded.gaps,
         )
 
-        # 5. LLM 输入边界的确定性指纹。
+        # 5. LLM 输入边界的确定性指纹（含 Evidence–Claim relation mapping，spec C）。
         writer_input_fingerprint = compute_writer_input_fingerprint(
             section_schema_version=DRAFT_SECTION_SCHEMA_VERSION,
             outline_fingerprint=verified.outline_fingerprint,
@@ -153,6 +160,7 @@ class DraftSectionService:
             title=section.title,
             claim_fingerprints=[claim.claim_fingerprint for claim in loaded.claims],
             evidence_fingerprints=[item.evidence_fingerprint for item in loaded.evidence],
+            evidence_claim_relations=_evidence_claim_relations(loaded.evidence),
             conflicts=_conflict_fingerprint_data(loaded.conflicts),
             gaps=_gap_fingerprint_data(loaded.gaps),
             writer_name=WRITER_NAME,
@@ -221,6 +229,114 @@ class DraftSectionService:
 
         # 11. 结果摘要（不含正文段落 / prompt / raw response）。
         return self._result(row, replayed=not was_created)
+
+    async def verify_draft_section_integrity(self, draft_section_id: UUID) -> VerifiedDraftSection:
+        """public read-only 校验：完整重建输入并重放验证（spec E，Stage 5C 用）。
+
+        步骤：加载行 → 版本支持检查 → verify outline integrity → 定位 section →
+        重建 section input（claims / evidence / conflicts / gaps）→ 身份字段逐一
+        对比 → 重算 writer_input_fingerprint（含 relation mapping）→ 解析
+        persisted payload → 重跑完整 Section-aware 校验（scope / contract /
+        binding / numeric / forbidden / inline alias）→ 重算 section_fingerprint。
+
+        任一损坏 → `DraftSectionIntegrityError`（**不自动 repair**）。v1 旧行无法
+        被 v2 contract 稳定重建 → `DraftSectionLegacyVersionUnsupported`。
+        """
+        async with self._sessionmaker() as session:
+            row = await DraftSectionRepository(session).get_by_id(draft_section_id)
+        if row is None:
+            raise DraftSectionNotFound(f"draft section {draft_section_id} not found")
+        if row.writer_version != WRITER_VERSION:
+            raise DraftSectionLegacyVersionUnsupported(
+                f"draft section writer_version={row.writer_version} not supported "
+                f"(current WRITER_VERSION={WRITER_VERSION})"
+            )
+
+        # verify outline（read-side 公共 API）。
+        try:
+            verified = await self._outline_service.verify_outline_integrity(row.outline_id)
+        except ReportOutlineNotFound:
+            raise DraftSectionIntegrityError("draft section outline missing") from None
+        section = self._find_section(verified, row.section_id)
+        loaded = await self._load_section(verified, section)
+        pack = build_section_input_pack(
+            outline=verified,
+            section=section,
+            company_name=loaded.company_name,
+            claims=loaded.claims,
+            evidence=loaded.evidence,
+            conflicts=loaded.conflicts,
+            gaps=loaded.gaps,
+        )
+
+        # 身份字段逐一对比。
+        identity_checks = [
+            (row.outline_id, verified.outline_id, "outline_id"),
+            (row.section_id, section.section_id, "section_id"),
+            (row.section_order, section.section_order, "section_order"),
+            (row.section_type, section.section_type, "section_type"),
+            (row.title, section.title, "title"),
+            (row.section_schema_version, DRAFT_SECTION_SCHEMA_VERSION, "section_schema_version"),
+            (row.writer_name, WRITER_NAME, "writer_name"),
+            (row.writer_version, WRITER_VERSION, "writer_version"),
+            (row.writer_model_id, self._model.model_id, "writer_model_id"),
+        ]
+        for actual, want, field in identity_checks:
+            if actual != want:
+                raise DraftSectionIntegrityError(f"draft section {field} mismatch")
+
+        # 重算 writer_input_fingerprint（含 relation mapping）。
+        recomputed_input = compute_writer_input_fingerprint(
+            section_schema_version=DRAFT_SECTION_SCHEMA_VERSION,
+            outline_fingerprint=verified.outline_fingerprint,
+            section_id=section.section_id,
+            section_order=section.section_order,
+            section_type=section.section_type,
+            title=section.title,
+            claim_fingerprints=[claim.claim_fingerprint for claim in loaded.claims],
+            evidence_fingerprints=[item.evidence_fingerprint for item in loaded.evidence],
+            evidence_claim_relations=_evidence_claim_relations(loaded.evidence),
+            conflicts=_conflict_fingerprint_data(loaded.conflicts),
+            gaps=_gap_fingerprint_data(loaded.gaps),
+            writer_name=WRITER_NAME,
+            writer_version=WRITER_VERSION,
+            writer_model_id=self._model.model_id,
+        )
+        if recomputed_input != row.writer_input_fingerprint:
+            raise DraftSectionIntegrityError("draft section writer_input_fingerprint mismatch")
+
+        # 解析 persisted payload → 完整 Section-aware 重验证（scope / contract /
+        # binding / numeric / forbidden / inline alias）。
+        payload = row.section_payload
+        verify_payload_contracts(
+            pack=pack,
+            payload=payload,
+            total_claim_count=len(verified.verified_synthesis_result.input_claim_ids),
+        )
+
+        # 重算 section_fingerprint。
+        recomputed_section = compute_section_fingerprint(
+            writer_input_fingerprint=recomputed_input,
+            section_payload=payload,
+        )
+        if recomputed_section != row.section_fingerprint:
+            raise DraftSectionIntegrityError("draft section section_fingerprint mismatch")
+
+        return VerifiedDraftSection(
+            draft_section_id=row.draft_section_id,
+            outline_id=row.outline_id,
+            section_id=row.section_id,
+            section_order=row.section_order,
+            section_type=row.section_type,
+            title=row.title,
+            section_schema_version=row.section_schema_version,
+            writer_name=row.writer_name,
+            writer_version=row.writer_version,
+            writer_model_id=row.writer_model_id,
+            writer_input_fingerprint=row.writer_input_fingerprint,
+            section_fingerprint=row.section_fingerprint,
+            paragraph_count=len(payload["paragraphs"]),
+        )
 
     # ------------------------------------------------------------------ 内部
 
@@ -343,8 +459,10 @@ class DraftSectionService:
     async def _load_evidence(self, session, allowed_claim_ids: list[UUID]) -> list[LoadedEvidence]:
         """加载真实绑定于 allowed Claims 的 Evidence（只含真实绑定 Evidence，spec H）。
 
-        按 evidence_card_id 聚合：claim_ids = 绑定的 allowed Claims（canonical
-        排序）；relation 取确定性最强（supports > contradicts > context）。
+        按 evidence_card_id 聚合：claim_relations = 每张 Evidence 与其绑定
+        allowed Claims 的 `(claim_id, relation)` 对（canonical 排序）。同一 Evidence
+        可对不同 Claim 有不同 relation（DB UNIQUE=(claim_id, evidence_card_id)
+        只约束单 claim 内），**不折叠**（spec C）。
         """
         result = await session.execute(
             select(
@@ -362,16 +480,20 @@ class DraftSectionService:
         for card, claim_id, relation in result.all():
             entry = grouped.setdefault(
                 card.evidence_card_id,
-                {"card": card, "claim_ids": set(), "relations": set()},
+                {"card": card, "claim_relations": set()},
             )
-            entry["claim_ids"].add(claim_id)
-            entry["relations"].add(relation)
+            entry["claim_relations"].add((claim_id, relation))
         allowed = set(allowed_claim_ids)
         items: list[LoadedEvidence] = []
         for card_id in sorted(grouped, key=str):
             entry = grouped[card_id]
             card = entry["card"]
-            bound = tuple(sorted(entry["claim_ids"] & allowed, key=str))
+            bound = tuple(
+                sorted(
+                    ((cid, rel) for cid, rel in entry["claim_relations"] if cid in allowed),
+                    key=lambda pair: str(pair[0]),
+                )
+            )
             if not bound:
                 # 查询按 allowed claims 过滤，理论不可达；防御性跳过未绑定卡。
                 continue
@@ -387,8 +509,7 @@ class DraftSectionService:
                     reporting_period_end=card.reporting_period_end,
                     source_published_at=card.source_published_at,
                     origin_type=card.origin_type,
-                    relation=_strongest_relation(entry["relations"]),
-                    claim_ids=bound,
+                    claim_relations=bound,
                 )
             )
         return items
@@ -501,9 +622,22 @@ class DraftSectionService:
         )
 
 
-def _strongest_relation(relations: set[str]) -> str:
-    """多 (claim, evidence) 关系时取确定性最强（supports > contradicts > context）。"""
-    return min(relations, key=_RELATION_ORDER.get)
+def _evidence_claim_relations(evidence: list[LoadedEvidence]) -> list[dict]:
+    """canonical 排序的 Evidence–Claim relation mapping（供输入指纹用，spec C）。
+
+    evidence 已按 str(evidence_card_id) 排序、每条 claim_relations 已按
+    str(claim_id) 排序 → 输出稳定可复现。同 (evidence, claim) 的 relation 变化
+    → 新指纹 → 新草稿（relation mapping 是 LLM 输入的一部分）。
+    """
+    return [
+        {
+            "evidence": str(item.evidence_card_id),
+            "claim": str(claim_id),
+            "relation": relation,
+        }
+        for item in evidence
+        for claim_id, relation in item.claim_relations
+    ]
 
 
 def _conflict_fingerprint_data(conflicts: list[ResolvedConflict]) -> list[dict]:

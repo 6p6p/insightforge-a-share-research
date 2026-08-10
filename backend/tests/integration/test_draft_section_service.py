@@ -46,15 +46,18 @@ from app.draft_section.contracts import (
     WRITER_NAME,
     WRITER_VERSION,
     DraftSectionRequest,
+    VerifiedDraftSection,
 )
 from app.draft_section.errors import (
     DraftSectionCrossSectionRef,
     DraftSectionForbiddenLanguage,
     DraftSectionIntegrityError,
+    DraftSectionLegacyVersionUnsupported,
     DraftSectionMalformedOutput,
     DraftSectionModelUnavailable,
     DraftSectionNotFound,
     DraftSectionNumericGroundingError,
+    DraftSectionParagraphContract,
     DraftSectionUnboundEvidence,
     DraftSectionUnknownRef,
 )
@@ -663,3 +666,151 @@ async def test_replay_rejects_tampered_text_in_payload(env, monkeypatch, connect
             DraftSectionRequest(outline_id=outline_id, section_id="S1")
         )
     assert fake.calls == []
+
+
+# ---------------------------------------------------------------- verify draft section integrity
+
+
+async def test_verify_integrity_happy_path(env, monkeypatch, connection_uri) -> None:
+    """起草后完整重建验证通过：返回 VerifiedDraftSection，0 次模型调用。"""
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    fake = FakeDraftSectionModel(decision_factory=valid_decision_for)
+    service = _service(env, fake)
+    created = await service.create_or_get_section(
+        DraftSectionRequest(outline_id=outline_id, section_id="S1")
+    )
+    assert len(fake.calls) == 1
+
+    verified: VerifiedDraftSection = await service.verify_draft_section_integrity(
+        created.draft_section_id
+    )
+    assert verified.draft_section_id == created.draft_section_id
+    assert verified.outline_id == outline_id
+    assert verified.section_id == "S1"
+    assert verified.section_order == 1
+    assert verified.section_type == "theme"
+    assert verified.section_schema_version == DRAFT_SECTION_SCHEMA_VERSION
+    assert verified.writer_name == WRITER_NAME
+    assert verified.writer_version == WRITER_VERSION
+    assert verified.writer_model_id == fake.model_id
+    assert verified.writer_input_fingerprint == created.writer_input_fingerprint
+    assert verified.section_fingerprint == created.section_fingerprint
+    assert verified.paragraph_count == created.paragraph_count
+    assert len(fake.calls) == 1  # verify 不触发模型调用
+
+
+async def test_verify_integrity_missing_draft_rejected(env) -> None:
+    service = _service(env, FakeDraftSectionModel(decision_factory=valid_decision_for))
+    with pytest.raises(DraftSectionNotFound):
+        await service.verify_draft_section_integrity(uuid4())
+
+
+async def test_verify_integrity_legacy_version_rejected(env, monkeypatch, connection_uri) -> None:
+    """v1 旧行无法被 v2 contract 稳定重建 → 明确 unsupported，不假验证。"""
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    created = await _service(
+        env, FakeDraftSectionModel(decision_factory=valid_decision_for)
+    ).create_or_get_section(DraftSectionRequest(outline_id=outline_id, section_id="S1"))
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE draft_sections SET writer_version = :v WHERE draft_section_id = :id"
+            ).bindparams(v=1, id=created.draft_section_id)
+        )
+        await session.commit()
+
+    service = _service(env, FakeDraftSectionModel(decision_factory=valid_decision_for))
+    with pytest.raises(DraftSectionLegacyVersionUnsupported) as excinfo:
+        await service.verify_draft_section_integrity(created.draft_section_id)
+    assert excinfo.value.code == "draft_section_legacy_version_unsupported"
+
+
+async def test_verify_integrity_rejects_tampered_identity(env, monkeypatch, connection_uri) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    created = await _service(
+        env, FakeDraftSectionModel(decision_factory=valid_decision_for)
+    ).create_or_get_section(DraftSectionRequest(outline_id=outline_id, section_id="S1"))
+    # 篡改身份字段（title）→ 身份对比失败。
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text("UPDATE draft_sections SET title = :t WHERE draft_section_id = :id").bindparams(
+                t="被篡改的标题", id=created.draft_section_id
+            )
+        )
+        await session.commit()
+
+    service = _service(env, FakeDraftSectionModel(decision_factory=valid_decision_for))
+    with pytest.raises(DraftSectionIntegrityError) as excinfo:
+        await service.verify_draft_section_integrity(created.draft_section_id)
+    assert excinfo.value.code == "draft_section_integrity_error"
+
+
+async def test_verify_integrity_rejects_tampered_input_fingerprint(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    created = await _service(
+        env, FakeDraftSectionModel(decision_factory=valid_decision_for)
+    ).create_or_get_section(DraftSectionRequest(outline_id=outline_id, section_id="S1"))
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE draft_sections SET writer_input_fingerprint = :fp "
+                "WHERE draft_section_id = :id"
+            ).bindparams(fp="0" * 64, id=created.draft_section_id)
+        )
+        await session.commit()
+
+    service = _service(env, FakeDraftSectionModel(decision_factory=valid_decision_for))
+    with pytest.raises(DraftSectionIntegrityError):
+        await service.verify_draft_section_integrity(created.draft_section_id)
+
+
+async def test_verify_integrity_rejects_tampered_section_fingerprint(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    created = await _service(
+        env, FakeDraftSectionModel(decision_factory=valid_decision_for)
+    ).create_or_get_section(DraftSectionRequest(outline_id=outline_id, section_id="S1"))
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE draft_sections SET section_fingerprint = :fp WHERE draft_section_id = :id"
+            ).bindparams(fp="1" * 64, id=created.draft_section_id)
+        )
+        await session.commit()
+
+    service = _service(env, FakeDraftSectionModel(decision_factory=valid_decision_for))
+    with pytest.raises(DraftSectionIntegrityError):
+        await service.verify_draft_section_integrity(created.draft_section_id)
+
+
+async def test_verify_integrity_rejects_contract_violating_payload(
+    env, monkeypatch, connection_uri
+) -> None:
+    """structure 合法但违反 Section-aware contract（theme 段落缺 evidence）→
+    verify_payload_contracts 拒绝（不自动 repair）。"""
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    created = await _service(
+        env, FakeDraftSectionModel(decision_factory=valid_decision_for)
+    ).create_or_get_section(DraftSectionRequest(outline_id=outline_id, section_id="S1"))
+    row = await _draft_row(env["sessionmaker"], created.draft_section_id)
+    corrupted = dict(row["section_payload"])
+    corrupted["paragraphs"] = [dict(p, evidence_card_ids=[]) for p in corrupted["paragraphs"]]
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE draft_sections SET section_payload = CAST(:payload AS jsonb) "
+                "WHERE draft_section_id = :id"
+            ).bindparams(
+                payload=json.dumps(corrupted, ensure_ascii=False),
+                id=created.draft_section_id,
+            )
+        )
+        await session.commit()
+
+    service = _service(env, FakeDraftSectionModel(decision_factory=valid_decision_for))
+    with pytest.raises(DraftSectionParagraphContract) as excinfo:
+        await service.verify_draft_section_integrity(created.draft_section_id)
+    assert excinfo.value.code == "draft_section_paragraph_contract"

@@ -27,6 +27,9 @@ from app.analysis.synthesis.contracts import (
     VerifiedSynthesisResult,
 )
 from app.draft_section.contracts import (
+    DRAFT_SECTION_SCHEMA_VERSION,
+    WRITER_VERSION,
+    WRITER_VERSION_V1,
     ParagraphCandidate,
     WriterDecision,
     compute_section_fingerprint,
@@ -37,9 +40,11 @@ from app.draft_section.contracts import (
 from app.draft_section.errors import (
     DraftSectionCrossSectionRef,
     DraftSectionForbiddenLanguage,
+    DraftSectionInlineAliasLeak,
     DraftSectionIntegrityError,
     DraftSectionMalformedOutput,
     DraftSectionNumericGroundingError,
+    DraftSectionParagraphContract,
     DraftSectionUnboundEvidence,
     DraftSectionUnknownRef,
 )
@@ -60,11 +65,14 @@ from app.draft_section.prompt import (
     build_writer_messages,
 )
 from app.draft_section.validate import (
+    find_inline_alias_leak,
     resolve_decision,
     validate_decision,
+    verify_payload_contracts,
     verify_resolved_payload,
 )
 from app.report_outline.contracts import (
+    SECTION_TYPE_RISKS_AND_GAPS,
     SECTION_TYPE_THEME,
     OutlineSection,
     VerifiedReportOutline,
@@ -104,7 +112,19 @@ def _evidence(
     claim_ids: tuple[UUID, ...],
     *,
     quote: str | None = None,
+    relations: dict[UUID, str] | None = None,
 ) -> LoadedEvidence:
+    """构造 LoadedEvidence：claim_ids 默认全部 relation=supports，可用 relations 覆盖。
+
+    per-Claim relation（spec C）：同一 Evidence 可对不同 Claim 有不同 relation。
+    """
+    rel_map = relations or {}
+    claim_relations = tuple(
+        sorted(
+            ((cid, rel_map.get(cid, "supports")) for cid in claim_ids),
+            key=lambda pair: str(pair[0]),
+        )
+    )
     return LoadedEvidence(
         evidence_card_id=evidence_card_id,
         evidence_fingerprint=_hex64(str(evidence_card_id)[-1]),
@@ -116,8 +136,7 @@ def _evidence(
         reporting_period_end=None,
         source_published_at=None,
         origin_type="document_chunk",
-        relation="supports",
-        claim_ids=tuple(sorted(claim_ids, key=str)),
+        claim_relations=claim_relations,
     )
 
 
@@ -323,10 +342,11 @@ def test_writer_input_fingerprint_determinism() -> None:
         title="主题",
         claim_fingerprints=[_hex64("1"), _hex64("2")],
         evidence_fingerprints=[_hex64("3")],
+        evidence_claim_relations=[],
         conflicts=[],
         gaps=[],
         writer_name="evidence_bound_section_writer",
-        writer_version=1,
+        writer_version=2,
         writer_model_id="deepseek:deepseek-v4-flash",
     )
     fp1 = compute_writer_input_fingerprint(**kwargs)
@@ -344,6 +364,18 @@ def test_writer_input_fingerprint_determinism() -> None:
         )
         != fp1
     )
+    # relation mapping 变化 → 不同指纹（spec C：fingerprint 反映 relation mapping）。
+    with_relations = dict(
+        kwargs,
+        evidence_claim_relations=[{"evidence": "e-id", "claim": "c-id", "relation": "supports"}],
+    )
+    assert compute_writer_input_fingerprint(**with_relations) != fp1
+    assert compute_writer_input_fingerprint(
+        **dict(
+            with_relations,
+            evidence_claim_relations=[{"evidence": "e-id", "claim": "c-id", "relation": "context"}],
+        )
+    ) != compute_writer_input_fingerprint(**with_relations)
 
 
 def test_section_fingerprint_determinism() -> None:
@@ -480,10 +512,12 @@ def _paragraph(
 ) -> ParagraphCandidate:
     return ParagraphCandidate(
         text=text,
-        claim_refs=claim_refs or ["C1"],
-        evidence_refs=evidence_refs or ["E1"],
-        conflict_refs=conflict_refs or [],
-        gap_refs=gap_refs or [],
+        # `is None` 判断而不是 `or`：调用方显式传空 list（= 该段不引用此类 ref）
+        # 不能被默认值吞掉（spec B section-aware contract 依赖真实空 ref）。
+        claim_refs=claim_refs if claim_refs is not None else ["C1"],
+        evidence_refs=evidence_refs if evidence_refs is not None else ["E1"],
+        conflict_refs=conflict_refs if conflict_refs is not None else [],
+        gap_refs=gap_refs if gap_refs is not None else [],
     )
 
 
@@ -644,8 +678,295 @@ def test_verify_resolved_payload_rejects_corruption() -> None:
     corrupted["paragraphs"] = [dict(good["paragraphs"][0], evidence_gap_indexes=[9])]
     with pytest.raises(DraftSectionIntegrityError):
         verify_resolved_payload(pack, corrupted)
-    # 缺 evidence_card_ids。
-    corrupted = dict(good)
-    corrupted["paragraphs"] = [dict(good["paragraphs"][0], evidence_card_ids=[])]
-    with pytest.raises(DraftSectionIntegrityError):
-        verify_resolved_payload(pack, corrupted)
+    # 空 claim_ids / evidence_card_ids：scope 层允许（spec B：段落 required policy
+    # 由 Section-aware contract 决定，verify_payload_contracts 再拒绝 theme 缺 E）。
+    emptied = dict(good)
+    emptied["paragraphs"] = [dict(good["paragraphs"][0], evidence_card_ids=[])]
+    verify_resolved_payload(pack, emptied)
+
+
+# ---------------------------------------------------------------- Gate 0: writer version (spec D)
+
+
+def test_writer_version_v2() -> None:
+    assert WRITER_VERSION_V1 == 1
+    assert WRITER_VERSION == 2
+    assert DRAFT_SECTION_SCHEMA_VERSION == 1  # persisted payload shape 未变
+
+
+# ---------------------------------------------------------------- Gate 0: inline alias leak (A)
+
+
+def test_find_inline_alias_leak() -> None:
+    assert find_inline_alias_leak("营收增长（C1）") == "C1"
+    assert find_inline_alias_leak("详见E2") == "E2"
+    assert find_inline_alias_leak("风险见G1") == "G1"
+    assert find_inline_alias_leak("冲突X12") == "X12"
+    # 多位数 / 普通数字不影响。
+    assert find_inline_alias_leak("营收同比增长15%。") is None
+    assert find_inline_alias_leak("公司毛利率保持稳定。") is None
+    # 「维生素C1」这类含 C/E/X/G+数字 的真实文本会被命中——spec A 明确不因理论
+    # 边角过度复杂化，保守拒绝。
+    assert find_inline_alias_leak("维生素C1补充") == "C1"
+
+
+def test_inline_alias_leak_rejected() -> None:
+    pack = _make_pack()
+    for text in ("营收增长（C1）", "详见E2", "风险见G1"):
+        decision = _decision([_paragraph(text=text)])
+        with pytest.raises(DraftSectionInlineAliasLeak):
+            validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+def test_inline_alias_clean_text_passes() -> None:
+    pack = _make_pack()
+    decision = _decision([_paragraph(text="公司营收同比增长15%，2024年营收同比增长15%。")])
+    validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+# ---------------------------------------------------------------- Gate 0: section-aware contract
+
+
+def _risks_pack() -> SectionInputPack:
+    """risks_and_gaps section：C1/C2 全输入集 + E1/E2 + X1（C1）+ G1（C1）。"""
+    claims, evidence, conflicts, gaps = _raw_section()
+    outline = _verified_outline(
+        [
+            OutlineSection(
+                section_id="R1",
+                section_order=2,
+                section_type=SECTION_TYPE_RISKS_AND_GAPS,
+                title="风险与证据缺口",
+                claim_ids=(),
+                conflict_indexes=(0,),
+                evidence_gap_indexes=(0,),
+            )
+        ],
+        claim_ids=(_U1, _U2),
+    )
+    return build_section_input_pack(
+        outline=outline,
+        section=outline.sections[0],
+        company_name="贵州茅台",
+        claims=claims,
+        evidence=evidence,
+        conflicts=conflicts,
+        gaps=gaps,
+    )
+
+
+def test_theme_paragraph_requires_claim_and_evidence() -> None:
+    pack = _make_pack()
+    # theme：只有 C 没有 E → 拒绝；只有 E 没有 C → 拒绝。
+    decision = _decision([_paragraph(text="公司营收同比增长15%。", evidence_refs=[])])
+    with pytest.raises(DraftSectionParagraphContract):
+        validate_decision(pack=pack, decision=decision, total_claim_count=2)
+    decision = _decision([_paragraph(text="公司营收同比增长15%。", claim_refs=[])])
+    with pytest.raises(DraftSectionParagraphContract):
+        validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+def test_risks_and_gaps_allows_x_g_without_evidence() -> None:
+    pack = _risks_pack()
+    # X-only：无 claim / evidence → 合法（表达 conflict，evidence 可空）。
+    decision = _decision(
+        [
+            ParagraphCandidate(
+                text="营收口径存在分歧，需要以年报口径为准。",
+                claim_refs=[],
+                evidence_refs=[],
+                conflict_refs=["X1"],
+            )
+        ]
+    )
+    validate_decision(pack=pack, decision=decision, total_claim_count=2)
+    # G-only：合法（表达 evidence gap）。
+    decision = _decision(
+        [
+            ParagraphCandidate(
+                text="目前缺乏现金流数据支撑相关判断。",
+                claim_refs=[],
+                evidence_refs=[],
+                gap_refs=["G1"],
+            )
+        ]
+    )
+    validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+def test_risks_and_gaps_requires_c_or_x_or_g() -> None:
+    pack = _risks_pack()
+    decision = _decision([_paragraph(text="无引用的空泛段落。", claim_refs=[], evidence_refs=[])])
+    with pytest.raises(DraftSectionParagraphContract):
+        validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+def test_risks_and_gaps_fabricated_number_rejected() -> None:
+    """evidence_refs 为空时 numeric 只能从 referenced Claim 获得 grounding。
+
+    Conflict / Gap 文本不是新数字来源（spec B）——X-only 段落里出现「15%」且
+    referenced Claim 不含该数字 → 拒绝。
+    """
+    pack = _risks_pack()
+    decision = _decision(
+        [
+            ParagraphCandidate(
+                text="营收口径存在分歧，占比约15%。",
+                claim_refs=[],
+                evidence_refs=[],
+                conflict_refs=["X1"],
+            )
+        ]
+    )
+    with pytest.raises(DraftSectionNumericGroundingError):
+        validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+def test_risks_and_gaps_grounding_from_referenced_claim() -> None:
+    """risks_and_gaps 段同时陈述某个 Claim 事实（claim_refs 非空）→ Evidence
+    binding 与 numeric grounding 继续按现有规则检查。"""
+    pack = _risks_pack()
+    decision = _decision(
+        [
+            ParagraphCandidate(
+                text="公司营收同比增长15%。",
+                claim_refs=["C1"],
+                evidence_refs=[],
+                gap_refs=["G1"],
+            )
+        ]
+    )
+    validate_decision(pack=pack, decision=decision, total_claim_count=2)
+    # 数字非来自 referenced Claim → 拒绝。
+    decision = _decision(
+        [
+            ParagraphCandidate(
+                text="公司营收同比增长99%。",
+                claim_refs=["C1"],
+                evidence_refs=[],
+                gap_refs=["G1"],
+            )
+        ]
+    )
+    with pytest.raises(DraftSectionNumericGroundingError):
+        validate_decision(pack=pack, decision=decision, total_claim_count=2)
+
+
+# ---------------------------------------------------------------- Gate 0: relation semantics (C)
+
+
+def test_evidence_per_claim_relation_preserved() -> None:
+    """同一 Evidence 可对不同 Claim 有不同 relation——pack / prompt 按 per-Claim
+    relation 投影，不折叠（spec C 审计：DB UNIQUE=(claim_id, evidence_card_id)
+    只约束单 claim 内，无跨 claim 一致性保证）。"""
+    # 固定 UUID（_U1 < _U2）：alias 分配确定 → C1=_U1(supports)、C2=_U2(context)。
+    claims = [_claim(_U1, "a"), _claim(_U2, "b")]
+    evidence = [
+        _evidence(
+            _E1,
+            "x",
+            (_U1, _U2),
+            relations={_U1: "supports", _U2: "context"},
+        )
+    ]
+    outline = _verified_outline(
+        [
+            OutlineSection(
+                section_id="S1",
+                section_order=1,
+                section_type=SECTION_TYPE_THEME,
+                title="主题",
+                claim_ids=(_U1, _U2),
+                conflict_indexes=(),
+                evidence_gap_indexes=(),
+            )
+        ],
+        claim_ids=(_U1, _U2),
+    )
+    pack = build_section_input_pack(
+        outline=outline,
+        section=outline.sections[0],
+        company_name="公司",
+        claims=claims,
+        evidence=evidence,
+        conflicts=[],
+        gaps=[],
+    )
+    item = pack.evidence[0]
+    # per-Claim relation 按 alias 排序投影：C1=supports、C2=context，不折叠。
+    assert item.claim_relations == (("C1", "supports"), ("C2", "context"))
+    # claim_aliases property 派生自 claim_relations。
+    assert item.claim_aliases == ("C1", "C2")
+    # prompt 只展示 per-Claim relation，不丢失语义。
+    messages = build_writer_messages(pack)
+    user_content = messages[1]["content"]
+    assert "C1(supports)" in user_content
+    assert "C2(context)" in user_content
+
+
+def test_writer_input_fingerprint_reflects_relation_mapping() -> None:
+    """relation mapping 变化 → 不同输入指纹（spec C：fingerprint 反映 mapping）。
+
+    同一 Evidence 对 C1=supports / C2=context 与对 C1=supports / C2=contradicts
+    是不同的 LLM 输入，指纹必须区分。
+    """
+    u1, u2 = uuid4(), uuid4()
+    e1 = uuid4()
+    claims = [_claim(u1, "a"), _claim(u2, "b")]
+    outline = _verified_outline(
+        [
+            OutlineSection(
+                section_id="S1",
+                section_order=1,
+                section_type=SECTION_TYPE_THEME,
+                title="主题",
+                claim_ids=(u1, u2),
+                conflict_indexes=(),
+                evidence_gap_indexes=(),
+            )
+        ],
+        claim_ids=(u1, u2),
+    )
+
+    def _fp(relations: dict) -> str:
+        evidence = [_evidence(e1, "x", (u1, u2), relations=relations)]
+        return compute_writer_input_fingerprint(
+            section_schema_version=DRAFT_SECTION_SCHEMA_VERSION,
+            outline_fingerprint=outline.outline_fingerprint,
+            section_id=outline.sections[0].section_id,
+            section_order=outline.sections[0].section_order,
+            section_type=outline.sections[0].section_type,
+            title=outline.sections[0].title,
+            claim_fingerprints=[c.claim_fingerprint for c in claims],
+            evidence_fingerprints=[ev.evidence_fingerprint for ev in evidence],
+            evidence_claim_relations=[
+                {"evidence": str(ev.evidence_card_id), "claim": str(cid), "relation": rel}
+                for ev in evidence
+                for cid, rel in ev.claim_relations
+            ],
+            conflicts=[],
+            gaps=[],
+            writer_name="evidence_bound_section_writer",
+            writer_version=WRITER_VERSION,
+            writer_model_id="deepseek:deepseek-v4-flash",
+        )
+
+    supports_context = _fp({u1: "supports", u2: "context"})
+    supports_contradicts = _fp({u1: "supports", u2: "contradicts"})
+    assert supports_context != supports_contradicts
+
+
+def test_verify_payload_contracts_rejects_theme_missing_evidence() -> None:
+    """persisted payload 中 theme 段落缺 evidence（空 evidence_card_ids）→ scope 通过、
+    Section-aware contract 拒绝。"""
+    pack = _make_pack()
+    good = resolve_decision(
+        pack,
+        _decision([_paragraph(text="公司营收同比增长15%，2024年营收同比增长15%。")]),
+    )
+    verify_payload_contracts(pack, good, total_claim_count=2)
+    # theme 段落去掉 evidence_card_ids → verify_payload_contracts 拒绝。
+    tampered = dict(good)
+    tampered["paragraphs"] = [dict(good["paragraphs"][0], evidence_card_ids=[])]
+    with pytest.raises(DraftSectionParagraphContract):
+        verify_payload_contracts(pack, tampered, total_claim_count=2)

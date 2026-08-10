@@ -11,21 +11,36 @@
 - LLM **不负责**：Retrieval / Chroma / web search / 计算 / 写数据库。
 
 冻结常量：
-- `DRAFT_SECTION_SCHEMA_VERSION = 1`（draft_sections.section_schema_version）；
-- `WRITER_NAME = "evidence_bound_section_writer"`；`WRITER_VERSION = 1`（persisted
-  writer provenance）；production writer_model_id = `deepseek:deepseek-v4-flash`。
+- `DRAFT_SECTION_SCHEMA_VERSION = 1`（draft_sections.section_schema_version；
+  persisted payload shape 未变化，保持 1）；
+- `WRITER_NAME = "evidence_bound_section_writer"`；`WRITER_VERSION = 2`（persisted
+  writer provenance；v1 冻结不再使用）；production writer_model_id =
+  `deepseek:deepseek-v4-flash`。
+
+v2 Writer contract（本轮 Gate 0）：
+- **inline alias policy**：paragraph.text 禁止出现任何合法 C/E/X/G<number>
+  transport alias token（`DraftSectionInlineAliasLeak`）——别名只是模型通信
+  标识，不得进入正式报告正文；
+- **risks_and_gaps section-aware paragraph contract**：Pydantic 只强制 text
+  非空 + 四类 ref 都是 list（允许空）；真正 required policy 由 Section-aware
+  validation 决定（theme：每段 >=1 C + >=1 E；risks_and_gaps：每段 >=1 的
+  C / X / G 之一，evidence 可空）；
+- **per-Claim evidence relation**：同一 Evidence 可绑定多个 Claim 且 relation
+  不同（DB UNIQUE=(claim_id, evidence_card_id) 只约束单 claim 内），pack /
+  prompt / writer input fingerprint 均按 (claim, relation) 投影，不折叠。
 
 strict validation（服务层 `validate_decision`）：
-- 每段 claim_refs >= 1、evidence_refs >= 1；ref 格式 C/E/X/G<number>；
-- 全部 ref 必须是已知 alias；claim ref 超出 section 但属合成输入集 →
-  CrossSection；Evidence 必须绑定于段落引用的至少一个 Claim；
+- ref 格式 C/E/X/G<number>；全部 ref 必须是已知 alias；claim ref 超出 section
+  但属合成输入集 → CrossSection；Evidence 必须绑定于段落引用的至少一个 Claim；
+- Section-aware paragraph contract（见上）；inline alias leak policy；
 - numeric grounding + forbidden language 逐段检查。
 
 指纹：
 - `compute_writer_input_fingerprint` = canonical JSON + SHA-256：含
   section_schema_version / outline_fingerprint / section 身份 / allowed
-  Claim/Evidence fingerprints / conflict-gap 数据 / writer 身份。**不含**
-  draft_section_id / created_at / payload。同输入 → 同指纹 → replay 同一行。
+  Claim/Evidence fingerprints / **Evidence–Claim relation mapping** /
+  conflict-gap 数据 / writer 身份。**不含** draft_section_id / created_at /
+  payload。同输入 → 同指纹 → replay 同一行（relation mapping 变化 → 新指纹）。
 - `compute_section_fingerprint` = writer_input_fingerprint + normalized resolved
   payload 的 SHA-256。
 """
@@ -46,7 +61,11 @@ DRAFT_SECTION_SCHEMA_VERSION = 1
 
 # evidence-bound section writer 的身份常量（persisted writer_name / version）。
 WRITER_NAME = "evidence_bound_section_writer"
-WRITER_VERSION = 1
+# v2：inline alias policy + risks_and_gaps output semantics + per-Claim evidence
+# relation 改变 Writer contract。v1 冻结不再使用；旧 v1 rows 不修改 / 不 backfill
+# （同 section 用 v2 → writer_input_fingerprint 不同 → 新 DraftSection）。
+WRITER_VERSION_V1 = 1
+WRITER_VERSION = 2
 
 # 段落数量边界（spec J：1..10）。
 MIN_PARAGRAPHS = 1
@@ -108,9 +127,12 @@ class DraftSectionRequest:
 class ParagraphCandidate(BaseModel):
     """一个段落草稿（模型结构化输出，**不渲染进 prompt**）。
 
-    schema 层只强制 text 非空 / 有上限、claim_refs >= 1、evidence_refs >= 1、
-    conflict_refs / gap_refs 0..N；**ref 格式与作用域在服务层校验**（known /
-    cross-section / unbound / numeric / forbidden）。
+    schema 层只强制 text 非空 / 有上限、四类 ref 都是 list（允许空）——
+    **真正 required policy 由 Section-aware validation 决定**（spec B）：
+    - theme section：claim_refs >= 1 且 evidence_refs >= 1；
+    - risks_and_gaps：claim_refs / conflict_refs / gap_refs 至少 1（evidence 可空）。
+    ref 格式与作用域仍在服务层校验（known / cross-section / unbound / numeric /
+    forbidden / inline alias）。
     """
 
     model_config = ConfigDict(frozen=True)
@@ -129,12 +151,9 @@ class ParagraphCandidate(BaseModel):
         if len(text) > MAX_PARAGRAPH_TEXT_LENGTH:
             raise ValueError(f"paragraph.text 超长（>{MAX_PARAGRAPH_TEXT_LENGTH} 字符）")
         object.__setattr__(self, "text", text)
-        if not isinstance(self.claim_refs, list) or not self.claim_refs:
-            raise ValueError("paragraph 至少引用 1 个 claim")
-        if not isinstance(self.evidence_refs, list) or not self.evidence_refs:
-            raise ValueError("paragraph 至少引用 1 个 evidence")
-        if not isinstance(self.conflict_refs, list) or not isinstance(self.gap_refs, list):
-            raise ValueError("paragraph conflict_refs / gap_refs 必须是 list")
+        for field in ("claim_refs", "evidence_refs", "conflict_refs", "gap_refs"):
+            if not isinstance(getattr(self, field), list):
+                raise ValueError(f"paragraph {field} 必须是 list")
         return self
 
 
@@ -165,6 +184,28 @@ class DraftSectionResult:
     paragraph_count: int
 
 
+@dataclass(frozen=True)
+class VerifiedDraftSection:
+    """`verify_draft_section_integrity` 的 read-side 产物（完整重建验证通过）。
+
+    只含可公开的身份 / 指纹 / 段落计数，不含正文段落 / prompt / raw response。
+    """
+
+    draft_section_id: UUID
+    outline_id: UUID
+    section_id: str
+    section_order: int
+    section_type: str
+    title: str
+    section_schema_version: int
+    writer_name: str
+    writer_version: int
+    writer_model_id: str
+    writer_input_fingerprint: str
+    section_fingerprint: str
+    paragraph_count: int
+
+
 def compute_writer_input_fingerprint(
     *,
     section_schema_version: int,
@@ -175,6 +216,7 @@ def compute_writer_input_fingerprint(
     title: str,
     claim_fingerprints: list[str],
     evidence_fingerprints: list[str],
+    evidence_claim_relations: list[dict],
     conflicts: list[dict],
     gaps: list[dict],
     writer_name: str,
@@ -185,13 +227,19 @@ def compute_writer_input_fingerprint(
 
     至少覆盖：section_schema_version、outline_fingerprint、section 身份
     （id/order/type/title）、exact allowed Claim fingerprints（canonical 排序）、
-    exact allowed Evidence fingerprints（canonical 排序）、selected conflict/gap
-    数据、writer 身份（name/version/model_id）。
+    exact allowed Evidence fingerprints（canonical 排序）、**Evidence–Claim
+    relation mapping**（每张 Evidence 绑定哪些 Claim、relation 各是什么——
+    同一 Evidence 可对不同 Claim 有不同 relation，prompt 按 per-Claim 投影，
+    指纹必须反映该 mapping）、selected conflict/gap 数据、writer 身份。
 
     **不得包含** draft_section_id / created_at / section_payload。同 outline +
-    同 section + 同 Claim/Evidence 集 + 同 conflict/gap 数据 + 同 writer → 同指纹
-    → replay 同一行（**0 model calls**）；任一输入变化 → 新指纹 → 新草稿（旧行
-    保留，无 update API）。
+    同 section + 同 Claim/Evidence 集 + 同 relation mapping + 同 conflict/gap
+    数据 + 同 writer → 同指纹 → replay 同一行（**0 model calls**）；任一输入变化
+    → 新指纹 → 新草稿（旧行保留，无 update API）。
+
+    `evidence_claim_relations`：canonical 排序的
+    `{"evidence": <str evidence_card_id>, "claim": <str claim_id>,
+      "relation": <str>}` 列表（服务层由 LoadedEvidence.claim_relations 派生）。
     """
     payload = {
         "section_schema_version": section_schema_version,
@@ -204,6 +252,7 @@ def compute_writer_input_fingerprint(
         },
         "allowed_claims": sorted(claim_fingerprints),
         "allowed_evidence": sorted(evidence_fingerprints),
+        "evidence_claim_relations": evidence_claim_relations,
         "conflicts": conflicts,
         "gaps": gaps,
         "writer": {

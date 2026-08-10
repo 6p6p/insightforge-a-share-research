@@ -10,12 +10,17 @@
 
 字段投影说明：
 - Claim：claim_ref / domain / kind / statement / confidence / importance；
-- Evidence：evidence_ref / claim_refs（绑定 Claim 的 section alias）/ relation /
-  evidence_type / evidence_statement / quote_text / provider_key /
-  authority_tier / period / published / origin_type；**不含** locator /
-  RawArtifact / storage key；
+- Evidence：evidence_ref / claim_relations（绑定 Claim 的 section alias + 各自
+  per-Claim relation）/ evidence_type / evidence_statement / quote_text /
+  provider_key / authority_tier / period / published / origin_type；**不含**
+  locator / RawArtifact / storage key；
 - Conflict / Gap：alias + claim_refs + 描述 / 严重度（或优先级）/ 解决方向
   （或建议证据）。
+
+per-Claim relation（spec C）：同一 Evidence 可绑定多个 Claims 且 relation 不同
+（DB `claim_evidence_links` UNIQUE=(claim_id, evidence_card_id) 只约束单 claim
+内），pack 按 `(claim, relation)` 投影、**不折叠成单值**；prompt / writer input
+fingerprint 均按 per-Claim relation 处理。
 """
 
 from dataclasses import dataclass
@@ -42,10 +47,10 @@ class LoadedClaim:
 class LoadedEvidence:
     """短 DB session 加载的 section Evidence（含 fingerprint；按 card 聚合）。
 
-    - claim_ids：通过 claim_evidence_links 真实绑定到本 section Claim 的 id 集
-      （canonical 排序）；
-    - relation：多 (claim, evidence) 关系时取确定性最强关系
-      （supports > contradicts > context）。
+    - claim_relations：`(claim_id, relation)` 元组序列——每张 Evidence 与其绑定
+      Claims 的**per-Claim relation**（canonical 排序；同一 Evidence 可对不同
+      Claim 有不同 relation，**不折叠**）；
+    - `claim_ids`（property）：绑定 Claims 的 id 集（由 claim_relations 派生）。
     """
 
     evidence_card_id: UUID
@@ -58,8 +63,12 @@ class LoadedEvidence:
     reporting_period_end: date | None
     source_published_at: datetime | None
     origin_type: str
-    relation: str
-    claim_ids: tuple[UUID, ...]
+    claim_relations: tuple[tuple[UUID, str], ...]
+
+    @property
+    def claim_ids(self) -> tuple[UUID, ...]:
+        """绑定 Claims 的 id 集（canonical 排序，由 claim_relations 派生）。"""
+        return tuple(claim_id for claim_id, _ in self.claim_relations)
 
 
 @dataclass(frozen=True)
@@ -97,12 +106,16 @@ class SectionClaimItem:
 
 @dataclass(frozen=True)
 class SectionEvidenceItem:
-    """一条 section Evidence 的投影（alias + 最小字段，不含 provenance id）。"""
+    """一条 section Evidence 的投影（alias + 最小字段，不含 provenance id）。
+
+    - claim_relations：`(claim_alias, relation)` 元组序列，过滤到本 section 的
+      Claim、按 alias 排序（prompt 只展示 per-Claim relation，spec C）；
+    - `claim_aliases`（property）：绑定 Claims 的 section alias（派生）。
+    """
 
     alias: str
     evidence_card_id: UUID
-    claim_aliases: tuple[str, ...]
-    relation: str
+    claim_relations: tuple[tuple[str, str], ...]
     evidence_type: str
     evidence_statement: str
     quote_text: str | None
@@ -111,6 +124,11 @@ class SectionEvidenceItem:
     period: str | None
     published: str | None
     origin_type: str
+
+    @property
+    def claim_aliases(self) -> tuple[str, ...]:
+        """绑定 Claims 的 section alias（canonical 排序，由 claim_relations 派生）。"""
+        return tuple(claim_alias for claim_alias, _ in self.claim_relations)
 
 
 @dataclass(frozen=True)
@@ -205,13 +223,25 @@ def build_section_input_pack(
     def _section_aliases(claim_ids) -> tuple[str, ...]:
         return tuple(sorted(id_to_alias[str(cid)] for cid in claim_ids if str(cid) in id_to_alias))
 
+    def _section_claim_relations(claim_relations) -> tuple[tuple[str, str], ...]:
+        """把 (claim_id, relation) 过滤到本 section 的 alias，按 alias 排序。
+
+        同一 Evidence 可绑定多个 Claim 且 relation 不同——per-Claim relation
+        原样保留（spec C，不折叠、不丢失语义）。
+        """
+        pairs = [
+            (id_to_alias[str(cid)], relation)
+            for cid, relation in claim_relations
+            if str(cid) in id_to_alias
+        ]
+        return tuple(sorted(pairs))
+
     ordered_evidence = sorted(evidence, key=lambda item: str(item.evidence_card_id))
     evidence_items = tuple(
         SectionEvidenceItem(
             alias=f"E{index}",
             evidence_card_id=item.evidence_card_id,
-            claim_aliases=_section_aliases(item.claim_ids),
-            relation=item.relation,
+            claim_relations=_section_claim_relations(item.claim_relations),
             evidence_type=item.evidence_type,
             evidence_statement=item.evidence_statement,
             quote_text=item.quote_text,

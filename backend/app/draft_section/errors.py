@@ -93,6 +93,30 @@ class DraftSectionUnboundEvidence(DraftSectionError):
     message = "draft section output references evidence not bound to referenced claims"
 
 
+class DraftSectionInlineAliasLeak(DraftSectionError):
+    """段落正文包含内联 C/E/X/G transport alias token（如「（C3）」「见G1」）。
+
+    C/E/X/G 编号只是模型通信 alias（spec A），**不得进入正式报告正文**：引用
+    关系必须只通过结构化字段（claim_refs / evidence_refs / conflict_refs /
+    gap_refs）返回。正文命中任何合法 alias token → 拒绝（0 写）。
+    """
+
+    code = "draft_section_inline_alias_leak"
+    message = "draft section paragraph leaks inline transport alias"
+
+
+class DraftSectionParagraphContract(DraftSectionError):
+    """段落违反 Section-aware paragraph contract（spec B）。
+
+    - theme section：每段 claim_refs >= 1 且 evidence_refs >= 1（hard provenance）；
+    - risks_and_gaps：每段至少引用 claim_ref / conflict_ref / gap_ref 之一
+      （evidence 可空）。
+    """
+
+    code = "draft_section_paragraph_contract"
+    message = "draft section paragraph violates section paragraph contract"
+
+
 class DraftSectionNumericGroundingError(DraftSectionError):
     """段落引入的 quantitative token 未逐字出现在所引用 Claim/Evidence 中。
 
@@ -128,3 +152,15 @@ class DraftSectionPersistenceFailed(DraftSectionError):
 
     code = "draft_section_persistence_failed"
     message = "draft section persistence failed"
+
+
+class DraftSectionLegacyVersionUnsupported(DraftSectionError):
+    """既有草稿的 writer_version 无法被当前代码稳定重建验证。
+
+    v2（当前 WRITER_VERSION）完整支持；更早版本（v1）的 writer_input_fingerprint
+    不含 relation mapping、且段落契约已变化 → 当前代码不能**假验证**，明确抛出
+    unsupported legacy version（不 repair、不猜测）。
+    """
+
+    code = "draft_section_legacy_version_unsupported"
+    message = "draft section writer_version is not supported for verification"

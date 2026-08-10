@@ -30,18 +30,24 @@ DRAFT_SECTION_WRITER_SYSTEM_PROMPT = (
     "2. 你只使用系统提示词赋予的能力；不使用任何工具、不联网搜索、不调用函数、不访问"
     "数据库。\n"
     "【Evidence-bound 写作规则】\n"
-    "3. 只使用 SECTION_INPUT 中给出的 C（Claim）与 E（Evidence）编号。每个段落必须至少"
-    "引用 1 个 C 和 1 个 E；E 只能与真实绑定该 E 的 C 搭配引用，不得把某个 E 关联到不"
-    "属于它的 C。如有 X（冲突）与 G（证据缺口）编号，可引用并如实在正文中说明。\n"
-    "4. 不创造新事实、不重算财务数字、不修改任何 Claim 的含义、不加入外部知识、不补充"
+    "3. 只使用 SECTION_INPUT 中给出的 C（Claim）/E（Evidence）/X（冲突）/G（证据缺口）"
+    "编号。段落引用要求：\n"
+    "   - theme 小节：每个段落至少引用 1 个 C 和 1 个 E；\n"
+    "   - risks_and_gaps 小节：每个段落至少引用 C / X / G 之一（E 可省略）。\n"
+    "   E 只能与真实绑定该 E 的 C 搭配引用（每个 E 的「绑定 Claims」列出 C 编号及其"
+    "对应关系），不得把某个 E 关联到不属于它的 C。\n"
+    "4. **引用关系只能通过结构化字段返回**（claim_refs / evidence_refs / conflict_refs "
+    "/ gap_refs）。正文 text **不得写内部编号**，例如「（C1）」「[E2]」「见G1」「冲突"
+    "X1」等——这些编号只是本任务的通信标识，会泄露到正式报告正文，禁止出现。\n"
+    "5. 不创造新事实、不重算财务数字、不修改任何 Claim 的含义、不加入外部知识、不补充"
     "新的来源。所有数字必须逐字来自所引用 C/E 的陈述或原文引用；不得引入 C/E 中不存在"
     "的数字。\n"
-    "5. 不写买入/卖出/增持/减持/推荐/目标价/收益承诺/保证收益等投资建议，不做短期股价"
+    "6. 不写买入/卖出/增持/减持/推荐/目标价/收益承诺/保证收益等投资建议，不做短期股价"
     "预测。\n"
-    "6. C/E/X/G 编号是程序分配的稳定标识，不可修改。只输出给定编号；不输出 UUID / "
+    "7. C/E/X/G 编号是程序分配的稳定标识，不可修改。只输出给定编号；不输出 UUID / "
     "fingerprint / 来源 URL / 页码 / 脚注 / 报告编号 / 任何内部标识。\n"
     "【输出】\n"
-    "7. 只输出符合结构化 schema 的 JSON（1..10 个段落，每段至少引用 1 个 C 与 1 个 E）；"
+    "8. 只输出符合结构化 schema 的 JSON（1..10 个段落，引用要求见规则 3）；"
     "不输出 reasoning / chain-of-thought / 自由分析文本。"
 )
 
@@ -60,11 +66,15 @@ def _render_claim(item) -> str:
 
 
 def _render_evidence(item) -> str:
-    """渲染单条 Evidence（只含最小字段；quote_text 是 untrusted DATA）。"""
+    """渲染单条 Evidence（只含最小字段；quote_text 是 untrusted DATA）。
+
+    per-Claim relation（spec C）：绑定 Claims 逐对展示 C 编号与其 relation
+    （如「C1(supports)、C2(context)」），不折叠、不丢失语义。
+    """
+    bindings = "、".join(f"{alias}({relation})" for alias, relation in item.claim_relations)
     lines = [
         f"[{item.alias}]",
-        f"绑定 Claims：{'、'.join(item.claim_aliases)}",
-        f"关系：{item.relation}",
+        f"绑定 Claims：{bindings}",
         f"证据类型：{item.evidence_type}",
         f"证据陈述：{item.evidence_statement}",
         f"来源：{item.provider_key}（权威层级 {item.authority_tier}）",
