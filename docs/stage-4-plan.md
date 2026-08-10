@@ -229,3 +229,4 @@
 
 - **范围**：ReportOutline → DraftSection → Report → Deterministic Check → Agent Audit → Retry / Human confirmation。**Report 生成与 Agent Audit 属于 Stage 5**，不属于 Stage 4。
 - **不提前标记**：Stage 5 未到验收门槛，不在本计划中定义细节；只有 Stage 4 验收门槛全部关闭后才推进。
+- **后续进展**：5A（Deterministic ReportOutline）与 5B（Evidence-bound DraftSection Writer）已先后完成，迁移至 0033，详见 stage-5-plan.md。

@@ -114,6 +114,7 @@ async def _cleanup(sessionmaker) -> None:
         await session.execute(text("DELETE FROM workflow_events"))
         await session.execute(text("DELETE FROM workflow_runs"))
         await session.execute(text("DELETE FROM research_tasks"))
+        await session.execute(text("DELETE FROM draft_sections"))
         await session.execute(text("DELETE FROM report_outlines"))
         await session.execute(text("DELETE FROM claim_synthesis_results"))
         await session.execute(text("DELETE FROM claim_synthesis_input_links"))
@@ -649,13 +650,13 @@ async def test_boundary_no_stage5_tables(env, monkeypatch, connection_uri) -> No
         await manager.close()
 
     async with env["sessionmaker"]() as session:
-        # 未到达的 Stage 5 表不得存在。
+        # 未到达的 Stage 5C/5D 表不得存在；Stage 5A/5B 表
+        # （report_outlines / draft_sections，migration 0032/0033）可以存在。
         result = await session.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('reports', 'draft_sections', 'audits', "
-                " 'report_sections', 'review_issues')"
+                "('reports', 'audits', 'report_sections', 'review_issues')"
             )
         )
         assert result.scalars().all() == []
@@ -665,6 +666,12 @@ async def test_boundary_no_stage5_tables(env, monkeypatch, connection_uri) -> No
             await session.execute(text("SELECT count(*) FROM report_outlines"))
         ).scalar_one()
         assert int(outline_rows) == 0
+        # Stage 5B 的 draft_sections 表已存在（migration 0033），但 Stage 4 运行
+        # 不产生草稿 → 0 行。
+        draft_rows = (
+            await session.execute(text("SELECT count(*) FROM draft_sections"))
+        ).scalar_one()
+        assert int(draft_rows) == 0
 
 
 # ---------------------------------------------------------------- run state machine

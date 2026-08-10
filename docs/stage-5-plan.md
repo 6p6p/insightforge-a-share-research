@@ -2,7 +2,7 @@
 
 > 阶段 5 目标：把 Stage 4 已确认的 **SynthesisResult** 推进为**确定性、可追溯的报告产物**——ReportOutline（5A）→ DraftSection / Report（5B Writer）→ Deterministic Check（5C）→ Agent Audit（5D）→ Retry / Human confirmation（5E）。顶层证据链：**Source → Evidence → Claim → Report → Audit**；Report 生成与 Agent Audit 属于 Stage 5，**不写 5A=Writer、5B=Audit**。
 >
-> 总进度：**5A = completed（Deterministic ReportOutline Foundation，`REPORT_OUTLINE_SCHEMA_VERSION=1`、migration 0032，Gate 验收完成）**；**5B DraftSection（Writer）= next**；5C / 5D / 5E 未到验收门槛，不提前开工。
+> 总进度：**5A = completed（Deterministic ReportOutline Foundation，`REPORT_OUTLINE_SCHEMA_VERSION=1`、migration 0032，Gate 验收完成）**；**5B = completed（Evidence-bound DraftSection Writer，`DRAFT_SECTION_SCHEMA_VERSION=1`、migration 0033，Gate 验收完成）**；5C / 5D / 5E 未到验收门槛，不提前开工。
 
 ## 5A：Deterministic ReportOutline Foundation（completed）
 
@@ -15,7 +15,9 @@
 - **0 LLM / 0 Chroma / 0 Retrieval / 0 Writer / 0 Audit**。
 - 决策记录：按文档策略本轮不新建 ADR；migration 0032 docstring 记录 schema 与 downgrade 语义。
 
-## 5B：DraftSection / Report（Writer，next）
+## 5B：Evidence-bound DraftSection Writer（completed）
 
-- **范围**：ReportOutline → DraftSection（Writer 按 section 起草正文）→ Report 组装 → Deterministic Check（5C）。
-- **不提前标记**：5B 未到验收门槛，不在本计划中定义细节；只有 5A 验收门槛全部关闭后才推进。
+- **范围**：VerifiedReportOutline + section_id → Section Input Pack（C/E/X/G 确定性 alias，LLM 永不见 UUID / fingerprint）→ DeepSeek V4 Flash（thinking disabled + temperature=0 + structured output）→ 确定性校验（ref format / known / cross-section / unbound / numeric grounding / forbidden）→ DraftSection。**0 tools / 0 web / 0 Chroma**。
+- **模型**：单表 `draft_sections`（migration 0033）：writer_input_fingerprint UNIQUE、section_fingerprint、writer_name/version、provider/model_id；downgrade 在存在任意 row 时拒绝（`RuntimeError`）。持久化 payload 只存真实 claim_id / evidence_card_id / index，不存 alias / prompt / raw response / reasoning_content。
+- **Fingerprint / replay**：`writer_input_fingerprint` = outline_fingerprint + section 身份 + allowed Claim/Evidence fingerprints + writer 身份 的 SHA-256；同输入 → replay 同一行（0 model calls，ON CONFLICT DO NOTHING，无 Python lock）。
+- **测试**：Fake Writer（0 real LLM）E2E + 16 integration + domain 单测 + 回归全绿；受控 smoke 1 次真实 DeepSeek 通过。

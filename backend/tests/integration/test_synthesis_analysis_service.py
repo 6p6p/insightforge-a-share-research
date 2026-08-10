@@ -448,13 +448,14 @@ async def test_boundary_no_stage5_service_holds_only_deps(env, monkeypatch) -> N
     )
     # read-side integrity 委托 SynthesisService，不复制 replay 规则。
     assert list(vars(service).keys()) == ["_sessionmaker", "_model", "_synthesis"]
-    # 无 Stage 5 report / draft / audit 表。
+    # 无 Stage 5C/5D 表（reports / audits 等）；Stage 5A/5B 表
+    # （report_outlines / draft_sections，migration 0032/0033）允许存在。
     async with env["sessionmaker"]() as session:
         result = await session.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('reports', 'draft_sections', 'audits')"
+                "('reports', 'audits', 'report_sections', 'review_issues')"
             )
         )
         assert result.scalars().all() == []

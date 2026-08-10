@@ -835,12 +835,14 @@ async def test_cross_domain_e2e_single_run_replay(four_claims) -> None:
 
 async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
     async with env["sessionmaker"]() as session:
+        # Stage 5C/5D 表（reports / audits / report_sections / review_issues）不得存在；
+        # Stage 5A/5B 表（report_outlines / draft_sections，migration 0032/0033）允许存在。
         stage5 = (
             await session.execute(
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('draft_sections','reports')"
+                    "('reports','audits','report_sections','review_issues')"
                 )
             )
         ).scalar_one()
