@@ -19,7 +19,6 @@ A 股范围——**不需要在 comparison / claim Service 重复加 A 股判定
 **零 Chroma / 零 LLM / 零 Claim / 零 Report 表**。
 """
 
-import asyncio
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
@@ -279,9 +278,7 @@ async def test_legal_a_share_company_can_enter_comparison(env) -> None:
         ComparisonDraft(
             target_company_id=refs["target"]["company_id"],
             target_observation_id=refs["target"]["valuation_observation_id"],
-            peer_observation_ids=tuple(
-                p["valuation_observation_id"] for p in refs["peers"]
-            ),
+            peer_observation_ids=tuple(p["valuation_observation_id"] for p in refs["peers"]),
             analysis_as_of=_ANALYSIS_AS_OF,
         )
     )
@@ -290,8 +287,7 @@ async def test_legal_a_share_company_can_enter_comparison(env) -> None:
         rows = (
             await session.execute(
                 text(
-                    "SELECT count(*) FROM relative_valuation_comparisons "
-                    "WHERE comparison_id = :cid"
+                    "SELECT count(*) FROM relative_valuation_comparisons WHERE comparison_id = :cid"
                 ).bindparams(cid=result.comparison_id)
             )
         ).scalar_one()
@@ -307,7 +303,7 @@ async def test_legal_a_share_company_can_enter_comparison(env) -> None:
     assert peer_count == 3
 
 
-# ---------------------------------------------------------------- 非法 exchange / board 被 DB CHECK 拒绝
+# -------------------------------------------------- 非法 exchange / board 被 DB CHECK 拒绝
 
 
 async def test_non_a_share_exchange_cannot_form_company(sessionmaker) -> None:
