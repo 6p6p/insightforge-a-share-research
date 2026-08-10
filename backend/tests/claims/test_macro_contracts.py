@@ -13,8 +13,10 @@ from app.claims.contracts import ClaimKind
 from app.claims.macro_contracts import (
     MACRO_CLAIM_SCHEMA_VERSION,
     MACRO_CLAIM_SCHEMA_VERSION_V4,
+    MACRO_CLAIM_SCHEMA_VERSION_V5,
     MACRO_TRANSMISSION_SCHEMA_VERSION,
     MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
+    MACRO_TRANSMISSION_SCHEMA_VERSION_V2,
     MacroChannelType,
     MacroClaimConfidence,
     MacroClaimDraft,
@@ -166,9 +168,11 @@ def test_enum_values_frozen() -> None:
     )
     # 无 misaligned。
     assert sorted(v.value for v in MacroTimeAlignment) == sorted(["aligned", "uncertain"])
-    # 当前 schema：claim=5 / transmission=2；legacy 常量冻结不改写。
-    assert MACRO_CLAIM_SCHEMA_VERSION == 5
-    assert MACRO_TRANSMISSION_SCHEMA_VERSION == 2
+    # 当前 schema：claim=6 / transmission=3；legacy 常量冻结不改写。
+    assert MACRO_CLAIM_SCHEMA_VERSION == 6
+    assert MACRO_TRANSMISSION_SCHEMA_VERSION == 3
+    assert MACRO_CLAIM_SCHEMA_VERSION_V5 == 5
+    assert MACRO_TRANSMISSION_SCHEMA_VERSION_V2 == 2
     assert MACRO_CLAIM_SCHEMA_VERSION_V4 == 4
     assert MACRO_TRANSMISSION_SCHEMA_VERSION_V1 == 1
 

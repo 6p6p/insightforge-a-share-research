@@ -1,4 +1,4 @@
-"""SQLAlchemy model for macro transmission chains (stage 4C.1A).
+"""SQLAlchemy model for macro transmission chains (stage 4C.1B).
 
 `macro_transmission_chains` 持久化**宏观传导分析产物**：Macro Evidence +
 Company Exposure Evidence → 一条传导链 → Macro Claim。传导链描述"宏观变量如何
@@ -10,6 +10,10 @@ Company Exposure Evidence → 一条传导链 → Macro Claim。传导链描述"
   operations/other；effect_direction ∈ tailwind/headwind/mixed/uncertain（不是
   buy/sell）；impact_status ∈ plausible_impact/observed_impact；time_alignment
   ∈ aligned/uncertain（**无 misaligned**：证据明确错位时 Service 拒绝）。
+- analysis_as_of（migration 0025 起）：**查询列**。fingerprint 含日期但 DB 必须
+  能从 claim_id 反推 cutoff（Audit / Writer / API / Claim 检查）。v3 链必填
+  （CHECK `transmission_schema_version < 3 OR analysis_as_of IS NOT NULL`）；
+  历史 v1/v2 链允许 NULL（0024-era 无该列，**不反推不 backfill**）。
 - transmission_fingerprint **不是 global identity**（migration 0024 移除 UNIQUE，
   保留普通 INDEX）：相同 transmission semantics 可能对应多个 Macro Claim（如
   statement 或 analyst_version 不同 → 新 Claim + 新链，fingerprint 可相同）。
@@ -19,11 +23,12 @@ Company Exposure Evidence → 一条传导链 → Macro Claim。传导链描述"
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -59,6 +64,12 @@ class MacroTransmissionChainModel(Base):
             "transmission_schema_version >= 1",
             name="ck_macro_transmission_chains_schema_version",
         ),
+        # v3 链必须持久化 analysis_as_of（查询列）；历史 v1/v2 链允许 NULL
+        # （0024-era 无该列，不反推不 backfill）。
+        CheckConstraint(
+            "transmission_schema_version < 3 OR analysis_as_of IS NOT NULL",
+            name="ck_macro_transmission_chains_analysis_as_of_present",
+        ),
         CheckConstraint(_CHANNEL_TYPE_CHECK, name="ck_macro_transmission_chains_channel_type"),
         CheckConstraint(
             _EFFECT_DIRECTION_CHECK,
@@ -76,6 +87,12 @@ class MacroTransmissionChainModel(Base):
         Index(
             "ix_macro_transmission_chains_transmission_fingerprint",
             "transmission_fingerprint",
+        ),
+        # 审计查询：按公司 + analysis cutoff 检索传导链（0025）。
+        Index(
+            "ix_macro_transmission_chains_company_analysis_as_of",
+            "company_id",
+            "analysis_as_of",
         ),
     )
 
@@ -98,6 +115,8 @@ class MacroTransmissionChainModel(Base):
     time_alignment: Mapped[str] = mapped_column(String(16), nullable=False)
     transmission_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     transmission_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    # 分析基准日（查询列）。v3 链必填；历史 v1/v2 链允许 NULL。
+    analysis_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

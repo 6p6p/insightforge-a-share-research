@@ -13,8 +13,9 @@ Retrieval / 0 LangGraph / 0 Report / 0 Audit**。
 公司有息负债 → 融资成本压力），禁止伪装成来源事实。
 
 流程（两步提交结构，镜像 FinancialClaimService）：
-1. **短 DB session** 从真实 PG 加载全部 EvidenceCards 并**逐条校验**（v2/v5 当前
-   规则，legacy v4/v1 走历史规则）：全部存在（缺失 → MacroClaimEvidenceNotFound）；
+1. **短 DB session** 从真实 PG 加载全部 EvidenceCards 并**逐条校验**（v6/v3 当前
+   规则，legacy v5/v2 与 v4/v1 走历史规则）：全部存在（缺失 →
+   MacroClaimEvidenceNotFound）；
    company 与 draft 一致（跨公司 → MacroClaimEvidenceCompanyMismatch）；按角色
    校验 origin（macro_driver 允许 macro_observation，或经过明确筛选的 external
    event document Evidence——news_article + evidence_type ∈ {event, fact,
@@ -33,20 +34,26 @@ Retrieval / 0 LangGraph / 0 Report / 0 Audit**。
    时额外 ≥1 observed_effect eligible；否则 MacroClaimCriticalEvidenceInsufficient；
    **additional support 不能替代两条传导腿**）。随后立即关闭 connection。
 2. **纯函数派生**（无 DB）：transmission fingerprint（role-sorted evidence id +
-   evidence fingerprint，schema_version=2）+ macro claim fingerprint（含
-   transmission_fingerprint，schema_version=5）+ context expansion（macro_driver /
+   evidence fingerprint，schema_version=3）+ macro claim fingerprint（含
+   transmission_fingerprint，schema_version=6）+ context expansion（macro_driver /
    company_exposure / observed_effect 全部 relation=context——它们单独不能证明
    "宏观变化导致公司影响"；additional 保持 supports/contradicts/context）。
 3. **单短 PG transaction**：create_or_get Claim（ON CONFLICT(claim_fingerprint)，
    无进程锁）→ **plain INSERT** TransmissionChain（transmission_fingerprint **不是
-   global identity**，无 ON CONFLICT；claim_id 是新生成且 UNIQUE，无冲突）→ bulk
+   global identity**，无 ON CONFLICT；claim_id 是新生成且 UNIQUE，无冲突；新链
+   **persist analysis_as_of=draft.analysis_as_of**——v3 查询列，CHECK
+   `transmission_schema_version < 3 OR analysis_as_of IS NOT NULL` 兜底）→ bulk
    insert transmission links + claim evidence links。任何 SQLAlchemyError → 整条
-   rollback + MacroClaimPersistenceFailed（0 partial write）；无 compensating delete。
-4. **Replay**（**version-aware**）：已有 fingerprint 时按既有 Claim 的
-   claim_schema_version 分叉——v5 → v2 规则、v4 → v1/v4 历史规则（不把旧历史对象
-   误判损坏）；重新加载 Claim / MacroTransmissionChain / TransmissionEvidenceLinks /
-   EvidenceCards / ClaimEvidenceLinks 并逐项核实（company / origin roles /
-   analysis_as_of / availability / temporal / critical / impact-status /
+   rollback + MacroClaimPersistenceFailed（0 partial write）；无 compensating
+   delete。`create_claim_batch` 为 **all-drafts-validate-first + 单 transaction**
+   （任一 draft 校验失败 → 整批拒绝，0 写；items 按 input drafts 顺序返回）。
+4. **Replay**（**three-tier，version-aware**）：已有 fingerprint 时按既有 Claim
+   的 claim_schema_version 分叉——v6 → 当前 v3/v6 规则（**额外核验
+   chain.analysis_as_of == draft.analysis_as_of**）、v5 → v2/v5 历史规则
+   （0024-era，chain.analysis_as_of=NULL 允许，不反推）、v4 → v1/v4 历史规则
+   （不把旧历史对象误判损坏）；重新加载 Claim / MacroTransmissionChain /
+   TransmissionEvidenceLinks / EvidenceCards / ClaimEvidenceLinks 并逐项核实
+   （company / origin roles / availability / temporal / critical / impact-status /
    time-alignment / additional relations / transmission fingerprint / claim
    fingerprint）；任一损坏 → MacroClaimIntegrityError，**不自动 repair**。并发 →
    最终 1 Claim + 1 Transmission + 1 套 transmission links + 1 套
@@ -69,8 +76,10 @@ from app.claims.contracts import ClaimKind, compute_research_question_sha256
 from app.claims.macro_contracts import (
     MACRO_CLAIM_SCHEMA_VERSION,
     MACRO_CLAIM_SCHEMA_VERSION_V4,
+    MACRO_CLAIM_SCHEMA_VERSION_V5,
     MACRO_TRANSMISSION_SCHEMA_VERSION,
     MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
+    MACRO_TRANSMISSION_SCHEMA_VERSION_V2,
     MacroClaimDraft,
     MacroClaimImportance,
     MacroEffectDirection,
@@ -82,6 +91,7 @@ from app.claims.macro_contracts import (
 )
 from app.claims.macro_errors import (
     MacroClaimCriticalEvidenceInsufficient,
+    MacroClaimDraftError,
     MacroClaimEvidenceCompanyMismatch,
     MacroClaimEvidenceNotFound,
     MacroClaimFutureEvidence,
@@ -92,6 +102,7 @@ from app.claims.macro_errors import (
     MacroClaimTemporalEvidenceInsufficient,
     MacroClaimTimeAlignmentPolicy,
 )
+from app.claims.macro_policy import driver_evidence_eligible, resolve_availability
 from app.db.models.claim import ClaimModel
 from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.evidence_card import EvidenceCardModel
@@ -100,8 +111,7 @@ from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_transmission_chain import MacroTransmissionChainModel
 from app.db.models.macro_transmission_evidence_link import MacroTransmissionEvidenceLinkModel
 from app.db.models.source_record import SourceRecordModel
-from app.domain.source_records import SourceDocumentType
-from app.evidence.contracts import EvidenceOrigin, EvidenceType
+from app.evidence.contracts import EvidenceOrigin
 from app.repositories.claim_evidence_link_repository import ClaimEvidenceLinkRepository
 from app.repositories.claim_repository import ClaimRepository
 from app.repositories.macro_transmission_evidence_link_repository import (
@@ -112,11 +122,9 @@ from app.repositories.macro_transmission_repository import MacroTransmissionRepo
 _RELATIONS = ("supports", "contradicts", "context")
 _TRANSMISSION_ROLES = ("macro_driver", "company_exposure", "observed_effect")
 
-# v2 macro_driver 允许的 document EvidenceType（external event 材料）。排除
-# context（背景不是 driver）与 metric（结构化数值优先 MacroObservation）。
-_DOCUMENT_DRIVER_EVIDENCE_TYPES = frozenset(
-    (EvidenceType.EVENT.value, EvidenceType.FACT.value, EvidenceType.STATEMENT.value)
-)
+# 单次 create_claim_batch 最多 3 条 Macro Claim（与 4C.1B 的
+# MacroAnalysisDecision MAX_CLAIMS_PER_DECISION 一致）。
+MAX_MACRO_CLAIMS_PER_BATCH = 3
 
 
 @dataclass(frozen=True)
@@ -128,6 +136,59 @@ class MacroClaimResult:
     transmission_id: UUID
     transmission_fingerprint: str
     replayed: bool
+
+
+@dataclass(frozen=True)
+class MacroClaimBatchItem:
+    """batch 中单个 draft 的结果（ordinal 从 1 开始，与 input drafts 一一对应）。
+
+    - ordinal：draft 在本次 batch 中的位置（1..len(drafts)）；
+    - claim_id / transmission_id：created 或 replayed 后的 Claim / 链 id；
+    - replayed：True=复用既有 fingerprint 的 Claim，False=本次真正新增。
+    """
+
+    ordinal: int
+    claim_id: UUID
+    transmission_id: UUID
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class MacroClaimBatchResult:
+    """一次 create_claim_batch 的结果摘要（不含任何正文文本 / evidence）。
+
+    - items：**ordered result**——按 input drafts 顺序的逐条结果，
+      len(items) == len(drafts)，items[i] 永远对应 drafts[i]（不按
+      created/replayed 分组重排）；
+    - fingerprints：claim_id → claim_fingerprint；transmission_fingerprints：
+      claim_id → transmission_fingerprint（供上游追溯）；
+    - claim_ids / created / replayed / created_count / replayed_count：由
+      items 顺序派生（不是各自分组拼接）。
+    """
+
+    items: tuple[MacroClaimBatchItem, ...]
+    fingerprints: dict[UUID, str]
+    transmission_fingerprints: dict[UUID, str]
+
+    @property
+    def claim_ids(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items)
+
+    @property
+    def created(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items if not item.replayed)
+
+    @property
+    def replayed(self) -> tuple[UUID, ...]:
+        return tuple(item.claim_id for item in self.items if item.replayed)
+
+    @property
+    def created_count(self) -> int:
+        return len(self.created)
+
+    @property
+    def replayed_count(self) -> int:
+        return len(self.replayed)
 
 
 @dataclass(frozen=True)
@@ -156,25 +217,82 @@ class MacroClaimService:
 
     async def create_claim(self, draft: MacroClaimDraft) -> MacroClaimResult:
         """登记一条引用 Macro + Company Exposure Evidence 的 Macro Claim（0 partial write）。"""
-        # 1. 短 DB session：加载并校验全部 Evidence 引用 / origin / temporal /
-        #    impact-status / critical 策略，随后关闭。
-        async with self._sessionmaker() as session:
-            loaded = await self._load_validate_session(session, draft)
-
-        # 2. 纯函数派生：fingerprints + context expansion（无 DB）。新建 Claim 恒为
-        #    当前 schema（v5/v2）；版本不同 → fingerprint 不同 → 不与历史 v4/v1 冲突。
-        derived = self._derive(
-            draft,
-            loaded,
-            claim_schema_version=MACRO_CLAIM_SCHEMA_VERSION,
-            transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION,
+        batch = await self.create_claim_batch([draft])
+        item = batch.items[0]
+        return MacroClaimResult(
+            claim_id=item.claim_id,
+            claim_fingerprint=batch.fingerprints[item.claim_id],
+            transmission_id=item.transmission_id,
+            transmission_fingerprint=batch.transmission_fingerprints[item.claim_id],
+            replayed=item.replayed,
         )
 
-        # 3. 单短 PG transaction：Claim + Transmission + links，原子。
+    async def create_claim_batch(
+        self, drafts: list[MacroClaimDraft]
+    ) -> MacroClaimBatchResult:
+        """把 1..MAX_MACRO_CLAIMS_PER_BATCH 条 Macro Claim 原子登记。
+
+        两步提交结构（镜像 FinancialClaimService.create_claim_batch）：
+        1. **all-drafts-validate-first**——开事务前，对全部 drafts 加载引用并完成
+           派生；任何一条失败 → 整批拒绝（0 写），**不允许 candidate 1 创建、
+           candidate 2 才失败**。
+        2. **单 transaction**——逐个 create_or_get Claim + plain INSERT
+           TransmissionChain（新链 persist analysis_as_of）+ bulk insert links /
+           replay 校验；任一 SQLAlchemyError / MacroClaimIntegrityError → 整批
+           回滚，不留下半批 Claim（禁止 compensating delete）。
+        items 按 input drafts 顺序返回（ordinal 一一对应）。
+        """
+        if not isinstance(drafts, list) or not (1 <= len(drafts) <= MAX_MACRO_CLAIMS_PER_BATCH):
+            raise MacroClaimDraftError(f"drafts 必须在 1..{MAX_MACRO_CLAIMS_PER_BATCH} 条")
+
+        # 1. 短 DB session：一次性加载并校验全部 drafts 的 Evidence 引用。
+        async with self._sessionmaker() as session:
+            loaded_list = [await self._load_validate_session(session, draft) for draft in drafts]
+
+        # 2. 全部 drafts 先完成派生（任何一条失败 → 整批拒绝，0 写）。新建 Claim 恒为
+        #    当前 schema（v6/v3）；版本不同 → fingerprint 不同 → 不与历史 v5/v2、v4/v1 冲突。
+        derived_list = [
+            self._derive(
+                draft,
+                loaded,
+                claim_schema_version=MACRO_CLAIM_SCHEMA_VERSION,
+                transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION,
+            )
+            for draft, loaded in zip(drafts, loaded_list, strict=True)
+        ]
+
+        # 3. 单 transaction：逐个 create_or_get + chain + links / replay。
+        #    items 按 prepared（== input drafts）顺序收集，绝不按 created/replayed
+        #    分组重排——items[i] 永远对应 drafts[i]。
+        fingerprints: dict[UUID, str] = {}
+        transmission_fingerprints: dict[UUID, str] = {}
+        items: list[MacroClaimBatchItem] = []
         async with self._sessionmaker() as session:
             try:
-                return await self._persist(session, draft, loaded, derived)
+                for ordinal, (draft, derived) in enumerate(
+                    zip(drafts, derived_list, strict=True), start=1
+                ):
+                    claim_id, transmission_id, replayed = await self._persist_one(
+                        session, draft, loaded_list[ordinal - 1], derived
+                    )
+                    fingerprints[claim_id] = derived.claim_fingerprint
+                    transmission_fingerprints[claim_id] = derived.transmission_fingerprint
+                    items.append(
+                        MacroClaimBatchItem(
+                            ordinal=ordinal,
+                            claim_id=claim_id,
+                            transmission_id=transmission_id,
+                            replayed=replayed,
+                        )
+                    )
+                await session.commit()
+                return MacroClaimBatchResult(
+                    items=tuple(items),
+                    fingerprints=fingerprints,
+                    transmission_fingerprints=transmission_fingerprints,
+                )
             except MacroClaimIntegrityError:
+                # replay 校验发现既有 Claim 数据损坏 → 显式回滚本事务，然后抛出。
                 await session.rollback()
                 raise
             except SQLAlchemyError as exc:
@@ -230,26 +348,24 @@ class MacroClaimService:
         snapshots = await self._load_macro_snapshots(session, evidence)
         source_records = await self._load_source_records(session, evidence)
 
-        # 角色 origin 校验 v2（additional 允许任何已存在 origin，但不能绕过公司隔离）。
+        # 角色 origin 校验 v2/v3（additional 允许任何已存在 origin，但不能绕过公司隔离）。
+        # driver 资格复用 macro_policy.driver_evidence_eligible——MacroAnalysisService
+        # 与 MacroClaimService **共用**同一 no-lookahead 策略，禁止重复实现。
         for card_id in draft.macro_driver_evidence_ids:
             card = evidence[card_id]
-            if card.origin_type == EvidenceOrigin.MACRO_OBSERVATION.value:
-                continue
+            source_document_type = None
             if card.origin_type == EvidenceOrigin.DOCUMENT_CHUNK.value:
                 source = source_records.get(card.source_id)
                 if source is None:
                     raise MacroClaimIntegrityError(
                         "macro claim evidence source missing (corrupted provenance)"
                     )
-                if (
-                    source.document_type != SourceDocumentType.NEWS_ARTICLE.value
-                    or card.evidence_type not in _DOCUMENT_DRIVER_EVIDENCE_TYPES
-                ):
-                    raise MacroClaimOriginViolation(
-                        "macro_driver document evidence must be a news_article with "
-                        "evidence_type in {event, fact, statement}"
-                    )
-            else:
+                source_document_type = source.document_type
+            if not driver_evidence_eligible(
+                origin_type=card.origin_type,
+                evidence_type=card.evidence_type,
+                source_document_type=source_document_type,
+            ):
                 raise MacroClaimOriginViolation(
                     "macro_driver evidence must be macro_observation or an eligible "
                     "external event document (news_article + event/fact/statement)"
@@ -516,14 +632,11 @@ class MacroClaimService:
         macro_snapshots: dict[UUID, MacroDatasetSnapshotModel],
         source_records: dict[UUID, SourceRecordModel],
     ) -> datetime | None:
-        """v2 information availability（真实 provenance，不伪造缺失日期）。
+        """v2/v3 information availability（真实 provenance，不伪造缺失日期）。
 
-        - macro 卡：MacroDatasetSnapshot.fetched_at——系统最晚何时已经取得该观测
-          值（provider release 时间未结构化捕获，**绝不用 period /
-          normalized_period_start 冒充"何时可知"）；
-        - document 卡：SourceRecord.published_at（真实发布时间）；为 NULL 时用
-          SourceRecord.acquired_at 作为保守 fallback；**绝不用
-          reporting_period_end**（经济期间 ≠ 信息可得时间）。
+        provenance 值解析委托 macro_policy.resolve_availability——MacroAnalysisService
+        与 MacroClaimService **共用**同一 no-lookahead 策略，禁止重复实现；
+        本方法只负责把缺失 provenance 映射为数据损坏（IntegrityError）。
         """
         if card.origin_type == EvidenceOrigin.MACRO_OBSERVATION.value:
             snapshot = macro_snapshots.get(card.macro_snapshot_id)
@@ -531,15 +644,23 @@ class MacroClaimService:
                 raise MacroClaimIntegrityError(
                     "macro claim evidence snapshot missing (corrupted provenance)"
                 )
-            return snapshot.fetched_at
+            return resolve_availability(
+                origin_type=card.origin_type,
+                snapshot_fetched_at=snapshot.fetched_at,
+                source_published_at=None,
+                source_acquired_at=None,
+            )
         source = source_records.get(card.source_id)
         if source is None:
             raise MacroClaimIntegrityError(
                 "macro claim evidence source missing (corrupted provenance)"
             )
-        if source.published_at is not None:
-            return source.published_at
-        return source.acquired_at
+        return resolve_availability(
+            origin_type=card.origin_type,
+            snapshot_fetched_at=None,
+            source_published_at=source.published_at,
+            source_acquired_at=source.acquired_at,
+        )
 
     @staticmethod
     def _legacy_usable_date(
@@ -664,14 +785,18 @@ class MacroClaimService:
 
     # ------------------------------------------------------------------ 持久化
 
-    async def _persist(
+    async def _persist_one(
         self,
         session: AsyncSession,
         draft: MacroClaimDraft,
         loaded: _LoadedMacroReferences,
         derived: _DerivedMacroClaim,
-    ) -> MacroClaimResult:
-        """单 transaction：Claim + MacroTransmissionChain + links，原子（0 partial write）。"""
+    ) -> tuple[UUID, UUID, bool]:
+        """事务内持久化一条 Macro Claim；返回 (claim_id, transmission_id, replayed)。
+
+        **不 commit**（batch 由 create_claim_batch 统一 commit）；任何失败抛错由
+        调用方回滚。本方法不做 compensating delete。
+        """
         claim_repo = ClaimRepository(session)
         chain_repo = MacroTransmissionRepository(session)
         trans_link_repo = MacroTransmissionEvidenceLinkRepository(session)
@@ -686,13 +811,7 @@ class MacroClaimService:
                 raise MacroClaimIntegrityError(
                     "macro claim replay: transmission chain missing for existing claim"
                 )
-            return MacroClaimResult(
-                claim_id=existing.claim_id,
-                claim_fingerprint=existing.claim_fingerprint,
-                transmission_id=chain.transmission_id,
-                transmission_fingerprint=chain.transmission_fingerprint,
-                replayed=True,
-            )
+            return existing.claim_id, chain.transmission_id, True
 
         claim = ClaimModel(
             claim_id=uuid.uuid4(),
@@ -719,13 +838,7 @@ class MacroClaimService:
                 raise MacroClaimIntegrityError(
                     "macro claim replay: transmission chain missing for existing claim"
                 )
-            return MacroClaimResult(
-                claim_id=persisted_claim.claim_id,
-                claim_fingerprint=persisted_claim.claim_fingerprint,
-                transmission_id=chain.transmission_id,
-                transmission_fingerprint=chain.transmission_fingerprint,
-                replayed=True,
-            )
+            return persisted_claim.claim_id, chain.transmission_id, True
 
         # 本 transaction 创建了 Claim：创建对应的 Transmission + links（同一事务内
         # 原子；任一失败 → 整条 rollback，0 partial write）。
@@ -739,6 +852,10 @@ class MacroClaimService:
             time_alignment=draft.time_alignment.value,
             transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION,
             transmission_fingerprint=derived.transmission_fingerprint,
+            # v3 查询列（Gate 0）：新链必须持久化 analysis_as_of=draft.analysis_as_of，
+            # 使 DB 能从 claim_id 反推 cutoff；CHECK
+            # `transmission_schema_version < 3 OR analysis_as_of IS NOT NULL` 兜底。
+            analysis_as_of=draft.analysis_as_of,
         )
         # transmission_fingerprint **不是 global identity**（0024 移除 UNIQUE），
         # 因此 plain INSERT 即可：claim_id 是本事务新生成的 UNIQUE 值，无冲突可能。
@@ -747,14 +864,7 @@ class MacroClaimService:
             self._transmission_links(persisted_chain.transmission_id, draft)
         )
         await ev_link_repo.bulk_insert(self._evidence_links(persisted_claim.claim_id, derived))
-        await session.commit()
-        return MacroClaimResult(
-            claim_id=persisted_claim.claim_id,
-            claim_fingerprint=persisted_claim.claim_fingerprint,
-            transmission_id=persisted_chain.transmission_id,
-            transmission_fingerprint=persisted_chain.transmission_fingerprint,
-            replayed=False,
-        )
+        return persisted_claim.claim_id, persisted_chain.transmission_id, False
 
     @staticmethod
     def _transmission_links(
@@ -802,14 +912,17 @@ class MacroClaimService:
         existing: ClaimModel,
         draft: MacroClaimDraft,
     ) -> None:
-        """已有 fingerprint 的 Macro Claim replay 完整性校验（version-aware）。
+        """已有 fingerprint 的 Macro Claim replay 完整性校验（three-tier，version-aware）。
 
-        按既有 Claim 的 claim_schema_version 分叉：
-        - v5（当前）：用 v2 当前规则（document driver 资格 / availability /
-          time-alignment policy）重新加载校验与派生；
-        - v4（legacy）：用 v1/v4 历史规则（macro_driver 必须 macro_observation；
+        按既有 Claim 的 claim_schema_version 分叉（**不得把历史版本误判损坏**）：
+        - v6（当前）：v3/v6 规则（document driver 资格 / availability /
+          time-alignment policy），**额外核验 chain.analysis_as_of ==
+          draft.analysis_as_of**（0025 起的 v3 查询列语义）；
+        - v5（0024-era）：v2/v5 历史规则——与 v6 同一套资格/可用性政策，但 0025
+          **不 backfill**，历史链 analysis_as_of=NULL 允许（**不反推 cutoff**）；
+        - v4（最旧 legacy）：v1/v4 历史规则（macro_driver 必须 macro_observation；
           normalized_period_start / source_published_at / reporting_period_end 可用
-          时间）校验，**不把旧历史对象误判损坏**。
+          时间）。
 
         重新加载全部 Evidence + Observations/Snapshots/SourceRecords，重新执行
         origin / availability / temporal / impact-status / time-alignment / critical
@@ -821,10 +934,17 @@ class MacroClaimService:
             legacy = False
             claim_version = MACRO_CLAIM_SCHEMA_VERSION
             trans_version = MACRO_TRANSMISSION_SCHEMA_VERSION
+            verify_cutoff = True
+        elif existing.claim_schema_version == MACRO_CLAIM_SCHEMA_VERSION_V5:
+            legacy = False
+            claim_version = MACRO_CLAIM_SCHEMA_VERSION_V5
+            trans_version = MACRO_TRANSMISSION_SCHEMA_VERSION_V2
+            verify_cutoff = False
         elif existing.claim_schema_version == MACRO_CLAIM_SCHEMA_VERSION_V4:
             legacy = True
             claim_version = MACRO_CLAIM_SCHEMA_VERSION_V4
             trans_version = MACRO_TRANSMISSION_SCHEMA_VERSION_V1
+            verify_cutoff = False
         else:
             raise MacroClaimIntegrityError("macro claim replay: unknown claim_schema_version")
 
@@ -898,6 +1018,12 @@ class MacroClaimService:
                 rederived.transmission_fingerprint,
             ),
         )
+        if verify_cutoff:
+            # v6 当前层：v3 链必须持久化 analysis_as_of（0025 查询列）；历史 v5/v4
+            # 链允许 NULL，**不参与该检查（不反推 cutoff）**。
+            chain_pairs = chain_pairs + (
+                ("analysis_as_of", chain.analysis_as_of, draft.analysis_as_of),
+            )
         for name, stored, expected in chain_pairs:
             if stored != expected:
                 raise MacroClaimIntegrityError(

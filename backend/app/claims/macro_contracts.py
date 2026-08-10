@@ -1,6 +1,6 @@
-"""Macro Claim contracts (stage 4C.1A): schema v4 + MacroClaimDraft + fingerprints.
+"""Macro Claim contracts (stage 4C.1B): schema v6 + MacroClaimDraft + fingerprints.
 
-4C.1A 持久化 **Macro Evidence + Company Exposure Evidence → Macro Transmission
+4C.1B 持久化 **Macro Evidence + Company Exposure Evidence → Macro Transmission
 Chain → Macro Claim** 的宏观传导分析产物。**Transmission 不是 EvidenceCard**：
 宏观察（rate changes / FX / PMI / commodity / macro observations）是 source-backed
 Macro Evidence；公司暴露（海外收入 / 进口原料依赖 / 债务结构 / 融资需求 /
@@ -9,14 +9,16 @@ channel → 公司有息负债 → 融资成本压力）是 **analysis artifact*
 EvidenceCard。
 
 本模块冻结：
-- `MACRO_CLAIM_SCHEMA_VERSION_V4 = 4`——历史 Macro Claim（4C.1A foundation，
-  2026-08-10 前创建）。保持 legacy replay semantics，**不批量改写历史 v4 行**。
-- `MACRO_TRANSMISSION_SCHEMA_VERSION_V1 = 1`——历史传导链 schema。
-- `MACRO_CLAIM_SCHEMA_VERSION = 5`——**当前** Macro Claim 的 claim_schema_version
-  （analysis_domain=macro，4C.1A Final Closeout 起）。**不污染 generic
-  ClaimDraft / FinancialClaimDraft**。
-- `MACRO_TRANSMISSION_SCHEMA_VERSION = 2`——**当前**传导链 schema（v2 起允许
-  经过明确筛选的 external event document Evidence 作为 macro_driver）。
+- `MACRO_CLAIM_SCHEMA_VERSION_V4 = 4` / `MACRO_CLAIM_SCHEMA_VERSION_V5 = 5`——
+  历史 Macro Claim schema（4C.1A foundation 与 4C.1A Final Closeout）。
+  保持 legacy replay semantics，**不批量改写历史 v4/v5 行**。
+- `MACRO_TRANSMISSION_SCHEMA_VERSION_V1 = 1` / `MACRO_TRANSMISSION_SCHEMA_VERSION_V2 = 2`——
+  历史传导链 schema。
+- `MACRO_CLAIM_SCHEMA_VERSION = 6`——**当前** Macro Claim 的 claim_schema_version
+  （analysis_domain=macro，4C.1B 起；v6 与 transmission v3 配套：新链必须持久化
+  analysis_as_of 查询列）。**不污染 generic ClaimDraft / FinancialClaimDraft**。
+- `MACRO_TRANSMISSION_SCHEMA_VERSION = 3`——**当前**传导链 schema（v3 起
+  macro_transmission_chains.analysis_as_of 为 NOT NULL 语义的查询列）。
 - `MacroClaimDraft`：专用新类。claim_kind **只允许 inference / risk**（macro
   facts 由 Macro Evidence 承载；不做 fact / relative_valuation）。固定
   analysis_domain=macro。至少 1 个 macro_driver_evidence_id + 1 个
@@ -28,7 +30,7 @@ EvidenceCard。
   analysis_as_of / role-sorted evidence_card_id + evidence fingerprint；不含
   transmission_id / created_at / claim_id）。任何变化 → 新 fingerprint → 新链，
   旧链保留。
-- macro claim fingerprint = claim_schema_version（当前 =5）+ company /
+- macro claim fingerprint = claim_schema_version（当前 =6）+ company /
   research_question / analysis_as_of / statement / claim_kind / confidence /
   importance / analyst 身份 / transmission_fingerprint / additional evidence 按
   supports/contradicts/context 分组（不含 claim_id / created_at）。任何变化 →
@@ -46,12 +48,18 @@ from app.claims.contracts import ClaimKind
 from app.claims.macro_errors import MacroClaimDraftError
 
 # claims.claim_schema_version 的当前值（analysis_domain=macro 专用）。
-MACRO_CLAIM_SCHEMA_VERSION = 5
+# v6：与 transmission v3 配套——新链必须持久化 analysis_as_of 查询列。
+MACRO_CLAIM_SCHEMA_VERSION = 6
+# 历史 Macro Claim schema（4C.1B 前，冻结，不改写）。
+MACRO_CLAIM_SCHEMA_VERSION_V5 = 5
 # 历史 Macro Claim schema（4C.1A foundation，冻结，不改写）。
 MACRO_CLAIM_SCHEMA_VERSION_V4 = 4
 # macro_transmission_chains.transmission_schema_version 的当前值。
-MACRO_TRANSMISSION_SCHEMA_VERSION = 2
-# 历史传导链 schema（冻结，不改写）。
+# v3：analysis_as_of 是查询列（新链必填）；v2 允许 NULL（0024-era 无该列）。
+MACRO_TRANSMISSION_SCHEMA_VERSION = 3
+# 历史传导链 schema（4C.1A Final Closeout 起，冻结，不改写）。
+MACRO_TRANSMISSION_SCHEMA_VERSION_V2 = 2
+# 历史传导链 schema（4C.1A foundation，冻结，不改写）。
 MACRO_TRANSMISSION_SCHEMA_VERSION_V1 = 1
 
 # Macro Claim 只允许 inference / risk（macro facts 由 Macro Evidence 承载）。

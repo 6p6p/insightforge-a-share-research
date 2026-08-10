@@ -1,4 +1,4 @@
-"""Data access for macro transmission chains (stage 4C.1A)."""
+"""Data access for macro transmission chains (stage 4C.1B)."""
 
 from uuid import UUID
 
@@ -31,17 +31,22 @@ class MacroTransmissionRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_fingerprint(
+    async def list_by_fingerprint(
         self, transmission_fingerprint: str
-    ) -> MacroTransmissionChainModel | None:
-        """按 fingerprint 查询（普通索引支持；fingerprint **不是 global identity**，
-        同指纹可能有多条链，本方法只返回其一，用于审计查询）。"""
+    ) -> tuple[MacroTransmissionChainModel, ...]:
+        """按 fingerprint 查询全部匹配链（普通索引支持；fingerprint **不是 global
+        identity**，同指纹可能有多条链）。**不做 `.limit(1)`**——审计需要完整集合；
+        按 created_at / transmission_id 稳定排序（确定性顺序，可复现）。
+        """
         result = await self._session.execute(
             select(MacroTransmissionChainModel)
             .where(MacroTransmissionChainModel.transmission_fingerprint == transmission_fingerprint)
-            .limit(1)
+            .order_by(
+                MacroTransmissionChainModel.created_at.asc(),
+                MacroTransmissionChainModel.transmission_id.asc(),
+            )
         )
-        return result.scalar_one_or_none()
+        return tuple(result.scalars().all())
 
     async def create(self, chain: MacroTransmissionChainModel) -> MacroTransmissionChainModel:
         """plain INSERT ... RETURNING。

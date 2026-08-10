@@ -20,11 +20,10 @@ RUN python -m pip install --no-cache-dir --index-url https://download.pytorch.or
 # 安装 backend 运行依赖（不含 dev 组）
 RUN pip install --no-cache-dir .
 
-# 清理镜像内的全部 __pycache__ / .pyc：本机 Docker-on-Windows overlay 在 pip 并行
-# 编译字节码时偶发写入损坏 pyc（ValueError: bad marshal data），且每次落在不同模块
-# （实测 langchain_core.runnables → sqlalchemy.orm.session 漂移）。源码 .py 均完好。
-# 运行时已设 PYTHONDONTWRITEBYTECODE=1（不写新 pyc）→ 删除后 import 一律从源码编译，
-# 容器对 pyc 损坏免疫。
+# 清理镜像内的全部 __pycache__ / .pyc：当前 Windows/Docker 构建环境中观察到间歇性
+# pyc corruption（ValueError: bad marshal data），源码 .py 均正常、移除 pyc 后运行
+# 正常，具体底层存储原因尚未独立证明。运行时已设 PYTHONDONTWRITEBYTECODE=1
+# （不写新 pyc）→ 删除后 import 一律从源码编译，容器对 pyc 损坏免疫。
 RUN find /usr/local/lib/python3.12 /app -type f -name '*.pyc' -delete \
     && find /usr/local/lib/python3.12 /app -type d -name '__pycache__' -empty -delete
 

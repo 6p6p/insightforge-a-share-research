@@ -320,7 +320,7 @@ async def _claim_count(sessionmaker) -> int:
         return int(
             (
                 await session.execute(
-                    text("SELECT count(*) FROM claims WHERE claim_schema_version = 5")
+                    text("SELECT count(*) FROM claims WHERE claim_schema_version = 6")
                 )
             ).scalar_one()
         )
@@ -1009,8 +1009,8 @@ async def test_same_transmission_analyst_version_change_two_claims_two_transmiss
     assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 2
 
 
-async def test_new_claim_is_schema_5_transmission_2(env, monkeypatch) -> None:
-    # 新建 Macro Claim = claim_schema_version=5 / transmission_schema_version=2（字面值）。
+async def test_new_claim_is_schema_6_transmission_3(env, monkeypatch) -> None:
+    # 新建 Macro Claim = claim_schema_version=6 / transmission_schema_version=3（字面值）。
     macro_card, chain = await _seed_macro_card(env, monkeypatch)
     doc_card = await _seed_document_card(env)
     result = await _service(env).create_claim(
@@ -1021,12 +1021,12 @@ async def test_new_claim_is_schema_5_transmission_2(env, monkeypatch) -> None:
         chain_row = await MacroTransmissionRepository(session).get_by_claim_id(result.claim_id)
     assert claim is not None
     assert chain_row is not None
-    assert claim.claim_schema_version == 5
-    assert chain_row.transmission_schema_version == 2
+    assert claim.claim_schema_version == 6
+    assert chain_row.transmission_schema_version == 3
 
 
 async def test_legacy_v1_v4_replay_remains_valid(env, monkeypatch) -> None:
-    """历史 v1/v4 对象按历史规则 replay 有效；当前 create_claim 产生新 v5 Claim 而非碰撞。"""
+    """历史 v1/v4 对象按历史规则 replay 有效；当前 create_claim 产生新 v6 Claim 而非碰撞。"""
     macro_card, chain = await _seed_macro_card(env, monkeypatch)
     doc_card = await _seed_document_card(env)
     draft = _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
@@ -1143,7 +1143,7 @@ async def test_legacy_v1_v4_replay_remains_valid(env, monkeypatch) -> None:
         assert existing is not None
         await service._verify_replay(session, existing, draft)
 
-    # 当前 create_claim（v5/v2 派生）→ 新 fingerprint → 新 Claim + 新 Chain；legacy 原样保留。
+    # 当前 create_claim（v6/v3 派生）→ 新 fingerprint → 新 Claim + 新 Chain；legacy 原样保留。
     result = await service.create_claim(draft)
     assert result.replayed is False
     assert result.claim_id != legacy_claim_id
@@ -1151,8 +1151,8 @@ async def test_legacy_v1_v4_replay_remains_valid(env, monkeypatch) -> None:
         assert await ClaimRepository(session).get_by_id(legacy_claim_id) is not None
         legacy_chain = await MacroTransmissionRepository(session).get_by_claim_id(legacy_claim_id)
         assert legacy_chain is not None
-    assert await _claim_count(env["sessionmaker"]) == 1  # 只有新 v5 Claim
-    # 1 条 legacy v1 + 1 条新 v2 链并存。
+    assert await _claim_count(env["sessionmaker"]) == 1  # 只有新 v6 Claim
+    # 1 条 legacy v1 + 1 条新 v3 链并存。
     assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 2
 
 
