@@ -17,6 +17,8 @@ from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
 from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
+from app.db.models.macro_transmission_chain import MacroTransmissionChainModel
+from app.db.models.macro_transmission_evidence_link import MacroTransmissionEvidenceLinkModel
 from app.db.models.news_discovery_candidate import NewsDiscoveryCandidateModel
 from app.db.models.news_discovery_run import NewsDiscoveryRunModel
 from app.db.models.news_source_verification import NewsSourceVerificationModel
@@ -47,6 +49,8 @@ __all__ = [
     "MacroObservationModel",
     "MacroSeriesModel",
     "MacroSnapshotArtifactModel",
+    "MacroTransmissionChainModel",
+    "MacroTransmissionEvidenceLinkModel",
     "NewsDiscoveryCandidateModel",
     "NewsDiscoveryRunModel",
     "NewsSourceVerificationModel",
