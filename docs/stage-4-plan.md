@@ -199,7 +199,7 @@
 
 ## 4D：Claim 综合 / 冲突 / 证据缺口
 
-- **状态：4D.1A = completed（Claim Synthesis Input & Provenance Foundation，2026-08-10）**；4D.1B = next（Claim Synthesis）。Claim Synthesis / Conflict Resolution / Evidence Gap 检测在 4C 之后推进；**本阶段不是 Audit**。
+- **状态：4D.1A = completed（Claim Synthesis Input & Provenance Foundation，2026-08-10）**；**4D.1B = completed（Structured Claim Synthesis Analyst，2026-08-10，Gate 验收关闭）**。Claim Synthesis / Conflict Resolution / Evidence Gap 检测在 4C 之后推进；**本阶段不是 Audit**。
 
 ### 4D.1A Claim Synthesis Input & Provenance Foundation（completed）
 
@@ -213,6 +213,17 @@
 - **Runtime acceptance（2026-08-10）**：Windows + Docker 各 live/ready **5×200**、ready 五项 checks ok；Docker runtime `alembic_version=0028` + 两张 synthesis 表可读。
 - **边界**：不创建 Report / DraftSection / Report / ReviewIssue / Audit；不接 LangGraph 合成节点；不开放 HTTP API；不做语义筛选 / 冲突检测 / 证据缺口（4D.1B 及以后）；不修改既有 schema；**不开始 4D.1B**。
 - 决策记录：[docs/decisions/0036-claim-synthesis-input-foundation.md](decisions/0036-claim-synthesis-input-foundation.md)。
+
+### 4D.1B Structured Claim Synthesis Analyst（completed）
+
+- **状态（2026-08-10）：implementation completed / automated tests completed / live acceptance completed——4D.1B = completed**。把 `SynthesisRun` + 经 **ClaimIntegrityGateway**（generic/financial/macro/valuation dispatch，全部委托各 domain 公开 `verify_*_integrity`，不复制 replay 逻辑）校验的 Claim 集 → 确定性 Claim Pack（C alias，LLM 永不看 UUID）→ DeepSeek V4 Flash（thinking disabled / temperature 0，走生产适配器，不直接调 SDK）→ themes / claim roles / duplicates / conflicts / evidence gaps → strict validation（no-cherry-picking 硬边界：claim_roles 恰好覆盖每条输入 Claim 一次）→ 不可变 `SynthesisResult`。**不是 Report / DraftSection / Audit**。migration **0029**（单表 `claim_synthesis_results`，UNIQUE result_fingerprint、synthesis_id FK RESTRICT、downgrade guard）。
+- **版本边界**：`SYNTHESIS_RESULT_SCHEMA_VERSION=1`、`SYNTHESIS_ANALYST_NAME=structured_claim_synthesis_analyst`、`SYNTHESIS_ANALYST_VERSION=1`；生产 model=`deepseek:deepseek-v4-flash`。
+- **包位置**：`app/analysis/synthesis/`（contracts / errors / packs / prompt / adapters / factory / service）+ `app/repositories/claim_synthesis_result_repository.py` + `app/db/models/claim_synthesis_result.py`。
+- **Persistence / replay**：`create_or_get`（ON CONFLICT result_fingerprint DO NOTHING）→ 命中时完整 12 字段重放校验，任一 mismatch → `SynthesisIntegrityError`，**不自动 repair**；结果不可变。fingerprint = canonical JSON SHA-256（含 schema version / synthesis_fingerprint / analyst identity / 全部 output；不含 synthesis_id / created_at）。
+- **测试**：+43 非集成（contracts / packs / prompt / factory）+ synthesis 集成（E2E 跨 domain、replay 同指纹、UnknownRef / NoCherryPicking / MalformedOutput 0 写、gateway 完整性、篡改结果 replay 拒绝、boundary 无 Stage 5 表）。全量 **1737 非集成 + 655 集成通过**。
+- **Real DeepSeek smoke（受控 1 次）**：`app/cli/smoke_synthesis_analysis.py` 走 Settings→factory→`DeepSeekSynthesisAnalysisModel`→`SynthesisAnalysisService.analyze`，seed 3 条跨 domain Claim → 3 themes / 4 evidence gaps / no_cherry_picking_success=true / cleanup 0 残留，exit 0。
+- **边界**：不创建 Report / DraftSection / Audit；不接 LangGraph 合成节点；不开放 HTTP API；不查 Chroma / Retrieval；不做 Stage 5 消费（report generation 在 Stage 5）。
+- 决策记录：本轮按文档策略默认不新建 ADR；migration 0029 docstring 记录 schema 与 downgrade guard。
 
 ## Stage 5（Report + Audit）及以后
 

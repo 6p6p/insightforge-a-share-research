@@ -132,6 +132,7 @@ async def sessionmaker(database):
 
 async def _cleanup(sessionmaker) -> None:
     async with sessionmaker() as session:
+        await session.execute(text("DELETE FROM claim_synthesis_results"))
         await session.execute(text("DELETE FROM claim_synthesis_input_links"))
         await session.execute(text("DELETE FROM claim_synthesis_runs"))
         await session.execute(text("DELETE FROM claim_relative_valuation_comparison_links"))
