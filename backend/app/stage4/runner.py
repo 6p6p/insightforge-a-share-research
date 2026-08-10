@@ -16,9 +16,11 @@ import uuid
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.errors import (
+    ActiveWorkflowRunExists,
     WorkflowRunAlreadyFinished,
     WorkflowRunAlreadyStarted,
     WorkflowRunNotFound,
@@ -31,11 +33,13 @@ from app.domain.tasks import (
     WorkflowEventType,
     WorkflowRunStatus,
 )
+from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.workflow_event_repository import WorkflowEventRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.schemas.workflow import WorkflowRunResponse
 from app.stage4.contracts import Stage4WorkflowRequest
 from app.stage4.dependencies import Stage4AnalysisDependencies
+from app.stage4.errors import Stage4ResearchTaskNotFound
 from app.stage4.graph import (
     STAGE4_GRAPH_NAME,
     STAGE4_GRAPH_VERSION,
@@ -81,20 +85,40 @@ class Stage4WorkflowRunner:
     # ------------------------------------------------------------------ create
 
     async def create_stage4_run(self, request: Stage4WorkflowRequest) -> WorkflowRunResponse:
-        """创建 Stage 4 工作流 run（task_id=None：无 research_task）。"""
+        """创建 Stage 4 工作流 run（必须绑定一个真实 ResearchTask）。
+
+        - 真实 PG 校验 task 存在 → 缺失 `Stage4ResearchTaskNotFound`（不猜任务、
+          不自动创建 fake ResearchTask）；
+        - active-run 不变式：同一 task 同时只能存在一个 active WorkflowRun——
+          先查 `get_active_for_task`，再靠 partial unique index
+          `uq_workflow_runs_one_active_per_task` 兜底并发（IntegrityError →
+          `ActiveWorkflowRunExists`）。
+        """
         run_id = uuid.uuid4()
         async with self._sessionmaker() as session:
+            task_repo = ResearchTaskRepository(session)
             run_repo = WorkflowRunRepository(session)
             event_repo = WorkflowEventRepository(session)
+            task = await task_repo.get_by_id(request.task_id)
+            if task is None:
+                raise Stage4ResearchTaskNotFound()
+            active = await run_repo.get_active_for_task(request.task_id)
+            if active is not None:
+                raise ActiveWorkflowRunExists()
             run = WorkflowRunModel(
                 run_id=run_id,
-                task_id=None,
+                task_id=request.task_id,
                 thread_id=str(run_id),
                 graph_name=STAGE4_GRAPH_NAME,
                 graph_version=STAGE4_GRAPH_VERSION,
                 status=WorkflowRunStatus.PENDING.value,
             )
-            await run_repo.create(run)
+            try:
+                await run_repo.create(run)
+            except IntegrityError:
+                # 并发创建同一 task 的两个 active run：unique partial index 兜底。
+                await session.rollback()
+                raise ActiveWorkflowRunExists() from None
             await event_repo.create(
                 WorkflowEventModel(
                     run_id=run_id,
@@ -146,12 +170,16 @@ class Stage4WorkflowRunner:
     # ------------------------------------------------------------------ resume
 
     async def resume_stage4(self, run_id: UUID) -> dict:
-        """失败后恢复：FAILED → RUNNING，同 thread 从最后 checkpoint 继续。"""
+        """失败后内部 durable recovery：FAILED → RUNNING，同 run/thread 从最后 checkpoint 继续。
+
+        **recovery ≠ retry**：仅用于 Stage 4 内部恢复，复用同 run / thread；
+        Stage 1 用户 retry 语义不变（create_simulation_run → 新 run / 新 thread）。
+        """
         started_at = datetime.now(UTC)
         async with self._sessionmaker() as session:
             run_repo = WorkflowRunRepository(session)
             event_repo = WorkflowEventRepository(session)
-            claimed = await run_repo.claim_failed_for_retry(run_id, started_at)
+            claimed = await run_repo.claim_failed_for_recovery(run_id, started_at)
             if claimed is None:
                 run = await run_repo.get_by_id(run_id)
                 if run is None:

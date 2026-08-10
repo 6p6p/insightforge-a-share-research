@@ -13,7 +13,7 @@ class WorkflowRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     run_id: UUID
-    task_id: UUID | None = None
+    task_id: UUID
     thread_id: str
     graph_name: str
     graph_version: str

@@ -64,14 +64,13 @@ def make_validate_analysis_plan_node():
             if not isinstance(item.get("item_id"), str) or not item["item_id"]:
                 raise Stage4InvalidPlan("item_id 不能为空")
             if item.get("analysis_type") not in _VALID_ANALYSIS_TYPES:
-                raise Stage4InvalidPlan(
-                    f"analysis_type 必须是 {sorted(_VALID_ANALYSIS_TYPES)}"
-                )
+                raise Stage4InvalidPlan(f"analysis_type 必须是 {sorted(_VALID_ANALYSIS_TYPES)}")
         if not isinstance(state.get("company_id"), str) or not state["company_id"]:
             raise Stage4InvalidPlan("company_id 不能为空")
-        if not isinstance(state.get("research_question"), str) or not state[
-            "research_question"
-        ].strip():
+        if (
+            not isinstance(state.get("research_question"), str)
+            or not state["research_question"].strip()
+        ):
             raise Stage4InvalidPlan("research_question 不能为空（trim 后）")
         try:
             date.fromisoformat(state["analysis_as_of"])
@@ -109,8 +108,7 @@ def fan_out_workers(state):
         "analysis_as_of": state["analysis_as_of"],
     }
     return [
-        Send("run_analysis_item", {**common, **dict(item)})
-        for item in state["analysis_work_items"]
+        Send("run_analysis_item", {**common, **dict(item)}) for item in state["analysis_work_items"]
     ]
 
 
@@ -148,9 +146,7 @@ def make_run_analysis_item_node(deps: Stage4AnalysisDependencies):
                     company_id=company_id,
                     research_question=question,
                     calculation_ids=[UUID(c) for c in state["calculation_ids"]],
-                    additional_evidence_ids=[
-                        UUID(c) for c in state["additional_evidence_ids"]
-                    ],
+                    additional_evidence_ids=[UUID(c) for c in state["additional_evidence_ids"]],
                 )
             )
             claim_ids = [str(cid) for cid in result.claim_ids]
@@ -160,9 +156,7 @@ def make_run_analysis_item_node(deps: Stage4AnalysisDependencies):
                     company_id=company_id,
                     research_question=question,
                     analysis_as_of=date.fromisoformat(state["analysis_as_of"]),
-                    macro_driver_evidence_ids=[
-                        UUID(c) for c in state["macro_driver_evidence_ids"]
-                    ],
+                    macro_driver_evidence_ids=[UUID(c) for c in state["macro_driver_evidence_ids"]],
                     company_evidence_ids=[UUID(c) for c in state["company_evidence_ids"]],
                 )
             )

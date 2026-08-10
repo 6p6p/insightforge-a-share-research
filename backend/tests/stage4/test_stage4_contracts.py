@@ -70,6 +70,7 @@ def _valuation(item_id: str = "i4", **kw) -> dict:
 
 def _request(items: list[dict], **kw) -> dict:
     values = dict(
+        task_id=uuid4(),
         company_id=uuid4(),
         research_question=_QUESTION,
         analysis_as_of=_CUTOFF,
@@ -94,7 +95,12 @@ def test_each_analysis_type_parses() -> None:
     request = Stage4WorkflowRequest(**_request(items))
     assert [item.item_id for item in request.analysis_work_items] == ["a", "b", "c", "d", "e", "f"]
     assert [item.analysis_type for item in request.analysis_work_items] == [
-        "business", "event", "risk", "financial", "macro", "valuation",
+        "business",
+        "event",
+        "risk",
+        "financial",
+        "macro",
+        "valuation",
     ]
 
 
@@ -137,6 +143,15 @@ def test_empty_evidence_ids_rejected() -> None:
 def test_zero_items_rejected() -> None:
     with pytest.raises(ValidationError):
         Stage4WorkflowRequest(**_request([]))
+
+
+def test_task_id_required() -> None:
+    # spec O（Stage 4 Final Gate）：Stage 4 run 必须绑定 ResearchTask——
+    # task_id 是必填字段，缺失 / None 直接拒绝（不猜任务、不自动创建）。
+    with pytest.raises(ValidationError):
+        Stage4WorkflowRequest(**{**(_request([_generic()])), "task_id": None})
+    with pytest.raises(ValidationError):
+        Stage4WorkflowRequest(**{k: v for k, v in _request([_generic()]).items() if k != "task_id"})
 
 
 def test_too_many_items_rejected() -> None:

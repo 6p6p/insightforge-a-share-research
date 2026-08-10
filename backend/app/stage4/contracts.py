@@ -144,6 +144,8 @@ AnalysisWorkItem = Annotated[
 class Stage4WorkflowRequest(BaseModel):
     """Stage 4 分析工作流请求（构造时校验，不可变）。
 
+    - task_id：必填 UUID（Stage 4 WorkflowRun 仍必须属于一个 ResearchTask，
+      Gate 0 恢复该关系）；创建 run 时真实 PG 校验任务存在；
     - research_question：trim 后非空；
     - analysis_as_of：必填 date（分析基准日，全 item 共享，no-lookahead 边界）；
     - analysis_work_items：1..12，item_id 唯一（去重 + 顺序保留）。
@@ -151,6 +153,7 @@ class Stage4WorkflowRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    task_id: UUID
     company_id: UUID
     research_question: str
     analysis_as_of: date
@@ -178,4 +181,3 @@ class Stage4WorkflowRequest(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("analysis_work_items 的 item_id 必须唯一")
         return self
-

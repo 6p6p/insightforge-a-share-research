@@ -138,6 +138,7 @@ def build_deps(
 
 def _request(items: list[dict]) -> Stage4WorkflowRequest:
     return Stage4WorkflowRequest(
+        task_id=uuid4(),
         company_id=uuid4(),
         research_question=_QUESTION,
         analysis_as_of=date.fromisoformat(_CUTOFF),

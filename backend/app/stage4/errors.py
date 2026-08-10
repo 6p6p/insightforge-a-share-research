@@ -36,3 +36,14 @@ class Stage4InsufficientClaims(Stage4WorkflowError):
 
     code = "stage4_insufficient_claims"
     message = "stage 4 synthesis requires at least 2 claims"
+
+
+class Stage4ResearchTaskNotFound(Stage4WorkflowError):
+    """Stage4WorkflowRequest.task_id 引用的 ResearchTask 在 PG 中不存在。
+
+    创建 run 前真实 PG 校验：任务缺失 → 拒绝创建（**不**自动创建 fake
+    ResearchTask / 不猜任务）。Stage 4 WorkflowRun 必须绑定一个真实任务。
+    """
+
+    code = "stage4_research_task_not_found"
+    message = "research task not found for stage 4 run"

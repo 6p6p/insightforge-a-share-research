@@ -20,6 +20,7 @@
 import asyncio
 import json
 from datetime import date
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -61,8 +62,10 @@ from app.claims.macro_contracts import (
 )
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
+from app.db.models.research_task import ResearchTaskModel
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.repositories.research_task_repository import ResearchTaskRepository
 from app.services.source_registry_service import SourceRegistryService
 from app.stage4.contracts import Stage4WorkflowRequest
 from app.stage4.dependencies import Stage4AnalysisDependencies
@@ -110,6 +113,8 @@ async def _cleanup(sessionmaker) -> None:
     async with sessionmaker() as session:
         await session.execute(text("DELETE FROM workflow_events"))
         await session.execute(text("DELETE FROM workflow_runs"))
+        await session.execute(text("DELETE FROM research_tasks"))
+        await session.execute(text("DELETE FROM report_outlines"))
         await session.execute(text("DELETE FROM claim_synthesis_results"))
         await session.execute(text("DELETE FROM claim_synthesis_input_links"))
         await session.execute(text("DELETE FROM claim_synthesis_runs"))
@@ -175,14 +180,35 @@ async def env(tmp_path, sessionmaker, monkeypatch) -> dict:
     await SourceRegistryService(sessionmaker).seed_defaults()
     company_id = await _seed_company(sessionmaker, "600519")
     peer_company_ids = [await _seed_company(sessionmaker, f"6005{2 + i:02d}") for i in range(3)]
+    task_id = await _seed_research_task(sessionmaker)
     yield {
         "sessionmaker": sessionmaker,
         "raw_store": raw_store,
         "company_id": company_id,
         "target_company_id": company_id,
         "peer_company_ids": peer_company_ids,
+        "task_id": task_id,
     }
     await _cleanup(sessionmaker)
+
+
+async def _seed_research_task(sessionmaker) -> UUID:
+    """seed 一个真实 ResearchTask（Stage 4 WorkflowRun 必须绑定任务）。"""
+    task_id = uuid4()
+    async with sessionmaker() as session:
+        await ResearchTaskRepository(session).create(
+            ResearchTaskModel(
+                task_id=task_id,
+                company_query="600519",
+                research_start_date=date(2023, 1, 1),
+                research_end_date=date(2026, 12, 31),
+                modules=["company_profile"],
+                questions=[],
+                require_plan_approval=False,
+            )
+        )
+        await session.commit()
+    return task_id
 
 
 # ---------------------------------------------------------------- worker inputs
@@ -221,6 +247,7 @@ async def _seed_worker_inputs(env: dict, monkeypatch) -> dict:
 
 def _request(env: dict, ids: dict) -> Stage4WorkflowRequest:
     return Stage4WorkflowRequest(
+        task_id=env["task_id"],
         company_id=env["company_id"],
         research_question=_QUESTION,
         analysis_as_of=_AS_OF,
@@ -399,9 +426,7 @@ async def _synthesis_counts(sessionmaker) -> tuple[int, int]:
         )
         results = int(
             (
-                await session.execute(
-                    text("SELECT count(*) FROM claim_synthesis_results")
-                )
+                await session.execute(text("SELECT count(*) FROM claim_synthesis_results"))
             ).scalar_one()
         )
     return runs, results
@@ -624,15 +649,22 @@ async def test_boundary_no_stage5_tables(env, monkeypatch, connection_uri) -> No
         await manager.close()
 
     async with env["sessionmaker"]() as session:
+        # 未到达的 Stage 5 表不得存在。
         result = await session.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('reports', 'report_outlines', 'draft_sections', 'audits', "
+                "('reports', 'draft_sections', 'audits', "
                 " 'report_sections', 'review_issues')"
             )
         )
         assert result.scalars().all() == []
+        # Stage 5A 的 report_outlines 表已存在（migration 0032），但 Stage 4 运行
+        # 不产生提纲 → 0 行。
+        outline_rows = (
+            await session.execute(text("SELECT count(*) FROM report_outlines"))
+        ).scalar_one()
+        assert int(outline_rows) == 0
 
 
 # ---------------------------------------------------------------- run state machine
