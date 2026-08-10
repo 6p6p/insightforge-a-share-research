@@ -43,14 +43,16 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.claims.contracts import (
     CLAIM_SCHEMA_VERSION,
     ClaimAnalysisDomain,
+    ClaimConfidence,
     ClaimDraft,
     ClaimEvidenceRelation,
     ClaimImportance,
+    ClaimKind,
     compute_claim_fingerprint,
     compute_research_question_sha256,
 )
@@ -72,6 +74,8 @@ from app.repositories.claim_repository import ClaimRepository
 _RELATIONS = ("supports", "contradicts", "context")
 _ORIGIN_DOCUMENT_CHUNK = "document_chunk"
 _ORIGIN_MACRO_OBSERVATION = "macro_observation"
+# generic（非 financial / macro / valuation）analysis_domain。
+_GENERIC_DOMAINS = frozenset(("business", "event", "risk"))
 
 # 单次 create_claim_batch 最多 5 条 Claim（与 4B.1 的
 # MAX_CLAIMS_PER_DECISION / MAX_CLAIMS_PER_BATCH 一致）。
@@ -141,6 +145,67 @@ class _PreparedClaim:
 class ClaimService:
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
         self._sessionmaker = sessionmaker
+
+    async def verify_claim_integrity(
+        self, session: AsyncSession, claim_id: UUID
+    ) -> ClaimModel | None:
+        """加载并完整校验既有 generic Claim 的内部一致性（供 Synthesis Gateway 复用）。
+
+        从 persisted Claim + ClaimEvidenceLinks 重建 `ClaimDraft` 并重新执行
+        `_verify_replay`（links / Evidence 存在与 company / critical 与 macro
+        传导政策 / statement 与 enums / fingerprint 逐项核实），**不复制**任何
+        policy / fingerprint 逻辑。返回 None（Claim 不存在）；任一损坏 →
+        `ClaimIntegrityError`（**不自动 repair**）。调用方复用本 session，不新开
+        连接。只接受 generic domain（business / event / risk）。
+        """
+        claim = await ClaimRepository(session).get_by_id(claim_id)
+        if claim is None:
+            return None
+        if claim.analysis_domain not in _GENERIC_DOMAINS:
+            raise ClaimIntegrityError("verify_claim_integrity only supports generic claims")
+        links = await ClaimEvidenceLinkRepository(session).list_by_claim(claim_id)
+        by_relation: dict[str, list[UUID]] = {relation: [] for relation in _RELATIONS}
+        for link in links:
+            if link.relation not in by_relation:
+                raise ClaimIntegrityError("claim replay integrity check failed on relation")
+            by_relation[link.relation].append(link.evidence_card_id)
+        try:
+            draft = ClaimDraft(
+                company_id=claim.company_id,
+                research_question=claim.research_question,
+                statement=claim.statement,
+                analysis_domain=ClaimAnalysisDomain(claim.analysis_domain),
+                claim_kind=ClaimKind(claim.claim_kind),
+                confidence=ClaimConfidence(claim.confidence),
+                importance=ClaimImportance(claim.importance),
+                support_evidence_ids=by_relation["supports"],
+                contradict_evidence_ids=by_relation["contradicts"],
+                context_evidence_ids=by_relation["context"],
+                analyst_name=claim.analyst_name,
+                analyst_version=claim.analyst_version,
+                analyst_model_id=claim.analyst_model_id,
+            )
+        except (ValueError, ClaimDraftError) as exc:
+            raise ClaimIntegrityError("claim persisted state failed integrity validation") from exc
+        fingerprint = compute_claim_fingerprint(
+            claim_schema_version=CLAIM_SCHEMA_VERSION,
+            company_id=draft.company_id,
+            research_question=draft.research_question,
+            statement=draft.statement,
+            analysis_domain=draft.analysis_domain.value,
+            claim_kind=draft.claim_kind.value,
+            confidence=draft.confidence.value,
+            importance=draft.importance.value,
+            analyst_name=draft.analyst_name,
+            analyst_version=draft.analyst_version,
+            analyst_model_id=draft.analyst_model_id,
+            supports=draft.support_evidence_ids,
+            contradicts=draft.contradict_evidence_ids,
+            context=draft.context_evidence_ids,
+        )
+        question_sha256 = compute_research_question_sha256(draft.research_question)
+        await self._verify_replay(session, claim, draft, fingerprint, question_sha256)
+        return claim
 
     async def create_claim(self, draft: ClaimDraft) -> ClaimResult:
         """单条 Claim 登记（委托给 create_claim_batch 的批量原子路径）。"""

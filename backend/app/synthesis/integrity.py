@@ -1,4 +1,4 @@
-"""Claim integrity gateway for synthesis input (stage 4D.1A).
+"""Claim integrity gateway for synthesis input (stage 4D.1A, Gate 0).
 
 `ClaimIntegrityGateway.verify_claim(session, claim_id)` 按 claim 的**真实
 analysis_domain + claim_schema_version** dispatch 到 generic / Financial /
@@ -7,30 +7,29 @@ Macro / Valuation 完整性校验，返回 `VerifiedSynthesisClaim`。本阶段�
 Calculation / Comparison 缺失、或 fingerprint 与真实 persisted provenance
 重算结果不一致 → `SynthesisClaimIntegrityError`，**不自动 repair**。
 
-**为何不调用各 domain service 的 private `_verify_replay`**：replay 校验需要
-重建 semantic draft，而 automatic vs additional Evidence 在 claim_evidence_links
-中不可区分（DB 层无此标记）。本 gateway 改为：从 persisted links + domain 子表
-重建 fingerprint 输入 → 调用各 domain 的**公开** `compute_*_fingerprint` → 对比
-claim.claim_fingerprint。这是唯一能处理含 automatic Evidence 的历史 Claim 的
-方案。**禁止复制** FinancialCalculation formula / Macro transmission policy /
-Valuation comparison policy / Claim fingerprint 逻辑本身（只调用公开函数）。
+**Gateway = thin facade**（spec E / Gate 0）：child artifact 的确定性完整性
+一律委托各 domain service 的**公开** verify API，不把 domain replay 逻辑堆进
+本文件：
+- generic（business/event/risk，v1）→ `ClaimService.verify_claim_integrity`
+  （Claim fields / Evidence links / Evidence company / policy / fingerprint）；
+- macro（v4/v5/v6）→ `MacroClaimService.verify_claim_integrity`（version-aware
+  replay：MacroTransmissionChain + transmission links + analysis_as_of +
+  channel/effect/impact/time policy + transmission fingerprint + claim
+  fingerprint）。legacy v4/v5 链无 persisted analysis_as_of →
+  `SynthesisUnsupportedClaimSchema`（不反推 / 不 backfill）；evidence 晚于
+  analysis_as_of → `SynthesisFutureEvidence`（spec O，不当作数据损坏）；
+- financial（v2/v3）→ 每个 linked `FinancialCalculation` 走
+  `FinancialCalculationService.verify_calculation_integrity`（重新验证
+  formula / inputs / period / scope / result / fingerprint / provenance），
+  再以 **verified calculation fingerprint** 重建 claim fingerprint；
+- valuation（v7）→ 每个 linked Comparison 走
+  `RelativeValuationComparisonService.verify_comparison_integrity`（完整重放
+  peer / median / premium / date / formula / fingerprint / peer links），再以
+  **verified comparison fingerprint** 重建 claim fingerprint。
 
-各 domain 重建规则（与各 domain service `_derive` 的 fingerprint 输入一致）：
-- generic（business/event/risk，v1）：evidence links 按 relation 分组 →
-  compute_claim_fingerprint；
-- financial（v2/v3）：evidence links 分组 + claim_financial_calculation_links
-  分组 → financial_calculations.calculation_fingerprint → dict entries →
-  compute_financial_claim_fingerprint；
-- macro（v4/v5/v6）：macro_transmission_chains.transmission_fingerprint +
-  links 分组，additional_context = context − transmission_ids
-  （transmission_ids 从 macro_transmission_evidence_links 读）→
-  compute_macro_claim_fingerprint。legacy v1/v2 链 analysis_as_of 为 NULL →
-  `SynthesisUnsupportedClaimSchema`（公开 compute 函数必填 date，且无 temporal
-  语义）；
-- valuation（v7）：links 分组 + evidence_cards.evidence_fingerprint +
-  comparison links 分组 + relative_valuation_comparisons.comparison_fingerprint
-  + profile（assessment / analysis_as_of / profile_schema_version）→ dict
-  entries → compute_valuation_claim_fingerprint。
+禁止：只读 DB 中现成的 calculation_fingerprint / comparison_fingerprint 就
+认为 child artifact 完整；复制任何 domain formula / transmission policy /
+comparison policy / fingerprint 逻辑（只调用公开函数）。
 """
 
 from datetime import date
@@ -44,20 +43,21 @@ from app.claims.contracts import (
     ClaimConfidence,
     ClaimImportance,
     ClaimKind,
-    compute_claim_fingerprint,
 )
+from app.claims.errors import ClaimError
 from app.claims.financial_contracts import (
     FINANCIAL_CLAIM_SCHEMA_VERSION,
     FINANCIAL_CLAIM_SCHEMA_VERSION_V2,
     compute_financial_claim_fingerprint,
 )
-from app.claims.macro_contracts import (
-    MACRO_CLAIM_SCHEMA_VERSION,
-    MACRO_CLAIM_SCHEMA_VERSION_V4,
-    MACRO_CLAIM_SCHEMA_VERSION_V5,
-    compute_macro_claim_fingerprint,
+from app.claims.macro_errors import (
+    MacroClaimError,
+    MacroClaimFutureEvidence,
+    MacroClaimUnsupportedSchema,
 )
 from app.db.models.claim import ClaimModel
+from app.financial.calculations.errors import FinancialCalculationError
+from app.financial.calculations.service import FinancialCalculationService
 from app.repositories.claim_evidence_link_repository import ClaimEvidenceLinkRepository
 from app.repositories.claim_financial_calculation_link_repository import (
     ClaimFinancialCalculationLinkRepository,
@@ -67,43 +67,51 @@ from app.repositories.claim_relative_valuation_comparison_link_repository import
 )
 from app.repositories.claim_repository import ClaimRepository
 from app.repositories.evidence_card_repository import EvidenceCardRepository
-from app.repositories.financial_calculation_repository import FinancialCalculationRepository
-from app.repositories.macro_transmission_evidence_link_repository import (
-    MacroTransmissionEvidenceLinkRepository,
-)
-from app.repositories.macro_transmission_repository import MacroTransmissionRepository
 from app.repositories.relative_valuation_claim_profile_repository import (
     RelativeValuationClaimProfileRepository,
 )
-from app.repositories.relative_valuation_comparison_repository import (
-    RelativeValuationComparisonRepository,
-)
+from app.services.claim_service import ClaimService
+from app.services.macro_claim_service import MacroClaimService
 from app.synthesis.contracts import VerifiedSynthesisClaim
 from app.synthesis.errors import (
     SynthesisClaimIntegrityError,
+    SynthesisFutureEvidence,
     SynthesisUnsupportedClaimSchema,
 )
 from app.valuation.claim_contracts import (
     VALUATION_CLAIM_SCHEMA_VERSION,
     compute_valuation_claim_fingerprint,
 )
+from app.valuation.comparison_service import RelativeValuationComparisonService
+from app.valuation.errors import ValuationError
 
 _RELATIONS = ("supports", "contradicts", "context")
 _GENERIC_DOMAINS = frozenset({"business", "event", "risk"})
 _SUPPORTED_FINANCIAL_VERSIONS = frozenset(
     {FINANCIAL_CLAIM_SCHEMA_VERSION, FINANCIAL_CLAIM_SCHEMA_VERSION_V2}
 )
-_SUPPORTED_MACRO_VERSIONS = frozenset(
-    {
-        MACRO_CLAIM_SCHEMA_VERSION,
-        MACRO_CLAIM_SCHEMA_VERSION_V5,
-        MACRO_CLAIM_SCHEMA_VERSION_V4,
-    }
-)
 
 
 class ClaimIntegrityGateway:
-    """按真实 domain + schema version dispatch 校验输入 Claim 的完整性。"""
+    """按真实 domain + schema version dispatch 校验输入 Claim 的完整性（thin facade）。
+
+    child artifact 的确定性完整性一律委托各 domain service 的**公开**
+    verify API；本 gateway 只负责 dispatch 与把 domain 错误映射为 synthesis
+    稳定错误分类。
+    """
+
+    def __init__(
+        self,
+        *,
+        claim_service: ClaimService,
+        macro_claim_service: MacroClaimService,
+        financial_calculation_service: FinancialCalculationService,
+        valuation_comparison_service: RelativeValuationComparisonService,
+    ) -> None:
+        self._claim_service = claim_service
+        self._macro_claim_service = macro_claim_service
+        self._financial_calculation_service = financial_calculation_service
+        self._valuation_comparison_service = valuation_comparison_service
 
     async def verify_claim(self, session: AsyncSession, claim_id: UUID) -> VerifiedSynthesisClaim:
         claim = await ClaimRepository(session).get_by_id(claim_id)
@@ -126,28 +134,43 @@ class ClaimIntegrityGateway:
     async def _verify_generic(
         self, session: AsyncSession, claim: ClaimModel
     ) -> VerifiedSynthesisClaim:
+        """generic v1：委托 ClaimService.verify_claim_integrity（fields / links /
+        evidence / policy / fingerprint），不复制任何 generic replay 逻辑。
+        当前只支持 CLAIM_SCHEMA_VERSION；其他版本 → SynthesisUnsupportedClaimSchema。"""
         if claim.claim_schema_version != CLAIM_SCHEMA_VERSION:
             raise SynthesisUnsupportedClaimSchema()
+        try:
+            verified = await self._claim_service.verify_claim_integrity(session, claim.claim_id)
+        except ClaimError as exc:
+            raise SynthesisClaimIntegrityError("generic claim integrity failed") from exc
+        if verified is None:
+            raise SynthesisClaimIntegrityError("input claim missing")
         by_relation = await self._evidence_by_relation(session, claim.claim_id)
-        fingerprint = compute_claim_fingerprint(
-            claim_schema_version=claim.claim_schema_version,
-            company_id=claim.company_id,
-            research_question=claim.research_question,
-            statement=claim.statement,
-            analysis_domain=claim.analysis_domain,
-            claim_kind=claim.claim_kind,
-            confidence=claim.confidence,
-            importance=claim.importance,
-            analyst_name=claim.analyst_name,
-            analyst_version=claim.analyst_version,
-            analyst_model_id=claim.analyst_model_id,
-            supports=by_relation["supports"],
-            contradicts=by_relation["contradicts"],
-            context=by_relation["context"],
+        return self._verified(verified, by_relation, domain_analysis_as_of=None)
+
+    async def _verify_macro(
+        self, session: AsyncSession, claim: ClaimModel
+    ) -> VerifiedSynthesisClaim:
+        """macro：委托 MacroClaimService.verify_claim_integrity（version-aware
+        transmission + claim replay），不复制任何 Macro policy / fingerprint 逻辑。
+        legacy v4/v5 链无 persisted analysis_as_of → SynthesisUnsupportedClaimSchema。"""
+        try:
+            verified = await self._macro_claim_service.verify_claim_integrity(
+                session, claim.claim_id
+            )
+        except MacroClaimUnsupportedSchema:
+            raise SynthesisUnsupportedClaimSchema() from None
+        except MacroClaimFutureEvidence:
+            # spec O：evidence 晚于域分析截止 → 未来证据（不当作数据损坏）。
+            raise SynthesisFutureEvidence() from None
+        except MacroClaimError as exc:
+            raise SynthesisClaimIntegrityError("macro claim integrity failed") from exc
+        if verified is None:
+            raise SynthesisClaimIntegrityError("input claim missing")
+        by_relation = await self._evidence_by_relation(session, claim.claim_id)
+        return self._verified(
+            verified.claim, by_relation, domain_analysis_as_of=verified.analysis_as_of
         )
-        if fingerprint != claim.claim_fingerprint:
-            raise SynthesisClaimIntegrityError("generic claim fingerprint mismatch")
-        return self._verified(claim, by_relation, domain_analysis_as_of=None)
 
     async def _verify_financial(
         self, session: AsyncSession, claim: ClaimModel
@@ -161,13 +184,24 @@ class ClaimIntegrityGateway:
             ClaimFinancialCalculationLinkRepository,
             lambda link: link.calculation_id,
         )
-        calc_repo = FinancialCalculationRepository(session)
+        # 每个 linked FinancialCalculation 走真实 public integrity API（重新派生
+        # formula / inputs / period / scope / result / fingerprint / provenance），
+        # 禁止只信 DB 中现成的 calculation_fingerprint。
         calc_fingerprints: dict[UUID, str] = {}
         for calc_id in calculation_ids:
-            calc = await calc_repo.get_by_id(calc_id)
-            if calc is None:
+            try:
+                verified_calc = (
+                    await self._financial_calculation_service.verify_calculation_integrity(
+                        session, calc_id
+                    )
+                )
+            except FinancialCalculationError as exc:
+                raise SynthesisClaimIntegrityError(
+                    "financial calculation integrity failed"
+                ) from exc
+            if verified_calc is None:
                 raise SynthesisClaimIntegrityError("financial calculation missing")
-            calc_fingerprints[calc_id] = calc.calculation_fingerprint
+            calc_fingerprints[calc_id] = verified_calc.calculation_fingerprint
 
         calc_by_relation = await self._relation_ids(
             session,
@@ -207,47 +241,6 @@ class ClaimIntegrityGateway:
             raise SynthesisClaimIntegrityError("financial claim fingerprint mismatch")
         return self._verified(claim, by_relation, domain_analysis_as_of=None)
 
-    async def _verify_macro(
-        self, session: AsyncSession, claim: ClaimModel
-    ) -> VerifiedSynthesisClaim:
-        if claim.claim_schema_version not in _SUPPORTED_MACRO_VERSIONS:
-            raise SynthesisUnsupportedClaimSchema()
-        chain = await MacroTransmissionRepository(session).get_by_claim_id(claim.claim_id)
-        if chain is None:
-            raise SynthesisClaimIntegrityError("macro transmission chain missing")
-        if chain.analysis_as_of is None:
-            # legacy v1/v2 链无 analysis_as_of 查询列 → 公开 compute 函数必填
-            # date，fingerprint 无法重算且无 temporal 语义 → 明确拒绝，不猜测。
-            raise SynthesisUnsupportedClaimSchema()
-        trans_links = await MacroTransmissionEvidenceLinkRepository(session).list_by_transmission(
-            chain.transmission_id
-        )
-        transmission_ids = {link.evidence_card_id for link in trans_links}
-        by_relation = await self._evidence_by_relation(session, claim.claim_id)
-        additional_context = [
-            card_id for card_id in by_relation["context"] if card_id not in transmission_ids
-        ]
-        fingerprint = compute_macro_claim_fingerprint(
-            claim_schema_version=claim.claim_schema_version,
-            company_id=claim.company_id,
-            research_question=claim.research_question,
-            analysis_as_of=chain.analysis_as_of,
-            statement=claim.statement,
-            claim_kind=claim.claim_kind,
-            confidence=claim.confidence,
-            importance=claim.importance,
-            analyst_name=claim.analyst_name,
-            analyst_version=claim.analyst_version,
-            analyst_model_id=claim.analyst_model_id,
-            transmission_fingerprint=chain.transmission_fingerprint,
-            additional_supports=by_relation["supports"],
-            additional_contradicts=by_relation["contradicts"],
-            additional_context=additional_context,
-        )
-        if fingerprint != claim.claim_fingerprint:
-            raise SynthesisClaimIntegrityError("macro claim fingerprint mismatch")
-        return self._verified(claim, by_relation, domain_analysis_as_of=chain.analysis_as_of)
-
     async def _verify_valuation(
         self, session: AsyncSession, claim: ClaimModel
     ) -> VerifiedSynthesisClaim:
@@ -266,13 +259,22 @@ class ClaimIntegrityGateway:
             ClaimRelativeValuationComparisonLinkRepository,
             lambda link: link.comparison_id,
         )
-        comp_repo = RelativeValuationComparisonRepository(session)
+        # 每个 linked Comparison 走真实 public integrity API（完整重放 peer /
+        # median / premium / date / formula / fingerprint / peer links），禁止只信
+        # DB 中现成的 comparison_fingerprint。
         comp_fingerprints: dict[UUID, str] = {}
         for comparison_id in comparison_ids:
-            comp = await comp_repo.get_by_id(comparison_id)
-            if comp is None:
+            try:
+                verified_comp = (
+                    await self._valuation_comparison_service.verify_comparison_integrity(
+                        session, comparison_id
+                    )
+                )
+            except ValuationError as exc:
+                raise SynthesisClaimIntegrityError("valuation comparison integrity failed") from exc
+            if verified_comp is None:
                 raise SynthesisClaimIntegrityError("valuation comparison missing")
-            comp_fingerprints[comparison_id] = comp.comparison_fingerprint
+            comp_fingerprints[comparison_id] = verified_comp.comparison_fingerprint
 
         # valuation 的 evidence entries 需要 evidence_fingerprint。
         card_repo = EvidenceCardRepository(session)

@@ -42,12 +42,15 @@ from app.claims.macro_policy import resolve_availability
 from app.db.models.claim_synthesis_input_link import ClaimSynthesisInputLinkModel
 from app.db.models.claim_synthesis_run import ClaimSynthesisRunModel
 from app.db.models.evidence_card import EvidenceCardModel
+from app.financial.calculations.service import FinancialCalculationService
 from app.repositories.claim_synthesis_input_link_repository import (
     ClaimSynthesisInputLinkRepository,
 )
 from app.repositories.claim_synthesis_run_repository import ClaimSynthesisRunRepository
 from app.repositories.macro_snapshot_repository import MacroSnapshotRepository
 from app.repositories.source_record_repository import SourceRecordRepository
+from app.services.claim_service import ClaimService
+from app.services.macro_claim_service import MacroClaimService
 from app.synthesis.contracts import (
     CLAIM_SYNTHESIS_SCHEMA_VERSION,
     SynthesisInputDraft,
@@ -66,6 +69,7 @@ from app.synthesis.errors import (
     SynthesisTemporalEvidenceInsufficient,
 )
 from app.synthesis.integrity import ClaimIntegrityGateway
+from app.valuation.comparison_service import RelativeValuationComparisonService
 
 _ORIGIN_DOCUMENT_CHUNK = "document_chunk"
 _ORIGIN_MACRO_OBSERVATION = "macro_observation"
@@ -85,6 +89,12 @@ class SynthesisRunResult:
 class SynthesisService:
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
         self._sessionmaker = sessionmaker
+        self._gateway = ClaimIntegrityGateway(
+            claim_service=ClaimService(sessionmaker),
+            macro_claim_service=MacroClaimService(sessionmaker),
+            financial_calculation_service=FinancialCalculationService(sessionmaker),
+            valuation_comparison_service=RelativeValuationComparisonService(sessionmaker),
+        )
 
     async def create_or_get_synthesis(self, draft: SynthesisInputDraft) -> SynthesisRunResult:
         """把显式 Claim 输入集原子登记为一个不可变 SynthesisRun（replay 语义）。
@@ -164,7 +174,7 @@ class SynthesisService:
         逐 claim 校验其 domain provenance 完整性，再校验 research-question 与
         company 隔离（spec L/M），随后 temporal no-lookahead（spec O）。
         """
-        gateway = ClaimIntegrityGateway()
+        gateway = self._gateway
         question_sha256 = compute_research_question_sha256(draft.research_question)
         verified: list[VerifiedSynthesisClaim] = []
         for claim_id in claim_ids:

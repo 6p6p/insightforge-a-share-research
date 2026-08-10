@@ -48,11 +48,13 @@ from app.claims.macro_contracts import MACRO_CLAIM_SCHEMA_VERSION
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
+from app.financial.calculations.service import FinancialCalculationService
 from app.repositories.claim_synthesis_input_link_repository import (
     ClaimSynthesisInputLinkRepository,
 )
 from app.repositories.claim_synthesis_run_repository import ClaimSynthesisRunRepository
 from app.services.claim_service import ClaimService
+from app.services.macro_claim_service import MacroClaimService
 from app.services.source_registry_service import SourceRegistryService
 from app.storage.raw_store import LocalRawArtifactStore
 from app.synthesis.contracts import (
@@ -70,6 +72,7 @@ from app.synthesis.errors import (
 from app.synthesis.integrity import ClaimIntegrityGateway
 from app.synthesis.service import SynthesisService
 from app.valuation.claim_contracts import VALUATION_CLAIM_SCHEMA_VERSION
+from app.valuation.comparison_service import RelativeValuationComparisonService
 from tests.integration.test_financial_claim_service import (
     _annual_revenue_pair,
     _create_fin,
@@ -262,8 +265,14 @@ async def _seed_valuation_claim(env: dict, comparison, *, analysis_as_of: date =
 
 
 async def _verify(sessionmaker, claim_id: UUID):
+    gateway = ClaimIntegrityGateway(
+        claim_service=ClaimService(sessionmaker),
+        macro_claim_service=MacroClaimService(sessionmaker),
+        financial_calculation_service=FinancialCalculationService(sessionmaker),
+        valuation_comparison_service=RelativeValuationComparisonService(sessionmaker),
+    )
     async with sessionmaker() as session:
-        return await ClaimIntegrityGateway().verify_claim(session, claim_id)
+        return await gateway.verify_claim(session, claim_id)
 
 
 @pytest_asyncio.fixture
@@ -394,6 +403,133 @@ async def test_gateway_corrupted_evidence_link(env) -> None:
             text("DELETE FROM claim_evidence_links WHERE claim_id = :cid").bindparams(
                 cid=result.claim_id
             )
+        )
+        await session.commit()
+    with pytest.raises(SynthesisClaimIntegrityError):
+        await _verify(env["sessionmaker"], result.claim_id)
+
+
+async def test_gateway_financial_calculation_result_corrupted(env) -> None:
+    """financial child artifact 损坏：SQL 篡改 result_value 但不更新 fingerprint。
+
+    Gateway 委托 FinancialCalculationService.verify_calculation_integrity 重新
+    派生 result_value，与 persisted 不一致 → 拒绝（不 repair）。
+    """
+    await _seed_doc_card(env)
+    obs = await _annual_revenue_pair(env)
+    calc = await _fin_calc(env, obs)
+    result = await _create_fin(
+        env, _fin_draft(env, supports=[calc.calculation_id], research_question=_QUESTION)
+    )
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE financial_calculations SET result_value = 999999999999 "
+                "WHERE calculation_id = :cid"
+            ).bindparams(cid=calc.calculation_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisClaimIntegrityError):
+        await _verify(env["sessionmaker"], result.claim_id)
+
+
+async def test_gateway_financial_calculation_input_link_corrupted(env) -> None:
+    """financial child artifact 损坏：删除 financial_calculation_inputs link。
+
+    verify_calculation_integrity 重建 draft 时 role 集合与 calculation_code 不匹配
+    → FinancialCalculationError → Gateway 映射为 SynthesisClaimIntegrityError。
+    """
+    await _seed_doc_card(env)
+    obs = await _annual_revenue_pair(env)
+    calc = await _fin_calc(env, obs)
+    result = await _create_fin(
+        env, _fin_draft(env, supports=[calc.calculation_id], research_question=_QUESTION)
+    )
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text("DELETE FROM financial_calculation_inputs WHERE calculation_id = :cid").bindparams(
+                cid=calc.calculation_id
+            )
+        )
+        await session.commit()
+    with pytest.raises(SynthesisClaimIntegrityError):
+        await _verify(env["sessionmaker"], result.claim_id)
+
+
+async def test_gateway_macro_transmission_channel_type_corrupted(env, monkeypatch) -> None:
+    """macro child artifact 损坏：篡改 macro_transmission_chains.channel_type。
+
+    从篡改后的 chain 重建 MacroClaimDraft → 重新 replay 时 transmission
+    fingerprint / channel_type 与派生值不一致 → 拒绝（不 repair）。
+    """
+    doc_card = await _seed_doc_card(env)
+    macro_card, _ = await _seed_macro_card(env, monkeypatch)
+    result = await _seed_macro_claim(env, macro_card, doc_card)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE macro_transmission_chains SET channel_type = :ct "
+                "WHERE transmission_id = :tid"
+            ).bindparams(ct="revenue", tid=result.transmission_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisClaimIntegrityError):
+        await _verify(env["sessionmaker"], result.claim_id)
+
+
+async def test_gateway_macro_transmission_evidence_link_corrupted(env, monkeypatch) -> None:
+    """macro child artifact 损坏：删除一条 transmission evidence link。
+
+    verify_claim_integrity 重建 MacroClaimDraft 后 replay 对比 transmission links
+    by_role 与派生值不一致 → 拒绝（不 repair）。
+    """
+    doc_card = await _seed_doc_card(env)
+    macro_card, _ = await _seed_macro_card(env, monkeypatch)
+    result = await _seed_macro_claim(env, macro_card, doc_card)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "DELETE FROM macro_transmission_evidence_links WHERE transmission_id = :tid"
+            ).bindparams(tid=result.transmission_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisClaimIntegrityError):
+        await _verify(env["sessionmaker"], result.claim_id)
+
+
+async def test_gateway_valuation_peer_median_corrupted(env) -> None:
+    """valuation child artifact 损坏：篡改 relative_valuation_comparisons.peer_median。
+
+    委托 RelativeValuationComparisonService.verify_comparison_integrity 重新派生
+    stats，与 persisted peer_median 不一致 → 拒绝（不 repair）。
+    """
+    comparison = await _seed_comparison(env)
+    result = await _seed_valuation_claim(env, comparison)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE relative_valuation_comparisons SET peer_median = peer_median + 1 "
+                "WHERE comparison_id = :cid"
+            ).bindparams(cid=comparison.comparison_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisClaimIntegrityError):
+        await _verify(env["sessionmaker"], result.claim_id)
+
+
+async def test_gateway_valuation_peer_link_corrupted(env) -> None:
+    """valuation child artifact 损坏：删除一条 peer link（不足 3 家 peer）。
+
+    verify_comparison_integrity 重建 ComparisonDraft 时 peer_observation_ids 不足
+    → ValuationError → Gateway 映射为 SynthesisClaimIntegrityError。
+    """
+    comparison = await _seed_comparison(env)
+    result = await _seed_valuation_claim(env, comparison)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "DELETE FROM relative_valuation_comparison_peers WHERE comparison_id = :cid"
+            ).bindparams(cid=comparison.comparison_id)
         )
         await session.commit()
     with pytest.raises(SynthesisClaimIntegrityError):
@@ -709,5 +845,5 @@ async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
         ).scalar_one()
     assert int(stage5) == 0
     service = SynthesisService(env["sessionmaker"])
-    # 只持有 sessionmaker（无 LLM / 无 LangGraph / 无 storage 副作用）。
-    assert list(service.__dict__.keys()) == ["_sessionmaker"]
+    # 只持有 sessionmaker + integrity gateway（无 LLM / 无 LangGraph / 无 storage 副作用）。
+    assert list(service.__dict__.keys()) == ["_sessionmaker", "_gateway"]

@@ -80,6 +80,8 @@ from app.claims.macro_contracts import (
     MACRO_TRANSMISSION_SCHEMA_VERSION,
     MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
     MACRO_TRANSMISSION_SCHEMA_VERSION_V2,
+    MacroChannelType,
+    MacroClaimConfidence,
     MacroClaimDraft,
     MacroClaimImportance,
     MacroEffectDirection,
@@ -101,6 +103,7 @@ from app.claims.macro_errors import (
     MacroClaimPersistenceFailed,
     MacroClaimTemporalEvidenceInsufficient,
     MacroClaimTimeAlignmentPolicy,
+    MacroClaimUnsupportedSchema,
 )
 from app.claims.macro_policy import driver_evidence_eligible, resolve_availability
 from app.db.models.claim import ClaimModel
@@ -211,9 +214,104 @@ class _DerivedMacroClaim:
     evidence_by_relation: dict[str, list[UUID]]  # relation -> sorted evidence ids
 
 
+@dataclass(frozen=True)
+class VerifiedMacroClaim:
+    """`verify_claim_integrity` 的返回：完整校验后的 Macro Claim + 综合需要的派生值。
+
+    供 4D.1B Synthesis ClaimIntegrityGateway 复用（spec D）：一次调用同时获得
+    Claim + MacroTransmissionChain + transmission links + ClaimEvidenceLinks 的
+    version-aware replay 完整性验证与 analysis_as_of，**无需复制任何 Macro
+    policy / fingerprint 逻辑**。
+    """
+
+    claim: ClaimModel
+    analysis_as_of: date
+
+
 class MacroClaimService:
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
         self._sessionmaker = sessionmaker
+
+    async def verify_claim_integrity(
+        self, session: AsyncSession, claim_id: UUID
+    ) -> VerifiedMacroClaim | None:
+        """加载并完整校验既有 Macro Claim 的内部一致性（供 Synthesis Gateway 复用）。
+
+        从 persisted Claim + MacroTransmissionChain + transmission links +
+        ClaimEvidenceLinks 重建 `MacroClaimDraft` 并重新执行 version-aware replay
+        （v6/v3 当前规则，v5/v4 历史规则），逐项核实 Claim / chain / transmission
+        links / evidence links / transmission fingerprint / claim fingerprint。
+        **不复制** Macro policy / formula 逻辑（复用本 service 的既有实现）。
+
+        - claim_id 不存在 → 返回 None（由调用方决定错误语义）；
+        - legacy v5/v4 链没有持久化 analysis_as_of（0025 不 backfill）→
+          `MacroClaimUnsupportedSchema`（明确拒绝，不反推 cutoff）；
+        - 任一损坏 → `MacroClaimIntegrityError`（**不自动 repair**）。
+        调用方复用本 session，不新开连接。
+        """
+        claim = await ClaimRepository(session).get_by_id(claim_id)
+        if claim is None:
+            return None
+        if claim.analysis_domain != "macro":
+            raise MacroClaimIntegrityError("verify_claim_integrity only supports macro claims")
+        chain = await MacroTransmissionRepository(session).get_by_claim_id(claim_id)
+        if chain is None:
+            raise MacroClaimIntegrityError("macro claim transmission chain missing")
+        if chain.analysis_as_of is None:
+            # legacy v5/v4 链无 analysis_as_of 查询列（0025 不 backfill）→ 无法重算
+            # fingerprint 且无 temporal 语义 → 明确拒绝，不反推 / 不猜测。
+            raise MacroClaimUnsupportedSchema()
+
+        trans_links = await MacroTransmissionEvidenceLinkRepository(session).list_by_transmission(
+            chain.transmission_id
+        )
+        by_role: dict[str, list[UUID]] = {role: [] for role in _TRANSMISSION_ROLES}
+        for link in trans_links:
+            if link.role not in by_role:
+                raise MacroClaimIntegrityError("macro claim transmission role is invalid")
+            by_role[link.role].append(link.evidence_card_id)
+
+        # additional evidence = claim_evidence_links − transmission ids
+        # （transmission roles 全部 relation=context，与 _derive 的 expansion 一致）。
+        ev_links = await ClaimEvidenceLinkRepository(session).list_by_claim(claim_id)
+        transmission_ids = {card_id for ids in by_role.values() for card_id in ids}
+        additional: dict[str, list[UUID]] = {relation: [] for relation in _RELATIONS}
+        for link in ev_links:
+            if link.evidence_card_id in transmission_ids:
+                continue
+            if link.relation not in additional:
+                raise MacroClaimIntegrityError("macro claim evidence relation is invalid")
+            additional[link.relation].append(link.evidence_card_id)
+
+        try:
+            draft = MacroClaimDraft(
+                company_id=claim.company_id,
+                research_question=claim.research_question,
+                analysis_as_of=chain.analysis_as_of,
+                statement=claim.statement,
+                claim_kind=ClaimKind(claim.claim_kind),
+                confidence=MacroClaimConfidence(claim.confidence),
+                importance=MacroClaimImportance(claim.importance),
+                channel_type=MacroChannelType(chain.channel_type),
+                effect_direction=MacroEffectDirection(chain.effect_direction),
+                impact_status=MacroImpactStatus(chain.impact_status),
+                time_alignment=MacroTimeAlignment(chain.time_alignment),
+                macro_driver_evidence_ids=by_role[MacroTransmissionRole.MACRO_DRIVER.value],
+                company_exposure_evidence_ids=by_role[MacroTransmissionRole.COMPANY_EXPOSURE.value],
+                observed_effect_evidence_ids=by_role[MacroTransmissionRole.OBSERVED_EFFECT.value],
+                additional_support_evidence_ids=additional["supports"],
+                additional_contradict_evidence_ids=additional["contradicts"],
+                additional_context_evidence_ids=additional["context"],
+                analyst_name=claim.analyst_name,
+                analyst_version=claim.analyst_version,
+                analyst_model_id=claim.analyst_model_id,
+            )
+        except (ValueError, MacroClaimDraftError) as exc:
+            raise MacroClaimIntegrityError(
+                "macro claim persisted state failed integrity validation"
+            ) from exc
+        await self._verify_replay(session, claim, draft)
+        return VerifiedMacroClaim(claim=claim, analysis_as_of=chain.analysis_as_of)
 
     async def create_claim(self, draft: MacroClaimDraft) -> MacroClaimResult:
         """登记一条引用 Macro + Company Exposure Evidence 的 Macro Claim（0 partial write）。"""

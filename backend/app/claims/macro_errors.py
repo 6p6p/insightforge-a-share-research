@@ -117,6 +117,17 @@ class MacroClaimTimeAlignmentPolicy(MacroClaimError):
     code = "macro_claim_time_alignment_policy"
 
 
+class MacroClaimUnsupportedSchema(MacroClaimError):
+    """Macro Claim 的 schema 无法由当前完整性校验支持（legacy 无 analysis_as_of）。
+
+    0025 起 transmission v3 必须持久化 analysis_as_of 查询列；legacy v5/v4 链
+    analysis_as_of 为 NULL（不 backfill）→ 无法重算 fingerprint 且无 temporal
+    语义 → 明确拒绝（`SynthesisUnsupportedClaimSchema`），不反推 / 不猜测。
+    """
+
+    code = "macro_claim_unsupported_schema"
+
+
 class MacroClaimIntegrityError(MacroClaimError):
     """已有 fingerprint 的 Macro Claim replay 完整性校验失败。
 
