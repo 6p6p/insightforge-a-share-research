@@ -12,7 +12,9 @@ import pytest
 from app.claims.contracts import ClaimKind
 from app.claims.macro_contracts import (
     MACRO_CLAIM_SCHEMA_VERSION,
+    MACRO_CLAIM_SCHEMA_VERSION_V4,
     MACRO_TRANSMISSION_SCHEMA_VERSION,
+    MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
     MacroChannelType,
     MacroClaimConfidence,
     MacroClaimDraft,
@@ -164,8 +166,11 @@ def test_enum_values_frozen() -> None:
     )
     # 无 misaligned。
     assert sorted(v.value for v in MacroTimeAlignment) == sorted(["aligned", "uncertain"])
-    assert MACRO_CLAIM_SCHEMA_VERSION == 4
-    assert MACRO_TRANSMISSION_SCHEMA_VERSION == 1
+    # 当前 schema：claim=5 / transmission=2；legacy 常量冻结不改写。
+    assert MACRO_CLAIM_SCHEMA_VERSION == 5
+    assert MACRO_TRANSMISSION_SCHEMA_VERSION == 2
+    assert MACRO_CLAIM_SCHEMA_VERSION_V4 == 4
+    assert MACRO_TRANSMISSION_SCHEMA_VERSION_V1 == 1
 
 
 # ---------------------------------------------------------------- Fingerprint
@@ -241,3 +246,80 @@ def test_macro_claim_fingerprint_deterministic_and_changes() -> None:
     )
     assert compute_macro_claim_fingerprint(**{**kwargs, "additional_context": [uuid4()]}) != fp1
     assert compute_macro_claim_fingerprint(**{**kwargs, "statement": "另一句。"}) != fp1
+
+
+def test_fingerprints_include_schema_version_no_cross_version_collision() -> None:
+    """schema version 在 fingerprint payload 中：v4/v5、v1/v2 永不误 collision。
+
+    版本升级 = 新 fingerprint = 新 Claim + 新链，历史 v1/v4 对象原样保留。
+    """
+    claim_kwargs = dict(
+        company_id=uuid4(),
+        research_question="利率上行对公司融资成本的影响？",
+        analysis_as_of=date(2026, 8, 10),
+        statement="公司融资成本存在上升压力。",
+        claim_kind=ClaimKind.RISK.value,
+        confidence=MacroClaimConfidence.MEDIUM.value,
+        importance=MacroClaimImportance.NORMAL.value,
+        analyst_name="macro-analyst",
+        analyst_version=1,
+        analyst_model_id="deepseek:deepseek-v4-flash",
+        transmission_fingerprint="1" * 64,
+        additional_supports=[],
+        additional_contradicts=[],
+        additional_context=[],
+    )
+    v4 = compute_macro_claim_fingerprint(
+        claim_schema_version=MACRO_CLAIM_SCHEMA_VERSION_V4, **claim_kwargs
+    )
+    v5 = compute_macro_claim_fingerprint(
+        claim_schema_version=MACRO_CLAIM_SCHEMA_VERSION, **claim_kwargs
+    )
+    assert v4 != v5
+
+    trans_kwargs = dict(
+        company_id=uuid4(),
+        channel_type=MacroChannelType.FINANCING.value,
+        effect_direction=MacroEffectDirection.HEADWIND.value,
+        impact_status=MacroImpactStatus.PLAUSIBLE_IMPACT.value,
+        time_alignment=MacroTimeAlignment.ALIGNED.value,
+        analysis_as_of=date(2026, 8, 10),
+        macro_driver=_entries(uuid4()),
+        company_exposure=_entries(uuid4()),
+        observed_effect=[],
+    )
+    t1 = compute_macro_transmission_fingerprint(
+        transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION_V1, **trans_kwargs
+    )
+    t2 = compute_macro_transmission_fingerprint(
+        transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION, **trans_kwargs
+    )
+    assert t1 != t2
+
+
+def test_transmission_fingerprint_excludes_statement_and_analyst_identity() -> None:
+    """相同 transmission semantics → 相同 transmission fingerprint（不随 statement /
+    analyst 变化），这是 0024 移除 global UNIQUE 的语义前提。"""
+    base = dict(
+        company_id=uuid4(),
+        channel_type=MacroChannelType.FINANCING.value,
+        effect_direction=MacroEffectDirection.HEADWIND.value,
+        impact_status=MacroImpactStatus.PLAUSIBLE_IMPACT.value,
+        time_alignment=MacroTimeAlignment.ALIGNED.value,
+        analysis_as_of=date(2026, 8, 10),
+        macro_driver=_entries(uuid4()),
+        company_exposure=_entries(uuid4()),
+        observed_effect=[],
+    )
+    fp = compute_macro_transmission_fingerprint(
+        transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION, **base
+    )
+    # payload 不含 statement / analyst_name / analyst_version / analyst_model_id /
+    # claim_id / transmission_id / created_at——这些根本不作为参数传入。
+    assert len(fp) == 64
+    assert (
+        compute_macro_transmission_fingerprint(
+            transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION, **base
+        )
+        == fp
+    )

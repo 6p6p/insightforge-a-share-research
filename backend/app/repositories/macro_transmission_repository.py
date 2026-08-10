@@ -34,21 +34,22 @@ class MacroTransmissionRepository:
     async def get_by_fingerprint(
         self, transmission_fingerprint: str
     ) -> MacroTransmissionChainModel | None:
+        """按 fingerprint 查询（普通索引支持；fingerprint **不是 global identity**，
+        同指纹可能有多条链，本方法只返回其一，用于审计查询）。"""
         result = await self._session.execute(
-            select(MacroTransmissionChainModel).where(
-                MacroTransmissionChainModel.transmission_fingerprint == transmission_fingerprint
-            )
+            select(MacroTransmissionChainModel)
+            .where(MacroTransmissionChainModel.transmission_fingerprint == transmission_fingerprint)
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
-    async def create_or_get(
-        self, chain: MacroTransmissionChainModel
-    ) -> tuple[MacroTransmissionChainModel, bool]:
-        """INSERT ... ON CONFLICT(transmission_fingerprint) DO NOTHING RETURNING。
+    async def create(self, chain: MacroTransmissionChainModel) -> MacroTransmissionChainModel:
+        """plain INSERT ... RETURNING。
 
-        并发下相同传导链（同一 fingerprint）只能有 1 行：输家回查既有行
-        （created=False）并复用（replay 语义）。**无 Python 进程锁**；不允许
-        update API（修改 = 新传导链 = 新 fingerprint = 新行）。
+        transmission_fingerprint **不唯一**（migration 0024 移除 global UNIQUE），
+        因此不再使用 ON CONFLICT(fingerprint)。链由 MacroClaimService 在**新建
+        Claim 的同一事务**内插入（claim_id 是新生成且 UNIQUE，无冲突可能）；replay
+        走 get_by_claim_id 复用既有链。**无 update API**（修改 = 新链 = 新行）。
         """
         excluded = {"created_at"}
         values = {
@@ -59,16 +60,7 @@ class MacroTransmissionRepository:
         stmt = (
             insert(MacroTransmissionChainModel)
             .values(**values)
-            .on_conflict_do_nothing(
-                index_elements=[MacroTransmissionChainModel.transmission_fingerprint]
-            )
             .returning(MacroTransmissionChainModel)
         )
         result = await self._session.execute(stmt)
-        row = result.scalar_one_or_none()
-        if row is not None:
-            return row, True
-        existing = await self.get_by_fingerprint(chain.transmission_fingerprint)
-        if existing is None:
-            raise RuntimeError("macro transmission conflict without existing row")
-        return existing, False
+        return result.scalar_one()

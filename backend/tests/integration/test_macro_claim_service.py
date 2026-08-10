@@ -6,19 +6,30 @@ company exposure Evidence 走真实 HTML 服务链 + EvidenceCardService。**零
 零 LLM / 零 LangGraph / 零 Report / 零 Audit**。
 
 覆盖：
-- 创建：Claim(schema=4, domain=macro) + MacroTransmissionChain + transmission
-  links（macro_driver / company_exposure role）+ ClaimEvidenceLinks（macro_driver /
-  company_exposure 一律 relation=context）原子落库；
-- origin：macro_driver 必须 macro_observation；company_exposure / observed_effect
-  必须 document_chunk（违反 → MacroClaimOriginViolation）；
-- temporal：已知时间晚于 analysis_as_of → MacroClaimFutureEvidence；无可用时间
-  → MacroClaimTemporalEvidenceInsufficient（不伪造缺失日期）；
+- 创建：Claim(schema=5, domain=macro) + MacroTransmissionChain(schema=2) +
+  transmission links（macro_driver / company_exposure role）+ ClaimEvidenceLinks
+  （macro_driver / company_exposure 一律 relation=context）原子落库；
+- origin v2：macro_driver 允许 macro_observation 或 news_article + {event, fact,
+  statement} 外部事件材料；metric / annual_report / context document 卡拒绝；
+  company_exposure / observed_effect 必须 document_chunk（违反 →
+  MacroClaimOriginViolation）；
+- availability v2（no-lookahead）：document 用 SourceRecord.published_at 否则
+  acquired_at（绝不用 reporting_period_end）；macro 用 snapshot.fetched_at（绝不
+  用 normalized_period_start）。晚于 analysis_as_of → MacroClaimFutureEvidence；
+  无法解析 → MacroClaimTemporalEvidenceInsufficient（不伪造缺失日期）；
+- time-alignment policy v2：observed_impact 必须 aligned；uncertain 只允许
+  plausible + risk + normal；critical 需 aligned + 已知方向（违反 →
+  MacroClaimTimeAlignmentPolicy / MacroClaimCriticalEvidenceInsufficient）；
 - critical：需 eligible macro_driver 且 eligible company_exposure；observed_impact
   额外需 eligible observed_effect；additional support 不能替代两条传导腿；
 - impact-status：observed_impact 无 observed_effect → MacroClaimImpactStatusInsufficient；
-- replay：同 fingerprint 复用同一 Claim + 同一 Transmission，replayed=True；
-  并发 → 1 Claim + 1 Chain；篡改 → MacroClaimIntegrityError，**不自动 repair**；
+- replay（version-aware）：v5 → v2 规则、v4 → v1/v4 历史规则（不误判损坏）；
+  同 fingerprint 复用同一 Claim + 同一 Transmission，replayed=True；并发 →
+  1 Claim + 1 Chain；篡改 → MacroClaimIntegrityError，**不自动 repair**；
+- transmission ownership：相同 transmission semantics + 不同 statement /
+  analyst_version → new Claim + new Chain，transmission fingerprint 相同但不唯一；
 - additional 证据 relation（supports/context）原样保留；time_alignment 不自动猜测；
+- 失败 → 0 partial write 且不改写任何 EvidenceCard；
 - E2E provenance：Claim → Chain → {macro 卡, doc 卡} → Observation/Source → Artifact；
 - 边界：macro_transmission_* 存在 / Stage 5 report 表不得存在；Service 只持有
   sessionmaker。
@@ -32,10 +43,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from app.claims.contracts import ClaimKind
+from app.claims.contracts import ClaimKind, compute_research_question_sha256
 from app.claims.macro_contracts import (
     MACRO_CLAIM_SCHEMA_VERSION,
+    MACRO_CLAIM_SCHEMA_VERSION_V4,
     MACRO_TRANSMISSION_SCHEMA_VERSION,
+    MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
     MacroChannelType,
     MacroClaimConfidence,
     MacroClaimDraft,
@@ -43,20 +56,27 @@ from app.claims.macro_contracts import (
     MacroEffectDirection,
     MacroImpactStatus,
     MacroTimeAlignment,
+    compute_macro_claim_fingerprint,
+    compute_macro_transmission_fingerprint,
 )
 from app.claims.macro_errors import (
     MacroClaimCriticalEvidenceInsufficient,
+    MacroClaimDraftError,
     MacroClaimEvidenceCompanyMismatch,
     MacroClaimEvidenceNotFound,
     MacroClaimFutureEvidence,
     MacroClaimImpactStatusInsufficient,
     MacroClaimIntegrityError,
     MacroClaimOriginViolation,
-    MacroClaimTemporalEvidenceInsufficient,
+    MacroClaimTimeAlignmentPolicy,
 )
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
+from app.db.models.claim import ClaimModel
+from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.company import CompanyModel
+from app.db.models.macro_transmission_chain import MacroTransmissionChainModel
+from app.db.models.macro_transmission_evidence_link import MacroTransmissionEvidenceLinkModel
 from app.db.session import DatabaseManager
 from app.evidence.contracts import (
     EvidenceCardDraft,
@@ -206,21 +226,24 @@ async def _seed_document_card(
     critical_claim_eligible: bool = False,
     published_at=datetime(2026, 8, 7, 9, 30, tzinfo=UTC),
     reporting_period_end: date | None = None,
+    document_type: str = "news_article",
+    evidence_type: EvidenceType = EvidenceType.METRIC,
     statement: str = "2024年贵州茅台营业收入同比增长15%。",
 ) -> UUID:
     """真实 HTML 链 → EvidenceCardService 创建一张 document_chunk EvidenceCard。"""
-    src, parsed_id, cs_id, chunks = await _seed_html_source(
+    source_id, parsed_id, cs_id, chunks = await _seed_html_source(
         env,
         critical_claim_eligible=critical_claim_eligible,
         published_at=published_at,
         reporting_period_end=reporting_period_end,
+        document_type=document_type,
         source_url=f"https://www.xinhuanet.com/2026/0809/{uuid4().hex[:8]}.htm",
     )
     chunk = chunks[0]
     draft = EvidenceCardDraft(
         research_question=_QUESTION,
         evidence_statement=statement,
-        evidence_type=EvidenceType.METRIC,
+        evidence_type=evidence_type,
         chunk_id=chunk.chunk_id,
         quote_start=0,
         quote_end=20,
@@ -297,7 +320,7 @@ async def _claim_count(sessionmaker) -> int:
         return int(
             (
                 await session.execute(
-                    text("SELECT count(*) FROM claims WHERE claim_schema_version = 4")
+                    text("SELECT count(*) FROM claims WHERE claim_schema_version = 5")
                 )
             ).scalar_one()
         )
@@ -306,6 +329,39 @@ async def _claim_count(sessionmaker) -> int:
 async def _macro_tables_count(sessionmaker, table: str) -> int:
     async with sessionmaker() as session:
         return int((await session.execute(text(f"SELECT count(*) FROM {table}"))).scalar_one())
+
+
+async def _set_source_acquired_at(
+    env: dict, evidence_card_id: UUID, acquired_at: datetime | None
+) -> None:
+    """直接改写 SourceRecord.acquired_at（availability fallback 场景）。"""
+    async with env["sessionmaker"]() as session:
+        source_id = (
+            await session.execute(
+                text(
+                    "SELECT source_id FROM evidence_cards WHERE evidence_card_id = :eid"
+                ).bindparams(eid=evidence_card_id)
+            )
+        ).scalar_one()
+        await session.execute(
+            text("UPDATE source_records SET acquired_at = :at WHERE source_id = :sid").bindparams(
+                at=acquired_at, sid=source_id
+            )
+        )
+        await session.commit()
+
+
+async def _set_macro_snapshot_fetched_at(
+    env: dict, snapshot_id: UUID, fetched_at: datetime
+) -> None:
+    """直接改写 MacroDatasetSnapshot.fetched_at（macro availability 场景）。"""
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE macro_dataset_snapshots SET fetched_at = :at WHERE snapshot_id = :sid"
+            ).bindparams(at=fetched_at, sid=snapshot_id)
+        )
+        await session.commit()
 
 
 # ---------------------------------------------------------------- 创建
@@ -390,11 +446,12 @@ async def test_macro_claim_locator_traces_observation_and_source(env, monkeypatc
 # ---------------------------------------------------------------- origin 校验
 
 
-async def test_macro_driver_must_be_macro_observation_origin(env, monkeypatch) -> None:
+async def test_metric_document_card_cannot_be_macro_driver(env, monkeypatch) -> None:
     macro_card, chain = await _seed_macro_card(env, monkeypatch)
     doc_card = await _seed_document_card(env)
     wrong_doc_card = await _seed_document_card(env, statement="错误当作宏观驱动的公司数据。")
-    # 把 macro_driver 换成 document_chunk 卡 → origin 违反（company_exposure 仍是 doc 卡）。
+    # v2：news_article + metric 不能作为 macro_driver（结构化数值优先 MacroObservation；
+    # metric ∉ {event, fact, statement}）→ origin 违反。
     with pytest.raises(MacroClaimOriginViolation):
         await _service(env).create_claim(
             _draft(env, macro_driver=[wrong_doc_card], company_exposure=[doc_card])
@@ -437,6 +494,62 @@ async def test_observed_effect_must_be_document_chunk_origin(env, monkeypatch) -
     assert await _claim_count(env["sessionmaker"]) == 0
 
 
+# ---------------------------------------------------------------- macro driver v2
+
+
+async def test_macro_driver_allows_external_news_event_document(env, monkeypatch) -> None:
+    # v2：news_article + event Evidence 可作 macro_driver（外部新闻/事件材料，
+    # 利率决策/宏观事件/政策声明的直接信息来源）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    event_doc = await _seed_document_card(
+        env, statement="央行宣布上调政策利率（外部事件）。", evidence_type=EvidenceType.EVENT
+    )
+    result = await _service(env).create_claim(
+        _draft(env, macro_driver=[event_doc], company_exposure=[doc_card])
+    )
+    assert result.replayed is False
+    assert await _claim_count(env["sessionmaker"]) == 1
+
+
+async def test_macro_driver_annual_report_document_rejected(env, monkeypatch) -> None:
+    # v2：annual_report（公司披露）不是 macro_driver 来源——公司披露内容主要属于
+    # company_exposure；宏观驱动只来自 macro_observation 或外部 event 材料。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    annual_card = await _seed_document_card(
+        env, document_type="annual_report", statement="公司年度报告数据。"
+    )
+    with pytest.raises(MacroClaimOriginViolation):
+        await _service(env).create_claim(
+            _draft(env, macro_driver=[annual_card], company_exposure=[doc_card])
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_macro_driver_document_context_evidence_rejected(env, monkeypatch) -> None:
+    # context 是研究背景不是驱动来源，即使 news_article 也不能作为 macro_driver。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    context_doc = await _seed_document_card(
+        env, statement="宏观背景信息。", evidence_type=EvidenceType.CONTEXT
+    )
+    with pytest.raises(MacroClaimOriginViolation):
+        await _service(env).create_claim(
+            _draft(env, macro_driver=[context_doc], company_exposure=[doc_card])
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_same_document_not_both_driver_and_exposure(env, monkeypatch) -> None:
+    # 同一 Evidence 不能同时作为 macro_driver + company_exposure（draft 层构造校验）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    with pytest.raises(MacroClaimDraftError):
+        _draft(env, macro_driver=[doc_card], company_exposure=[doc_card])
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
 # ---------------------------------------------------------------- temporal
 
 
@@ -450,13 +563,105 @@ async def test_future_evidence_rejected(env, monkeypatch) -> None:
     assert await _claim_count(env["sessionmaker"]) == 0
 
 
-async def test_temporal_insufficient_when_no_usable_time(env, monkeypatch) -> None:
+async def test_document_published_null_acquired_present_accepted(env, monkeypatch) -> None:
+    # v2：acquired_at NOT NULL 保证 document availability 总能解析——published_at=NULL
+    # 时保守 fallback 到 acquired_at（**不用 reporting_period_end**）。acquired_at <=
+    # as_of → 接受；TemporalEvidenceInsufficient 分支是防御性代码，正常数据不可达
+    # （schema 约束 acquired_at/fetched_at 均 NOT NULL）。
     macro_card, chain = await _seed_macro_card(env, monkeypatch)
-    # document 卡无 published_at 且无 reporting_period_end → 无可用时间。
-    timeless_card = await _seed_document_card(env, published_at=None, reporting_period_end=None)
-    with pytest.raises(MacroClaimTemporalEvidenceInsufficient):
+    doc_card = await _seed_document_card(env, published_at=None, reporting_period_end=None)
+    await _set_source_acquired_at(env, doc_card, datetime(2026, 8, 9, 12, 0, tzinfo=UTC))
+    result = await _service(env).create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+    )
+    assert result.replayed is False
+
+
+# ---------------------------------------------------------------- availability v2
+
+
+async def test_document_reporting_period_ok_but_published_future_rejected(env, monkeypatch) -> None:
+    # reporting_period_end <= as_of 但 published_at 晚于 as_of → 未来证据拒绝
+    # （经济期间 ≠ 信息可得时间；绝不用 reporting_period_end 冒充可知时间）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(
+        env,
+        published_at=datetime(2026, 9, 1, tzinfo=UTC),
+        reporting_period_end=date(2025, 12, 31),
+    )
+    with pytest.raises(MacroClaimFutureEvidence):
         await _service(env).create_claim(
-            _draft(env, macro_driver=[macro_card], company_exposure=[timeless_card])
+            _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_document_published_null_acquired_future_rejected(env, monkeypatch) -> None:
+    # published_at=NULL → 用 acquired_at 保守 fallback；acquired_at 晚于 as_of → 拒绝。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env, published_at=None, reporting_period_end=None)
+    await _set_source_acquired_at(env, doc_card, datetime(2026, 9, 1, tzinfo=UTC))
+    with pytest.raises(MacroClaimFutureEvidence):
+        await _service(env).create_claim(
+            _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_document_published_ok_acquired_later_accepted(env, monkeypatch) -> None:
+    # published_at <= as_of（真实发布时间）→ 接受；即使 acquired_at 更晚
+    # （获取时间晚于发布时间不影响 no-lookahead 判断）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env, published_at=datetime(2026, 8, 7, 9, 30, tzinfo=UTC))
+    await _set_source_acquired_at(env, doc_card, datetime(2026, 9, 1, tzinfo=UTC))
+    result = await _service(env).create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+    )
+    assert result.replayed is False
+
+
+async def test_macro_observation_period_ok_but_snapshot_fetched_future_rejected(
+    env, monkeypatch
+) -> None:
+    # observation period(2024) <= as_of 但 snapshot fetched_at 晚于 as_of → 拒绝
+    # （period 不是"该数据何时可知"；系统最晚获得时间 = fetched_at）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    await _set_macro_snapshot_fetched_at(
+        env, chain["snapshot_id"], datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    doc_card = await _seed_document_card(env)
+    with pytest.raises(MacroClaimFutureEvidence):
+        await _service(env).create_claim(
+            _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_macro_observation_fetched_ok_accepted(env, monkeypatch) -> None:
+    # snapshot fetched_at <= as_of → 接受（macro availability 明确用 fetched_at）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    result = await _service(env).create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+    )
+    assert result.replayed is False
+
+
+async def test_additional_evidence_future_rejected(env, monkeypatch) -> None:
+    # additional context/support 也必须 availability <= as_of（附加证据不能未来穿越）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    future_support = await _seed_document_card(
+        env, statement="补充（未来）。", published_at=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    with pytest.raises(MacroClaimFutureEvidence):
+        await _service(env).create_claim(
+            _draft(
+                env,
+                macro_driver=[macro_card],
+                company_exposure=[doc_card],
+                additional_support_evidence_ids=[future_support],
+            )
         )
     assert await _claim_count(env["sessionmaker"]) == 0
 
@@ -583,6 +788,101 @@ async def test_observed_impact_with_observed_effect_accepted(env, monkeypatch) -
         assert all(r[1] == "context" for r in rows)
 
 
+# ---------------------------------------------------------------- time-alignment policy v2
+
+
+async def test_observed_impact_requires_aligned_time_alignment(env, monkeypatch) -> None:
+    # observed_impact（影响已被观察）必须 time_alignment=aligned；uncertain → 拒绝。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    effect_card = await _seed_document_card(env, statement="公司融资成本已明显上升。")
+    with pytest.raises(MacroClaimTimeAlignmentPolicy):
+        await _service(env).create_claim(
+            _draft(
+                env,
+                macro_driver=[macro_card],
+                company_exposure=[doc_card],
+                observed_effect=[effect_card],
+                impact_status=MacroImpactStatus.OBSERVED_IMPACT,
+                time_alignment=MacroTimeAlignment.UNCERTAIN,
+            )
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_time_alignment_uncertain_requires_plausible_risk_normal(env, monkeypatch) -> None:
+    # uncertain + inference（claim_kind 不是 risk）→ 拒绝（不确定性只允许 risk 断言）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    with pytest.raises(MacroClaimTimeAlignmentPolicy):
+        await _service(env).create_claim(
+            _draft(
+                env,
+                macro_driver=[macro_card],
+                company_exposure=[doc_card],
+                claim_kind=ClaimKind.INFERENCE,
+                time_alignment=MacroTimeAlignment.UNCERTAIN,
+            )
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_time_alignment_uncertain_critical_rejected(env, monkeypatch) -> None:
+    # uncertain 只允许 importance=normal；critical + uncertain → 拒绝。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    eligible_doc = await _seed_document_card(env, critical_claim_eligible=True)
+    with pytest.raises(MacroClaimTimeAlignmentPolicy):
+        await _service(env).create_claim(
+            _draft(
+                env,
+                macro_driver=[macro_card],
+                company_exposure=[eligible_doc],
+                importance=MacroClaimImportance.CRITICAL,
+                time_alignment=MacroTimeAlignment.UNCERTAIN,
+            )
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_critical_requires_aligned_and_known_direction(env, monkeypatch) -> None:
+    # critical + aligned + effect_direction=uncertain → CriticalEvidenceInsufficient
+    # （critical 必须有时间对齐与已知影响方向）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    eligible_doc = await _seed_document_card(env, critical_claim_eligible=True)
+    with pytest.raises(MacroClaimCriticalEvidenceInsufficient):
+        await _service(env).create_claim(
+            _draft(
+                env,
+                macro_driver=[macro_card],
+                company_exposure=[eligible_doc],
+                importance=MacroClaimImportance.CRITICAL,
+                effect_direction=MacroEffectDirection.UNCERTAIN,
+            )
+        )
+    assert await _claim_count(env["sessionmaker"]) == 0
+
+
+async def test_critical_observed_impact_aligned_direction_known_accepted(env, monkeypatch) -> None:
+    # critical 全约束满足（eligible 双腿 + aligned + 已知方向 + observed 有 eligible
+    # effect）→ 接受（证明 v2 政策没有过度收紧）。
+    eligible_macro, chain = await _seed_macro_card(env, monkeypatch, critical_claim_eligible=True)
+    eligible_doc = await _seed_document_card(env, critical_claim_eligible=True)
+    eligible_effect = await _seed_document_card(env, critical_claim_eligible=True)
+    result = await _service(env).create_claim(
+        _draft(
+            env,
+            macro_driver=[eligible_macro],
+            company_exposure=[eligible_doc],
+            observed_effect=[eligible_effect],
+            importance=MacroClaimImportance.CRITICAL,
+            impact_status=MacroImpactStatus.OBSERVED_IMPACT,
+            effect_direction=MacroEffectDirection.HEADWIND,
+        )
+    )
+    assert result.replayed is False
+    assert await _claim_count(env["sessionmaker"]) == 1
+
+
 # ---------------------------------------------------------------- replay / 并发
 
 
@@ -653,6 +953,209 @@ async def test_corrupted_transmission_raises_integrity_error(env, monkeypatch) -
         await service.create_claim(draft)
 
 
+# ---------------------------------------------------------------- transmission ownership / 版本边界
+
+
+async def test_same_transmission_statement_change_two_claims_two_transmissions(
+    env, monkeypatch
+) -> None:
+    # 相同 transmission semantics + 不同 statement → 必须 new Claim + new Chain
+    # （statement 在 claim fingerprint 中但不在 transmission fingerprint 中）；
+    # transmission fingerprint 相同但 **不再要求唯一**（0024 移除 global UNIQUE）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    service = _service(env)
+    first = await service.create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+    )
+    second = await service.create_claim(
+        _draft(
+            env,
+            macro_driver=[macro_card],
+            company_exposure=[doc_card],
+            statement="另一条不同表述的融资成本压力观点。",
+        )
+    )
+    assert first.replayed is False
+    assert second.replayed is False
+    assert first.claim_id != second.claim_id
+    assert first.transmission_id != second.transmission_id
+    assert first.transmission_fingerprint == second.transmission_fingerprint
+    assert await _claim_count(env["sessionmaker"]) == 2
+    assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 2
+    assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_evidence_links") == 4
+
+
+async def test_same_transmission_analyst_version_change_two_claims_two_transmissions(
+    env, monkeypatch
+) -> None:
+    # analyst_version 变化（同一分析师换版本）→ 新 Claim + 新 Chain，transmission
+    # fingerprint 相同（payload 不含 analyst 身份）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    service = _service(env)
+    first = await service.create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card], analyst_version=1)
+    )
+    second = await service.create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card], analyst_version=2)
+    )
+    assert first.replayed is False
+    assert second.replayed is False
+    assert first.claim_id != second.claim_id
+    assert first.transmission_id != second.transmission_id
+    assert first.transmission_fingerprint == second.transmission_fingerprint
+    assert await _claim_count(env["sessionmaker"]) == 2
+    assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 2
+
+
+async def test_new_claim_is_schema_5_transmission_2(env, monkeypatch) -> None:
+    # 新建 Macro Claim = claim_schema_version=5 / transmission_schema_version=2（字面值）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    result = await _service(env).create_claim(
+        _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+    )
+    async with env["sessionmaker"]() as session:
+        claim = await ClaimRepository(session).get_by_id(result.claim_id)
+        chain_row = await MacroTransmissionRepository(session).get_by_claim_id(result.claim_id)
+    assert claim is not None
+    assert chain_row is not None
+    assert claim.claim_schema_version == 5
+    assert chain_row.transmission_schema_version == 2
+
+
+async def test_legacy_v1_v4_replay_remains_valid(env, monkeypatch) -> None:
+    """历史 v1/v4 对象按历史规则 replay 有效；当前 create_claim 产生新 v5 Claim 而非碰撞。"""
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+    draft = _draft(env, macro_driver=[macro_card], company_exposure=[doc_card])
+
+    # 用 v1/v4 schema 版本派生历史 fingerprint（同 payload，版本不同 → 不同指纹）。
+    async with env["sessionmaker"]() as session:
+        macro_row = await EvidenceCardRepository(session).get_by_id(macro_card)
+        doc_row = await EvidenceCardRepository(session).get_by_id(doc_card)
+    assert macro_row is not None and doc_row is not None
+    trans_fp_v1 = compute_macro_transmission_fingerprint(
+        transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
+        company_id=env["company_id"],
+        channel_type=MacroChannelType.FINANCING.value,
+        effect_direction=MacroEffectDirection.HEADWIND.value,
+        impact_status=MacroImpactStatus.PLAUSIBLE_IMPACT.value,
+        time_alignment=MacroTimeAlignment.ALIGNED.value,
+        analysis_as_of=_ANALYSIS_AS_OF,
+        macro_driver=[
+            {
+                "evidence_card_id": str(macro_card),
+                "evidence_fingerprint": macro_row.evidence_fingerprint,
+            }
+        ],
+        company_exposure=[
+            {
+                "evidence_card_id": str(doc_card),
+                "evidence_fingerprint": doc_row.evidence_fingerprint,
+            }
+        ],
+        observed_effect=[],
+    )
+    claim_fp_v4 = compute_macro_claim_fingerprint(
+        claim_schema_version=MACRO_CLAIM_SCHEMA_VERSION_V4,
+        company_id=env["company_id"],
+        research_question=_QUESTION,
+        analysis_as_of=_ANALYSIS_AS_OF,
+        statement=_STATEMENT,
+        claim_kind=ClaimKind.RISK.value,
+        confidence=MacroClaimConfidence.MEDIUM.value,
+        importance=MacroClaimImportance.NORMAL.value,
+        analyst_name="macro-analyst",
+        analyst_version=1,
+        analyst_model_id="deepseek:deepseek-v4-flash",
+        transmission_fingerprint=trans_fp_v1,
+        additional_supports=[],
+        additional_contradicts=[],
+        additional_context=[],
+    )
+
+    # 直接 seed 一条 v4 Claim + v1 Chain + links（模拟 4C.1A foundation 历史对象）。
+    legacy_claim_id, legacy_transmission_id = uuid4(), uuid4()
+    async with env["sessionmaker"]() as session:
+        session.add(
+            ClaimModel(
+                claim_id=legacy_claim_id,
+                company_id=env["company_id"],
+                research_question=_QUESTION,
+                research_question_sha256=compute_research_question_sha256(_QUESTION),
+                statement=_STATEMENT,
+                analysis_domain="macro",
+                claim_kind="risk",
+                confidence="medium",
+                importance="normal",
+                analyst_name="macro-analyst",
+                analyst_version=1,
+                analyst_model_id="deepseek:deepseek-v4-flash",
+                claim_schema_version=MACRO_CLAIM_SCHEMA_VERSION_V4,
+                claim_fingerprint=claim_fp_v4,
+            )
+        )
+        session.add(
+            MacroTransmissionChainModel(
+                transmission_id=legacy_transmission_id,
+                claim_id=legacy_claim_id,
+                company_id=env["company_id"],
+                channel_type="financing",
+                effect_direction="headwind",
+                impact_status="plausible_impact",
+                time_alignment="aligned",
+                transmission_schema_version=MACRO_TRANSMISSION_SCHEMA_VERSION_V1,
+                transmission_fingerprint=trans_fp_v1,
+            )
+        )
+        session.add(
+            MacroTransmissionEvidenceLinkModel(
+                transmission_id=legacy_transmission_id,
+                evidence_card_id=macro_card,
+                role="macro_driver",
+            )
+        )
+        session.add(
+            MacroTransmissionEvidenceLinkModel(
+                transmission_id=legacy_transmission_id,
+                evidence_card_id=doc_card,
+                role="company_exposure",
+            )
+        )
+        session.add(
+            ClaimEvidenceLinkModel(
+                claim_id=legacy_claim_id, evidence_card_id=macro_card, relation="context"
+            )
+        )
+        session.add(
+            ClaimEvidenceLinkModel(
+                claim_id=legacy_claim_id, evidence_card_id=doc_card, relation="context"
+            )
+        )
+        await session.commit()
+
+    # 历史 v1/v4 对象按历史规则 replay 有效（不误判损坏）。
+    service = _service(env)
+    async with env["sessionmaker"]() as session:
+        existing = await ClaimRepository(session).get_by_id(legacy_claim_id)
+        assert existing is not None
+        await service._verify_replay(session, existing, draft)
+
+    # 当前 create_claim（v5/v2 派生）→ 新 fingerprint → 新 Claim + 新 Chain；legacy 原样保留。
+    result = await service.create_claim(draft)
+    assert result.replayed is False
+    assert result.claim_id != legacy_claim_id
+    async with env["sessionmaker"]() as session:
+        assert await ClaimRepository(session).get_by_id(legacy_claim_id) is not None
+        legacy_chain = await MacroTransmissionRepository(session).get_by_claim_id(legacy_claim_id)
+        assert legacy_chain is not None
+    assert await _claim_count(env["sessionmaker"]) == 1  # 只有新 v5 Claim
+    # 1 条 legacy v1 + 1 条新 v2 链并存。
+    assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 2
+
+
 # ---------------------------------------------------------------- 公司一致性
 
 
@@ -690,6 +1193,39 @@ async def test_missing_evidence_rejected_no_partial_write(env, monkeypatch) -> N
         )
     assert await _claim_count(env["sessionmaker"]) == 0
     assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 0
+
+
+async def test_failure_does_not_mutate_evidence_cards(env, monkeypatch) -> None:
+    # 校验失败 → 0 partial write，且 **任何 EvidenceCard 都不被改写**（provenance
+    # 快照原样）。
+    macro_card, chain = await _seed_macro_card(env, monkeypatch)
+    doc_card = await _seed_document_card(env)
+
+    async def _cards_snapshot() -> dict[str, tuple[str, int]]:
+        async with env["sessionmaker"]() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT evidence_card_id, evidence_fingerprint, extractor_version "
+                        "FROM evidence_cards"
+                    )
+                )
+            ).all()
+            return {str(r[0]): (str(r[1]), int(r[2])) for r in rows}
+
+    before = await _cards_snapshot()
+    # 触发 critical 策略失败（company_exposure 不 eligible）。
+    with pytest.raises(MacroClaimCriticalEvidenceInsufficient):
+        await _service(env).create_claim(
+            _draft(
+                env,
+                macro_driver=[macro_card],
+                company_exposure=[doc_card],
+                importance=MacroClaimImportance.CRITICAL,
+            )
+        )
+    assert await _cards_snapshot() == before
+    assert await _claim_count(env["sessionmaker"]) == 0
 
 
 # ---------------------------------------------------------------- 语义

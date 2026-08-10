@@ -9,9 +9,14 @@ channel → 公司有息负债 → 融资成本压力）是 **analysis artifact*
 EvidenceCard。
 
 本模块冻结：
-- `MACRO_CLAIM_SCHEMA_VERSION = 4`——Macro Claim 的 claim_schema_version
-  （analysis_domain=macro）。**不污染 generic ClaimDraft / FinancialClaimDraft**。
-- `MACRO_TRANSMISSION_SCHEMA_VERSION = 1`——传导链 schema。
+- `MACRO_CLAIM_SCHEMA_VERSION_V4 = 4`——历史 Macro Claim（4C.1A foundation，
+  2026-08-10 前创建）。保持 legacy replay semantics，**不批量改写历史 v4 行**。
+- `MACRO_TRANSMISSION_SCHEMA_VERSION_V1 = 1`——历史传导链 schema。
+- `MACRO_CLAIM_SCHEMA_VERSION = 5`——**当前** Macro Claim 的 claim_schema_version
+  （analysis_domain=macro，4C.1A Final Closeout 起）。**不污染 generic
+  ClaimDraft / FinancialClaimDraft**。
+- `MACRO_TRANSMISSION_SCHEMA_VERSION = 2`——**当前**传导链 schema（v2 起允许
+  经过明确筛选的 external event document Evidence 作为 macro_driver）。
 - `MacroClaimDraft`：专用新类。claim_kind **只允许 inference / risk**（macro
   facts 由 Macro Evidence 承载；不做 fact / relative_valuation）。固定
   analysis_domain=macro。至少 1 个 macro_driver_evidence_id + 1 个
@@ -23,11 +28,11 @@ EvidenceCard。
   analysis_as_of / role-sorted evidence_card_id + evidence fingerprint；不含
   transmission_id / created_at / claim_id）。任何变化 → 新 fingerprint → 新链，
   旧链保留。
-- macro claim fingerprint = claim_schema_version=4 + company / research_question /
-  analysis_as_of / statement / claim_kind / confidence / importance / analyst
-  身份 / transmission_fingerprint / additional evidence 按 supports/contradicts/
-  context 分组（不含 claim_id / created_at）。任何变化 → 新指纹 → 新 Claim + 新
-  transmission，旧对象保留。
+- macro claim fingerprint = claim_schema_version（当前 =5）+ company /
+  research_question / analysis_as_of / statement / claim_kind / confidence /
+  importance / analyst 身份 / transmission_fingerprint / additional evidence 按
+  supports/contradicts/context 分组（不含 claim_id / created_at）。任何变化 →
+  新指纹 → 新 Claim + 新 transmission，旧对象保留。
 """
 
 import hashlib
@@ -41,9 +46,13 @@ from app.claims.contracts import ClaimKind
 from app.claims.macro_errors import MacroClaimDraftError
 
 # claims.claim_schema_version 的当前值（analysis_domain=macro 专用）。
-MACRO_CLAIM_SCHEMA_VERSION = 4
+MACRO_CLAIM_SCHEMA_VERSION = 5
+# 历史 Macro Claim schema（4C.1A foundation，冻结，不改写）。
+MACRO_CLAIM_SCHEMA_VERSION_V4 = 4
 # macro_transmission_chains.transmission_schema_version 的当前值。
-MACRO_TRANSMISSION_SCHEMA_VERSION = 1
+MACRO_TRANSMISSION_SCHEMA_VERSION = 2
+# 历史传导链 schema（冻结，不改写）。
+MACRO_TRANSMISSION_SCHEMA_VERSION_V1 = 1
 
 # Macro Claim 只允许 inference / risk（macro facts 由 Macro Evidence 承载）。
 _MACRO_CLAIM_KINDS = frozenset((ClaimKind.INFERENCE, ClaimKind.RISK))
@@ -319,7 +328,7 @@ def compute_macro_claim_fingerprint(
 ) -> str:
     """Macro Claim 的确定性 SHA-256 指纹（sort_keys + 固定 separators）。
 
-    - 至少覆盖：claim_schema_version（=4）、company_id、research_question、
+    - 至少覆盖：claim_schema_version（=5）、company_id、research_question、
       analysis_as_of、statement、analysis_domain=macro、claim_kind、confidence、
       importance、analyst 身份、transmission_fingerprint、additional evidence 按
       supports/contradicts/context 分组的 ordered evidence_card_ids；

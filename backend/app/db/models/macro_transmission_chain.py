@@ -10,8 +10,11 @@ Company Exposure Evidence → 一条传导链 → Macro Claim。传导链描述"
   operations/other；effect_direction ∈ tailwind/headwind/mixed/uncertain（不是
   buy/sell）；impact_status ∈ plausible_impact/observed_impact；time_alignment
   ∈ aligned/uncertain（**无 misaligned**：证据明确错位时 Service 拒绝）。
-- transmission_fingerprint UNIQUE：同一完全相同传导 → replay 同一行，并发最终
-  只 1 条；语义任一变化 → 新指纹 → 新链，旧链保留（无 update API）。
+- transmission_fingerprint **不是 global identity**（migration 0024 移除 UNIQUE，
+  保留普通 INDEX）：相同 transmission semantics 可能对应多个 Macro Claim（如
+  statement 或 analyst_version 不同 → 新 Claim + 新链，fingerprint 可相同）。
+  同一 Claim 的身份由 Claim.claim_fingerprint UNIQUE 负责；同指纹的链条数由
+  Service 层的 create/replay 语义保证（新 Claim → 新链；replay → 复用既有链）。
 - 非空 / 枚举 / 版本 / fingerprint 全由 DB CHECK 兜底，Service 层先拒绝。
 """
 
@@ -23,6 +26,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -69,9 +73,9 @@ class MacroTransmissionChainModel(Base):
             name="ck_macro_transmission_chains_time_alignment",
         ),
         UniqueConstraint("claim_id", name="uq_macro_transmission_chains_claim_id"),
-        UniqueConstraint(
+        Index(
+            "ix_macro_transmission_chains_transmission_fingerprint",
             "transmission_fingerprint",
-            name="uq_macro_transmission_chains_transmission_fingerprint",
         ),
     )
 

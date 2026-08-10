@@ -102,6 +102,21 @@ class MacroClaimImpactStatusInsufficient(MacroClaimError):
     code = "macro_claim_impact_status_insufficient"
 
 
+class MacroClaimTimeAlignmentPolicy(MacroClaimError):
+    """time_alignment 与 impact/importance 的确定性一致性（overclaim 防御，v2）。
+
+    - impact_status=observed_impact 必须 time_alignment=aligned（声称"影响已
+      发生"不能同时说"时间对齐不确定"）；
+    - time_alignment=uncertain 只允许 impact_status=plausible_impact +
+      claim_kind=risk + importance=normal（不确定 → 不能创建 critical / 不能
+      声称已发生因果）。
+
+    违反 → 拒绝创建，**不自动降级或猜 lag**。
+    """
+
+    code = "macro_claim_time_alignment_policy"
+
+
 class MacroClaimIntegrityError(MacroClaimError):
     """已有 fingerprint 的 Macro Claim replay 完整性校验失败。
 
