@@ -227,9 +227,7 @@ class MacroClaimService:
             replayed=item.replayed,
         )
 
-    async def create_claim_batch(
-        self, drafts: list[MacroClaimDraft]
-    ) -> MacroClaimBatchResult:
+    async def create_claim_batch(self, drafts: list[MacroClaimDraft]) -> MacroClaimBatchResult:
         """把 1..MAX_MACRO_CLAIMS_PER_BATCH 条 Macro Claim 原子登记。
 
         两步提交结构（镜像 FinancialClaimService.create_claim_batch）：

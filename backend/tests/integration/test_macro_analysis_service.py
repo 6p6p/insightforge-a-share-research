@@ -247,9 +247,9 @@ async def test_analyze_creates_v6_claim_with_v3_transmission_and_cutoff(env, mon
     assert chain_row.analysis_as_of == _ANALYSIS_AS_OF
 
     async with env["sessionmaker"]() as session:
-        trans_links = await MacroTransmissionEvidenceLinkRepository(
-            session
-        ).list_by_transmission(chain_row.transmission_id)
+        trans_links = await MacroTransmissionEvidenceLinkRepository(session).list_by_transmission(
+            chain_row.transmission_id
+        )
     by_card = {link.evidence_card_id: link.role for link in trans_links}
     assert by_card == {macro_card: "macro_driver", doc_card: "company_exposure"}
 
@@ -293,9 +293,7 @@ async def test_analyze_model_receives_minimal_pack_projection(env, monkeypatch) 
     macro_card, _ = await _seed_macro_card(env, monkeypatch)
     doc_card = await _seed_document_card(env)
     model = FakeMacroAnalysisModel(decision=_decision())
-    await _service(env, model).analyze(
-        _request(env, macro_driver=[macro_card], company=[doc_card])
-    )
+    await _service(env, model).analyze(_request(env, macro_driver=[macro_card], company=[doc_card]))
 
     assert len(model.calls) == 1
     context, driver_pack, company_pack = model.calls[0]
@@ -370,9 +368,7 @@ async def test_analyze_relevant_false_creates_no_claims(env, monkeypatch) -> Non
 async def test_analyze_missing_evidence_aborts_before_llm(env) -> None:
     model = FakeMacroAnalysisModel(decision=_decision())
     with pytest.raises(MacroAnalysisEvidenceNotFound):
-        await _service(env, model).analyze(
-            _request(env, macro_driver=[uuid4()], company=[uuid4()])
-        )
+        await _service(env, model).analyze(_request(env, macro_driver=[uuid4()], company=[uuid4()]))
     assert model.calls == []
 
 
@@ -380,9 +376,9 @@ async def test_analyze_missing_company_evidence_aborts_before_llm(env, monkeypat
     macro_card, _ = await _seed_macro_card(env, monkeypatch)
     model = FakeMacroAnalysisModel(decision=_decision())
     with pytest.raises(MacroAnalysisEvidenceNotFound):
-        await _service(
-            env, model
-        ).analyze(_request(env, macro_driver=[macro_card], company=[uuid4()]))
+        await _service(env, model).analyze(
+            _request(env, macro_driver=[macro_card], company=[uuid4()])
+        )
     assert model.calls == []
 
 
@@ -549,9 +545,7 @@ async def test_analyze_critical_claim_requires_eligible_legs(env, monkeypatch) -
     macro_card, _ = await _seed_macro_card(env, monkeypatch)
     doc_card = await _seed_document_card(env)  # critical_claim_eligible=False
     model = FakeMacroAnalysisModel(
-        decision=_decision(
-            claims=[_candidate(importance=MacroClaimImportance.CRITICAL)]
-        )
+        decision=_decision(claims=[_candidate(importance=MacroClaimImportance.CRITICAL)])
     )
     with pytest.raises(MacroClaimCriticalEvidenceInsufficient):
         await _service(env, model).analyze(
@@ -566,9 +560,7 @@ async def test_analyze_critical_claim_requires_eligible_legs(env, monkeypatch) -
 async def test_analyze_observed_impact_with_observed_effect(env, monkeypatch) -> None:
     macro_card, _ = await _seed_macro_card(env, monkeypatch)
     doc_card = await _seed_document_card(env)
-    effect_card = await _seed_document_card(
-        env, statement="2024年下半年公司融资成本明显上升。"
-    )
+    effect_card = await _seed_document_card(env, statement="2024年下半年公司融资成本明显上升。")
     # E1/E2 按 str(uuid) 升序分配（build_company_evidence_pack 确定性）。
     e1_card, e2_card = sorted([doc_card, effect_card], key=str)
     model = FakeMacroAnalysisModel(
@@ -589,9 +581,9 @@ async def test_analyze_observed_impact_with_observed_effect(env, monkeypatch) ->
     assert result.created_count == 1
     async with env["sessionmaker"]() as session:
         chain_row = await MacroTransmissionRepository(session).get_by_claim_id(result.claim_ids[0])
-        trans_links = await MacroTransmissionEvidenceLinkRepository(
-            session
-        ).list_by_transmission(chain_row.transmission_id)
+        trans_links = await MacroTransmissionEvidenceLinkRepository(session).list_by_transmission(
+            chain_row.transmission_id
+        )
     by_card = {link.evidence_card_id: link.role for link in trans_links}
     assert by_card == {
         macro_card: "macro_driver",

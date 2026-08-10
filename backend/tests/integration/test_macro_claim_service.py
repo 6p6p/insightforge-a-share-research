@@ -1354,9 +1354,7 @@ async def test_macro_claim_service_takes_only_sessionmaker(env, monkeypatch) -> 
 # ---------------------------------------------------------------- batch 原子性
 
 
-async def test_create_claim_batch_mixed_replay_and_create_ordered(
-    env, monkeypatch
-) -> None:
+async def test_create_claim_batch_mixed_replay_and_create_ordered(env, monkeypatch) -> None:
     # 同一 batch：draft1=replay（指纹已存在）、draft2=create（新指纹）。
     # items[i] 必须一一对应 drafts[i]（严格 input 顺序，不按 created/replayed
     # 分组重排），claim_ids 与 input 顺序一致，created_count=1 / replayed_count=1。
@@ -1392,9 +1390,7 @@ async def test_create_claim_batch_mixed_replay_and_create_ordered(
     assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_evidence_links") == 4
 
 
-async def test_create_claim_batch_later_failure_rolls_back_earlier_insert(
-    env, monkeypatch
-) -> None:
+async def test_create_claim_batch_later_failure_rolls_back_earlier_insert(env, monkeypatch) -> None:
     # 事务阶段失败（不是 pre-validation 拒绝）：draft2 的证据完整，校验阶段全部
     # 通过；失败发生在同一 transaction 内 _persist_one 的 replay 校验（既有 Claim
     # 的 statement 被篡改 → MacroClaimIntegrityError）。draft1 的插入未 commit →
@@ -1424,12 +1420,8 @@ async def test_create_claim_batch_later_failure_rolls_back_earlier_insert(
     assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_evidence_links") == 2
     async with env["sessionmaker"]() as session:
         ev_link_count = int(
-            (
-                await session.execute(text("SELECT count(*) FROM claim_evidence_links"))
-            ).scalar_one()
+            (await session.execute(text("SELECT count(*) FROM claim_evidence_links"))).scalar_one()
         )
         assert ev_link_count == 2
-        statements = (
-            (await session.execute(text("SELECT statement FROM claims"))).scalars().all()
-        )
+        statements = (await session.execute(text("SELECT statement FROM claims"))).scalars().all()
         assert statements == ["篡改"]  # 不自动 repair，篡改值仍在。

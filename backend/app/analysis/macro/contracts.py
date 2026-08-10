@@ -175,9 +175,7 @@ class MacroClaimCandidate(BaseModel):
             or self.importance != MacroClaimImportance.NORMAL
             or self.impact_status != MacroImpactStatus.PLAUSIBLE_IMPACT
         ):
-            raise ValueError(
-                "time_alignment=uncertain 只允许 plausible_impact + risk + normal"
-            )
+            raise ValueError("time_alignment=uncertain 只允许 plausible_impact + risk + normal")
         return self
 
 

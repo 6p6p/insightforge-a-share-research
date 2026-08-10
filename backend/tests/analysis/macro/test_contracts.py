@@ -162,9 +162,7 @@ def test_request_rejects_too_many_macro_drivers() -> None:
 def test_request_rejects_too_many_company_evidence() -> None:
     with pytest.raises(MacroAnalysisInputError):
         _request(
-            company_evidence_ids=[
-                _uuid(i) for i in range(1, MAX_COMPANY_EVIDENCE_PER_REQUEST + 2)
-            ]
+            company_evidence_ids=[_uuid(i) for i in range(1, MAX_COMPANY_EVIDENCE_PER_REQUEST + 2)]
         )
 
 

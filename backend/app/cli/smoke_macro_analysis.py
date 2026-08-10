@@ -134,9 +134,7 @@ async def _cleanup(
     只删本 smoke 数据，不动其他数据。按 FK 依赖逆序删除。"""
     cid = company_id
     chain_src = "SELECT source_id FROM source_records WHERE company_id = :cid"
-    chain_parsed = (
-        f"SELECT parsed_source_id FROM parsed_sources WHERE source_id IN ({chain_src})"
-    )
+    chain_parsed = f"SELECT parsed_source_id FROM parsed_sources WHERE source_id IN ({chain_src})"
     chain_chunkset = (
         f"SELECT chunk_set_id FROM chunk_sets WHERE parsed_source_id IN ({chain_parsed})"
     )
@@ -177,9 +175,9 @@ async def _cleanup(
             ).bindparams(cid=cid)
         )
         await session.execute(
-            text(
-                f"DELETE FROM chunk_sets WHERE parsed_source_id IN ({chain_parsed})"
-            ).bindparams(cid=cid)
+            text(f"DELETE FROM chunk_sets WHERE parsed_source_id IN ({chain_parsed})").bindparams(
+                cid=cid
+            )
         )
         await session.execute(
             text(
@@ -187,9 +185,7 @@ async def _cleanup(
             ).bindparams(cid=cid)
         )
         await session.execute(
-            text(f"DELETE FROM parsed_sources WHERE source_id IN ({chain_src})").bindparams(
-                cid=cid
-            )
+            text(f"DELETE FROM parsed_sources WHERE source_id IN ({chain_src})").bindparams(cid=cid)
         )
         await session.execute(
             text("DELETE FROM source_records WHERE company_id = :cid").bindparams(cid=cid)

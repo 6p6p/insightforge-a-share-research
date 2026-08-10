@@ -25,9 +25,12 @@ from app.db.models.news_source_verification import NewsSourceVerificationModel
 from app.db.models.parsed_source import ParsedSourceModel
 from app.db.models.parsed_source_block import ParsedSourceBlockModel
 from app.db.models.raw_artifact import RawArtifactModel
+from app.db.models.relative_valuation_comparison import RelativeValuationComparisonModel
+from app.db.models.relative_valuation_comparison_peer import RelativeValuationComparisonPeerModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.source_provider import SourceProviderModel
 from app.db.models.source_record import SourceRecordModel
+from app.db.models.valuation_metric_observation import ValuationMetricObservationModel
 from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
 
@@ -57,9 +60,12 @@ __all__ = [
     "ParsedSourceModel",
     "ParsedSourceBlockModel",
     "RawArtifactModel",
+    "RelativeValuationComparisonModel",
+    "RelativeValuationComparisonPeerModel",
     "ResearchTaskModel",
     "SourceProviderModel",
     "SourceRecordModel",
+    "ValuationMetricObservationModel",
     "WorkflowEventModel",
     "WorkflowRunModel",
 ]

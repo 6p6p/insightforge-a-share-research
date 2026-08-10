@@ -450,9 +450,7 @@ class MacroAnalysisService:
         return "未披露数值"
 
     @staticmethod
-    def _document_period_summary(
-        card: EvidenceCardModel, source: SourceRecordModel
-    ) -> str:
+    def _document_period_summary(card: EvidenceCardModel, source: SourceRecordModel) -> str:
         """确定性的文档期间摘要（报告期优先，否则发布期）。"""
         if card.reporting_period_end is not None:
             return f"报告期 {card.reporting_period_end.isoformat()}"
