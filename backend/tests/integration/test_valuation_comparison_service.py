@@ -662,6 +662,80 @@ async def test_no_partial_write_on_integrity_failure(env) -> None:
     assert len(await _peer_links(env["sessionmaker"], first.comparison_id)) == 3
 
 
+# ------------------------------------------------- Gate 0：verify_comparison_integrity 稳定错误边界
+
+
+async def test_verify_comparison_integrity_missing_returns_none(env) -> None:
+    """comparison_id 不存在 → verify_comparison_integrity 返回 None（非普通输入错误）。"""
+    async with env["sessionmaker"]() as session:
+        verified = await _service(env).verify_comparison_integrity(session, uuid4())
+    assert verified is None
+
+
+async def test_verify_comparison_integrity_returns_verified(env) -> None:
+    """完好 comparison → 返回 VerifiedComparison（真实 target/peer Observation + Evidence）。"""
+    refs = await _seed_comparison_set(env)
+    result = await _service(env).create_comparison(_draft(env, refs))
+    async with env["sessionmaker"]() as session:
+        verified = await _service(env).verify_comparison_integrity(session, result.comparison_id)
+    assert verified is not None
+    assert verified.comparison_id == result.comparison_id
+    assert verified.comparison_fingerprint == result.comparison_fingerprint
+    assert verified.target_company_id == refs["target"]["company_id"]
+    assert verified.metric_code == "pe_ttm"
+    assert verified.peer_companies == tuple(
+        sorted((p["company_id"] for p in refs["peers"]), key=str)
+    )
+    assert len(verified.peer_observations) == 3
+    # evidence 覆盖 target + 全部 peers 的 source EvidenceCard。
+    assert len(verified.evidence) == 4
+
+
+async def test_verify_comparison_integrity_deleted_peer_link_raises_integrity(env) -> None:
+    """删除一条 persisted peer link（<3）→ verify 抛 ValuationIntegrityError（包装自
+    ValuationInputError），不泄漏普通 input error。"""
+    refs = await _seed_comparison_set(env)
+    result = await _service(env).create_comparison(_draft(env, refs))
+    async with env["sessionmaker"]() as session:
+        # 精确删除 peer[0] 的 link，剩 2 条（<3）。
+        await session.execute(
+            text(
+                "DELETE FROM relative_valuation_comparison_peers "
+                "WHERE comparison_id = :cid AND peer_company_id = :pid"
+            ).bindparams(cid=result.comparison_id, pid=refs["peers"][0]["company_id"])
+        )
+        await session.commit()
+    async with env["sessionmaker"]() as session:
+        with pytest.raises(ValuationIntegrityError) as excinfo:
+            await _service(env).verify_comparison_integrity(session, result.comparison_id)
+    # 必须保留 cause 链（raise ... from exc）。
+    assert isinstance(excinfo.value.__cause__, ValuationInputError)
+
+
+async def test_verify_comparison_integrity_target_in_peer_links_raises_integrity(env) -> None:
+    """把一条 persisted peer link 指向 target observation → verify 抛
+    ValuationIntegrityError（包装自 ValuationInputError）。"""
+    refs = await _seed_comparison_set(env)
+    result = await _service(env).create_comparison(_draft(env, refs))
+    async with env["sessionmaker"]() as session:
+        # 精确把 peer[0] 的 link 指向 target observation（含 target 进 peer 集合）。
+        await session.execute(
+            text(
+                "UPDATE relative_valuation_comparison_peers SET peer_observation_id = :toid "
+                "WHERE comparison_id = :cid AND peer_company_id = :pid"
+            ).bindparams(
+                toid=refs["target"]["valuation_observation_id"],
+                cid=result.comparison_id,
+                pid=refs["peers"][0]["company_id"],
+            )
+        )
+        await session.commit()
+    async with env["sessionmaker"]() as session:
+        with pytest.raises(ValuationIntegrityError) as excinfo:
+            await _service(env).verify_comparison_integrity(session, result.comparison_id)
+    assert isinstance(excinfo.value.__cause__, ValuationInputError)
+
+
 # ---------------------------------------------------------------- E2E provenance
 
 

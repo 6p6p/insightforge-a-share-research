@@ -80,6 +80,7 @@ from app.valuation.errors import (
     ValuationCompanyMismatch,
     ValuationCompanyNotFound,
     ValuationDateMismatch,
+    ValuationError,
     ValuationFutureEvidence,
     ValuationIntegrityError,
     ValuationMetricMismatch,
@@ -534,6 +535,30 @@ class RelativeValuationComparisonService:
 
     # -------------------------------------------------- shared helper（4C.2B.1 spec I）
 
+    async def _verify_persisted_replay(
+        self,
+        session: AsyncSession,
+        persisted: RelativeValuationComparisonModel,
+    ) -> _LoadedComparisonRefs:
+        """从 persisted comparison + peer links 重建 draft 并完整重放校验。
+
+        peer links 是持久化事实；若损坏（<3 / 重复 / 含 target / 缺 observation），
+        `ComparisonDraft` 构造或 `_verify_replay` 会抛 `ValuationInputError` 等
+        普通 `ValuationError`——这些在 replay/integrity API 语境下都是**已持久化
+        数据损坏**的信号，由 `verify_comparison_integrity` 统一包装为
+        `ValuationIntegrityError`（不复制 formula / replay logic）。
+        """
+        links = await RelativeValuationComparisonPeerRepository(session).list_by_comparison(
+            persisted.comparison_id
+        )
+        draft = ComparisonDraft(
+            target_company_id=persisted.target_company_id,
+            target_observation_id=persisted.target_observation_id,
+            peer_observation_ids=tuple(link.peer_observation_id for link in links),
+            analysis_as_of=persisted.analysis_as_of,
+        )
+        return await self._verify_replay(session, persisted, draft)
+
     async def verify_comparison_integrity(
         self, session: AsyncSession, comparison_id: UUID
     ) -> VerifiedComparison | None:
@@ -547,24 +572,27 @@ class RelativeValuationComparisonService:
 
         - comparison_id 不存在 → 返回 None（由调用方决定错误语义，如
           `ValuationClaimComparisonNotFound`）；
-        - 任一内部损坏（含 peer links 缺失 / 非法导致 ComparisonDraft 构造失败）
-          → `ValuationIntegrityError`，**不自动 repair**（修改 = 新 comparison）。
+        - comparison 存在但任一内部损坏（含 peer links 缺失 / 少于 3 / 重复 /
+          含 target 导致 `ComparisonDraft` 构造失败，或 replay 校验发现字段 /
+          stats / fingerprint / links 不符）→ `ValuationIntegrityError`（包装自
+          `ValuationError`，保留 `raise ... from exc`），**不自动 repair**。
+
+        Gate 0（4C.2B.2）：本 replay/integrity API 的稳定错误边界——除 comparison
+        missing 返回 None 外，任何由 **persisted DB state** 导致的 validation
+        failure 一律以 `ValuationIntegrityError` 呈现，**不泄漏** `ValuationInputError`
+        等普通输入错误；`create_comparison(new draft)` 的用户输入 taxonomy 不受影响。
         """
         persisted = await RelativeValuationComparisonRepository(session).get_by_id(comparison_id)
         if persisted is None:
             return None
-        links = await RelativeValuationComparisonPeerRepository(session).list_by_comparison(
-            comparison_id
-        )
-        # peer links 是持久化事实；若损坏（<3 / 重复 / 含 target）→ 构造 draft
-        # 抛 ValuationInputError，视为 comparison 损坏（调用方包装为 integrity）。
-        draft = ComparisonDraft(
-            target_company_id=persisted.target_company_id,
-            target_observation_id=persisted.target_observation_id,
-            peer_observation_ids=tuple(link.peer_observation_id for link in links),
-            analysis_as_of=persisted.analysis_as_of,
-        )
-        loaded = await self._verify_replay(session, persisted, draft)
+        try:
+            loaded = await self._verify_persisted_replay(session, persisted)
+        except ValuationIntegrityError:
+            raise
+        except ValuationError as exc:
+            raise ValuationIntegrityError(
+                "valuation comparison persisted state failed integrity validation"
+            ) from exc
         return VerifiedComparison(
             comparison_id=persisted.comparison_id,
             comparison_fingerprint=persisted.comparison_fingerprint,
