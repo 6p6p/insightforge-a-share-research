@@ -182,6 +182,16 @@ class VerifiedComparison:
     target_observation: ValuationMetricObservationModel
     peer_observations: tuple[ValuationMetricObservationModel, ...]
     evidence: dict[UUID, EvidenceCardModel]  # card_id -> card（target + peers 的 source Evidence）
+    # 已通过 replay 完整性核实的派生统计（4C.2B.2 供 ValuationAnalysisService
+    # 构造 comparison pack；值来自 persisted 行且与重新派生一致，不复制 formula）。
+    target_value: Decimal
+    peer_median: Decimal
+    peer_min: Decimal
+    peer_max: Decimal
+    premium_discount_to_median: Decimal
+    peer_count: int
+    comparison_method: str
+    formula_version: int
 
 
 class RelativeValuationComparisonService:
@@ -610,4 +620,12 @@ class RelativeValuationComparisonService:
             target_observation=loaded.target_observation,
             peer_observations=loaded.peer_observations,
             evidence=loaded.evidence,
+            target_value=loaded.target_observation.metric_value,
+            peer_median=persisted.peer_median,
+            peer_min=persisted.peer_min,
+            peer_max=persisted.peer_max,
+            premium_discount_to_median=persisted.premium_discount_to_median,
+            peer_count=persisted.peer_count,
+            comparison_method=persisted.comparison_method,
+            formula_version=persisted.formula_version,
         )

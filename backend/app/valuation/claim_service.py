@@ -55,7 +55,6 @@ Audit 能重算 peer median / premium 并知道 judgment 基于哪些 peer compa
 
 import uuid
 from dataclasses import dataclass
-from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select
@@ -97,12 +96,19 @@ from app.valuation.claim_errors import (
     ValuationClaimCriticalEvidenceInsufficient,
     ValuationClaimDraftError,
     ValuationClaimDuplicateMetric,
+    ValuationClaimError,
     ValuationClaimEvidenceCompanyMismatch,
     ValuationClaimIntegrityError,
     ValuationClaimMetricDateMismatch,
     ValuationClaimPeerSetMismatch,
     ValuationClaimPersistenceFailed,
     ValuationClaimRelationConflict,
+)
+from app.valuation.claim_policy import (
+    ComparisonProjection,
+    ValuationClaimPolicyError,
+    ValuationClaimPolicyReason,
+    check_comparison_set_consistency,
 )
 from app.valuation.comparison_service import (
     RelativeValuationComparisonService,
@@ -131,6 +137,25 @@ class _DerivedValuationClaim:
     evidence_fingerprints: dict[UUID, str]  # card_id -> evidence_fingerprint
     comparisons_by_relation: dict[str, list[UUID]]  # relation -> sorted comparison ids
     comparison_fingerprints: dict[UUID, str]  # comparison_id -> comparison_fingerprint
+
+
+def _claim_policy_to_claim_error(exc: ValuationClaimPolicyError) -> ValuationClaimError:
+    """把 shared policy 失败映射为 ValuationClaimService 的稳定错误域。
+
+    - ANALYSIS_DATE_MISMATCH → ValuationClaimAnalysisDateMismatch；
+    - METRIC_DATE_MISMATCH → ValuationClaimMetricDateMismatch；
+    - PEER_SET_MISMATCH → ValuationClaimPeerSetMismatch；
+    - DUPLICATE_METRIC / TOO_MANY_COMPARISONS → ValuationClaimDuplicateMetric。
+    direction / uncertain-importance 两类 reason 在本路径（ClaimService 确定性登记）
+    不会出现。
+    """
+    if exc.reason == ValuationClaimPolicyReason.ANALYSIS_DATE_MISMATCH:
+        return ValuationClaimAnalysisDateMismatch()
+    if exc.reason == ValuationClaimPolicyReason.METRIC_DATE_MISMATCH:
+        return ValuationClaimMetricDateMismatch()
+    if exc.reason == ValuationClaimPolicyReason.PEER_SET_MISMATCH:
+        return ValuationClaimPeerSetMismatch()
+    return ValuationClaimDuplicateMetric()
 
 
 def _assign_relation(auto: dict[UUID, str], card_id: UUID, relation: str) -> None:
@@ -288,9 +313,7 @@ class ValuationClaimService:
             + draft.context_comparison_ids
         )
         verified: dict[UUID, VerifiedComparison] = {}
-        metric_codes: set[str] = set()
-        metric_as_ofs: set[date] = set()
-        peer_sets: set[frozenset[UUID]] = set()
+        projections: list[ComparisonProjection] = []
         for comparison_id in comparison_ids:
             try:
                 v = await comparison_svc.verify_comparison_integrity(session, comparison_id)
@@ -300,25 +323,26 @@ class ValuationClaimService:
                 raise ValuationClaimComparisonNotFound()
             if v.target_company_id != draft.company_id:
                 raise ValuationClaimComparisonMismatch()
-            if v.analysis_as_of != draft.analysis_as_of:
-                raise ValuationClaimAnalysisDateMismatch()
-            metric_codes.add(v.metric_code)
-            metric_as_ofs.add(v.metric_as_of)
-            peer_sets.add(frozenset(v.peer_companies))
+            projections.append(
+                ComparisonProjection(
+                    metric_code=v.metric_code,
+                    metric_as_of=v.metric_as_of,
+                    analysis_as_of=v.analysis_as_of,
+                    peer_companies=frozenset(v.peer_companies),
+                )
+            )
             verified[comparison_id] = v
 
-        if len(metric_as_ofs) > 1:
-            raise ValuationClaimMetricDateMismatch()
-        if len(peer_sets) > 1:
-            raise ValuationClaimPeerSetMismatch()
-        # metric_code 唯一（且 v1 最多 PE/PB/PS 三个 comparison；draft 层已限总
-        # 数 <= 3，此处对真实 Comparison 的 metric 唯一性做最终校验）。
-        if len(metric_codes) != len(comparison_ids):
-            raise ValuationClaimDuplicateMetric()
-        if len(comparison_ids) > MAX_VALUATION_COMPARISONS_PER_CLAIM:
-            raise ValuationClaimDuplicateMetric(
-                f"valuation claim 最多 {MAX_VALUATION_COMPARISONS_PER_CLAIM} 个 comparison"
+        # 跨 comparison 一致性（复用 shared policy，禁止复制两套规则）：analysis_as_of
+        # / metric_as_of / peer set / metric 唯一性 / 数量上限，全部映射为稳定错误。
+        try:
+            check_comparison_set_consistency(
+                expected_analysis_as_of=draft.analysis_as_of,
+                comparisons=projections,
+                max_comparisons=MAX_VALUATION_COMPARISONS_PER_CLAIM,
             )
+        except ValuationClaimPolicyError as exc:
+            raise _claim_policy_to_claim_error(exc) from exc
 
         additional_ids = (
             set(draft.additional_support_evidence_ids)

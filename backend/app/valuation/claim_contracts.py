@@ -87,6 +87,28 @@ _VALUATION_CLAIM_ASSESSMENTS = frozenset(
 )
 
 
+def render_valuation_claim_statement(assessment: ValuationClaimAssessment) -> str:
+    """v1 精确冻结的 Relative Valuation Claim statement 渲染（deterministic，LLM 不生成）。
+
+    Assessment → 固定中文 statement（4C.2B.2 spec C）：模型只返回 assessment，
+    **程序**渲染最终 Claim statement——statement 里不含任何数字 / 百分比 / 阈值，
+    也不带 company / peer 名称插值（避免把模型输出或未审计文本引入 Claim）。
+    """
+    frozen = {
+        ValuationClaimAssessment.RELATIVE_HIGH: ("公司当前相对估值水平高于所选可比公司整体水平。"),
+        ValuationClaimAssessment.BROADLY_IN_LINE: (
+            "公司当前相对估值水平与所选可比公司整体大致相当。"
+        ),
+        ValuationClaimAssessment.RELATIVE_LOW: ("公司当前相对估值水平低于所选可比公司整体水平。"),
+        ValuationClaimAssessment.MIXED: ("不同估值指标对公司的相对估值判断存在分化。"),
+        ValuationClaimAssessment.UNCERTAIN: ("现有相对估值比较不足以形成明确的方向性判断。"),
+    }
+    try:
+        return frozen[assessment]
+    except KeyError as exc:
+        raise ValuationClaimDraftError(f"不支持 assessment: {assessment}") from exc
+
+
 class ValuationClaimConfidence(StrEnum):
     """Valuation Claim 的整体置信度（与 Claim 语义一致，独立枚举防耦合）。"""
 
