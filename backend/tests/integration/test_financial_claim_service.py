@@ -1062,11 +1062,16 @@ async def test_financial_claim_tables_exist_and_no_stage5_report_tables(env) -> 
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_outlines','report_sections','reports','review_issues')"
+                    "('report_sections','reports','review_issues')"
                 )
             )
         ).scalar_one()
         assert stage5_tables == 0
+        # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+        outline_rows = (
+            await session.execute(text("SELECT count(*) FROM report_outlines"))
+        ).scalar_one()
+        assert int(outline_rows) == 0
 
 
 async def test_financial_claim_service_takes_only_sessionmaker(env) -> None:

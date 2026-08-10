@@ -47,14 +47,19 @@ from app.analysis.synthesis.contracts import (
     SynthesisAnalysisOutput,
     SynthesisAnalysisRequest,
     SynthesisAnalysisResult,
+    VerifiedSynthesisResult,
     compute_synthesis_result_fingerprint,
     validate_synthesis_output,
 )
 from app.analysis.synthesis.errors import (
+    SynthesisAnalysisError,
     SynthesisAnalysisInputError,
     SynthesisAnalysisMalformedOutput,
+    SynthesisAnalysisModelUnavailable,
     SynthesisAnalysisPersistenceFailed,
+    SynthesisAnalysisResultNotFound,
     SynthesisAnalysisRunNotFound,
+    SynthesisResultIntegrityError,
 )
 from app.analysis.synthesis.model import SynthesisAnalysisModel
 from app.analysis.synthesis.packs import SynthesisClaimPack, build_claim_pack
@@ -84,14 +89,19 @@ class SynthesisAnalysisService:
     def __init__(
         self,
         sessionmaker: async_sessionmaker,
-        model: SynthesisAnalysisModel,
+        model: SynthesisAnalysisModel | None = None,
     ) -> None:
+        """model 可选：`analyze` 需要模型，`verify_result_integrity` 不需要
+        （Stage 5A ReportOutline 是 0 LLM 派生，只消费已验证结果）。
+        """
         self._sessionmaker = sessionmaker
         self._model = model
         # read-side integrity（Gate 0）委托 SynthesisService 公共 API，不复制规则。
         self._synthesis = SynthesisService(sessionmaker)
 
     async def analyze(self, request: SynthesisAnalysisRequest) -> SynthesisAnalysisResult:
+        if self._model is None:
+            raise SynthesisAnalysisModelUnavailable()
         # 1. 防御性 request 校验（构造已校验，服务层再兜底）。
         self._check_request(request)
 
@@ -153,6 +163,99 @@ class SynthesisAnalysisService:
             result_fingerprint=row.result_fingerprint,
             replayed=not was_created,
             claim_count=len(loaded.claims),
+        )
+
+    # ------------------------------------------------- public read-side verify (Stage 5A)
+
+    async def verify_result_integrity(self, synthesis_result_id: UUID) -> VerifiedSynthesisResult:
+        """公共 read-side 完整性校验（Stage 5A：ReportOutline 的 verified 输入）。
+
+        短 DB session 加载 result 行 + `verify_synthesis_integrity`（read-side
+        公共 API，**不复制** SynthesisRun replay 规则）→ 关闭 session → 纯函数
+        路径：result schema / analyst 身份 / payload 解析 / resolved claim IDs
+        全属 exact input set（复用 `validate_synthesis_output` 的 no-cherry-
+        picking 边界）/ 重算 result_fingerprint。任一损坏 →
+        `SynthesisResultIntegrityError`，**不自动 repair**；result 缺失 →
+        `SynthesisAnalysisResultNotFound`。**不调用模型**（0 LLM）。
+        """
+        async with self._sessionmaker() as session:
+            row = await ClaimSynthesisResultRepository(session).get_by_id(synthesis_result_id)
+            if row is None:
+                raise SynthesisAnalysisResultNotFound()
+            try:
+                verified_run = await self._synthesis.verify_synthesis_integrity(
+                    session, row.synthesis_id
+                )
+            except SynthesisRunNotFound:
+                raise SynthesisAnalysisRunNotFound() from None
+            company = await session.get(CompanyModel, verified_run.company_id)
+            if company is None:
+                raise SynthesisIntegrityError("synthesis result company missing")
+            company_name = company.short_name or company.official_name
+
+        # ---- session 已关闭；以下纯函数路径 ----
+        if row.result_schema_version != SYNTHESIS_RESULT_SCHEMA_VERSION:
+            raise SynthesisResultIntegrityError("synthesis result schema version mismatch")
+        if (
+            row.analyst_name != SYNTHESIS_ANALYST_NAME
+            or row.analyst_version != SYNTHESIS_ANALYST_VERSION
+        ):
+            raise SynthesisResultIntegrityError("synthesis result analyst identity mismatch")
+
+        try:
+            output = SynthesisAnalysisOutput.model_validate(
+                {
+                    "summary": row.summary,
+                    "themes": row.themes,
+                    "claim_roles": row.claim_roles,
+                    "duplicates": row.duplicates,
+                    "conflicts": row.conflicts,
+                    "evidence_gaps": row.evidence_gaps,
+                }
+            )
+        except ValidationError:
+            raise SynthesisResultIntegrityError(
+                "synthesis result payload failed schema validation"
+            ) from None
+
+        claim_pack = build_claim_pack(
+            research_question=verified_run.research_question,
+            analysis_as_of=verified_run.analysis_as_of,
+            company_name=company_name,
+            claims=verified_run.verified_claims,
+        )
+        alias_map = claim_pack.alias_map()
+        try:
+            validate_synthesis_output(output, list(alias_map.keys()))
+        except SynthesisAnalysisError:
+            # 全部 C refs 已知 + claim_roles 恰好覆盖每条 input Claim。
+            raise SynthesisResultIntegrityError(
+                "synthesis result refs no longer cover the exact input claim set"
+            ) from None
+
+        recomputed = compute_synthesis_result_fingerprint(
+            result_schema_version=row.result_schema_version,
+            synthesis_fingerprint=verified_run.synthesis_fingerprint,
+            analyst_name=row.analyst_name,
+            analyst_version=row.analyst_version,
+            analyst_model_id=row.analyst_model_id,
+            output=output,
+        )
+        if recomputed != row.result_fingerprint:
+            raise SynthesisResultIntegrityError("synthesis result fingerprint mismatch")
+
+        return VerifiedSynthesisResult(
+            synthesis_result_id=row.synthesis_result_id,
+            synthesis_id=row.synthesis_id,
+            company_id=verified_run.company_id,
+            research_question=verified_run.research_question,
+            research_question_sha256=verified_run.research_question_sha256,
+            analysis_as_of=verified_run.analysis_as_of,
+            synthesis_fingerprint=verified_run.synthesis_fingerprint,
+            result_fingerprint=row.result_fingerprint,
+            input_claim_ids=tuple(claim.claim_id for claim in verified_run.verified_claims),
+            alias_map=alias_map,
+            output=output,
         )
 
     # ------------------------------------------------------------------ 内部

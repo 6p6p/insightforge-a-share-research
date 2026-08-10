@@ -840,11 +840,16 @@ async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_outlines','draft_sections','reports')"
+                    "('draft_sections','reports')"
                 )
             )
         ).scalar_one()
     assert int(stage5) == 0
+    # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+    outline_rows = (
+        await session.execute(text("SELECT count(*) FROM report_outlines"))
+    ).scalar_one()
+    assert int(outline_rows) == 0
     service = SynthesisService(env["sessionmaker"])
     # 只持有 sessionmaker + integrity gateway（无 LLM / 无 LangGraph / 无 storage 副作用）。
     assert list(service.__dict__.keys()) == ["_sessionmaker", "_gateway"]

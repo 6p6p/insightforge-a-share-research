@@ -286,6 +286,34 @@ class SynthesisAnalysisResult:
     claim_count: int
 
 
+@dataclass(frozen=True)
+class VerifiedSynthesisResult:
+    """经 `verify_result_integrity` 完整校验后的 SynthesisResult 投影（不可变）。
+
+    Stage 5A：ReportOutlineService 的 **verified immutable input**——消费方只
+    消费本投影派生提纲，**不复制** SynthesisRun replay 规则 / 不重复实现
+    integrity 校验。校验覆盖：run 完整 + result schema + analyst 身份 + payload
+    可解析 + resolved claim IDs 全属 exact input set + 重算 result_fingerprint
+    一致；任一损坏 → `SynthesisResultIntegrityError`（**不自动 repair**）。
+
+    - input_claim_ids：exact input set（canonical 排序，与 fingerprint 一致）；
+    - alias_map：C alias → 真实 claim_id（LLM 输出的 C 编号解析回 UUID）；
+    - output：从 persisted JSONB 重新解析并完整校验的 `SynthesisAnalysisOutput`。
+    """
+
+    synthesis_result_id: UUID
+    synthesis_id: UUID
+    company_id: UUID
+    research_question: str
+    research_question_sha256: str
+    analysis_as_of: date
+    synthesis_fingerprint: str
+    result_fingerprint: str
+    input_claim_ids: tuple[UUID, ...]
+    alias_map: dict[str, UUID]
+    output: SynthesisAnalysisOutput
+
+
 def validate_synthesis_output(
     output: SynthesisAnalysisOutput,
     claim_refs: list[str],

@@ -85,9 +85,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("now()"),
         ),
-        sa.PrimaryKeyConstraint(
-            "synthesis_result_id", name="pk_claim_synthesis_results"
-        ),
+        sa.PrimaryKeyConstraint("synthesis_result_id", name="pk_claim_synthesis_results"),
         sa.CheckConstraint(
             "result_schema_version >= 1",
             name="ck_claim_synthesis_results_schema_version",

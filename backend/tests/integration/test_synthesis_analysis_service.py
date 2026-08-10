@@ -365,8 +365,7 @@ async def test_tampered_cutoff_rejected_zero_model_calls(env, monkeypatch) -> No
     async with env["sessionmaker"]() as session:
         await session.execute(
             text(
-                "UPDATE claim_synthesis_runs SET analysis_as_of = :c "
-                "WHERE synthesis_id = :sid"
+                "UPDATE claim_synthesis_runs SET analysis_as_of = :c WHERE synthesis_id = :sid"
             ).bindparams(c=date(2026, 8, 20), sid=request.synthesis_id)
         )
         await session.commit()
@@ -455,7 +454,12 @@ async def test_boundary_no_stage5_service_holds_only_deps(env, monkeypatch) -> N
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('reports', 'report_outlines', 'draft_sections', 'audits')"
+                "('reports', 'draft_sections', 'audits')"
             )
         )
         assert result.scalars().all() == []
+        # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+        outline_rows = (
+            await session.execute(text("SELECT count(*) FROM report_outlines"))
+        ).scalar_one()
+        assert int(outline_rows) == 0

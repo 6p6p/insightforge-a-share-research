@@ -685,12 +685,17 @@ async def test_create_card_creates_no_stage5_report_tables(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' "
-                    "AND table_name IN ('report_outlines','report_sections',"
+                    "AND table_name IN ('report_sections',"
                     "'reports','review_issues')"
                 )
             )
         ).scalar_one()
         assert extra_tables == 0
+        # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+        outline_rows = (
+            await session.execute(text("SELECT count(*) FROM report_outlines"))
+        ).scalar_one()
+        assert int(outline_rows) == 0
         # 0 vector manifest（不触发任何 index / Chroma 写入）。
         manifests = (
             await session.execute(text("SELECT count(*) FROM chunk_vector_indexes"))

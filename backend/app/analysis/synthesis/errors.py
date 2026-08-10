@@ -35,6 +35,30 @@ class SynthesisAnalysisRunNotFound(SynthesisAnalysisError):
     message = "synthesis run not found"
 
 
+class SynthesisAnalysisResultNotFound(SynthesisAnalysisError):
+    """verify_result_integrity 引用的 SynthesisResult 在 PG 中不存在。
+
+    Stage 5A：ReportOutline 只接受已登记的综合结果；result 缺失 → 拒绝派生
+    提纲（不猜结果 / 不自动创建）。"""
+
+    code = "synthesis_analysis_result_not_found"
+    message = "synthesis result not found"
+
+
+class SynthesisResultIntegrityError(SynthesisAnalysisError):
+    """已登记 SynthesisResult 的 read-side 完整性校验失败（Stage 5A）。
+
+    verify_result_integrity 校验：run 完整（委托 verify_synthesis_integrity）、
+    result schema / analyst 身份与当前常量一致、payload 可解析、
+    resolved claim IDs 全属 exact input set、重算 result_fingerprint 与
+    persisted 一致；任一损坏抛此错误，**不自动 repair**（结果不可变，损坏 =
+    数据被篡改 → 拒绝派生提纲）。
+    """
+
+    code = "synthesis_result_integrity_error"
+    message = "synthesis result integrity error"
+
+
 class SynthesisAnalysisMalformedOutput(SynthesisAnalysisError):
     """模型返回的结构化输出不符合 SynthesisAnalysisOutput schema。
 
