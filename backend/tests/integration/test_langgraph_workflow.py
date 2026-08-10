@@ -203,14 +203,14 @@ async def test_full_simulation_persists_and_recovers(
     finally:
         await manager2.close()
 
-    # 不创建业务表（'sources'/'evidence'/'reports'/'report' 是模拟工作流
-    # 不存在的假领域表；'claims' 是 Stage 4A 真实表，不在这里约束）。
+    # 不创建业务表（'sources'/'evidence'/'report' 是模拟工作流不存在的假领域表；
+    # 'claims' 是 Stage 4A 真实表、'reports' 是 Stage 5C 真实表，都不在这里约束）。
     async with sessionmaker() as session:
         result = await session.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('sources','evidence','reports','report')"
+                "('sources','evidence','report')"
             )
         )
         assert result.scalar_one_or_none() is None

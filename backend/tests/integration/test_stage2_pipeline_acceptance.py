@@ -101,11 +101,12 @@ _REAL_CLIENT_INIT = WorldBankClient.__init__
 
 # Stage 3 各子阶段合法存在的表不属于"尚不允许"之列：chunk_sets /
 # document_chunks（3A）、chunk_vector_indexes（3B）、evidence_cards（3C.1）、
-# claims / claim_evidence_links（4A）。Stage 5 其余 report 表仍未实现，必须不存在；
-# report_outlines（Stage 5A，migration 0032）已存在但本阶段不写行。
-# 用精确阶段边界名（report_sections / reports / review_issues），
+# claims / claim_evidence_links（4A）。Stage 5D+ report 表仍未实现，必须不存在；
+# Stage 5A/5B/5C 表（report_outlines / draft_sections / reports /
+# report_check_results）已存在但本阶段不写行。
+# 用精确阶段边界名（report_sections / review_issues），
 # 避免用 "Stage 4 tables must not exist" 这种以后会过期的名字。
-_STAGE5_TABLES = ("report_sections", "reports", "review_issues")
+_STAGE5_TABLES = ("report_sections", "review_issues")
 
 
 class FakeResolver(HostResolver):
@@ -587,8 +588,9 @@ async def test_macro_pipeline_e2e(env, monkeypatch) -> None:
 
 
 async def test_no_stage5_report_tables(env) -> None:
-    """Stage 5 其余 report 表必须不存在（report_sections / reports /
-    review_issues）；report_outlines（Stage 5A 表）存在但本阶段不写行。
+    """Stage 5D+ report 表必须不存在（report_sections / review_issues）；
+    Stage 5A/5B/5C 表（report_outlines / draft_sections / reports /
+    report_check_results）存在但本阶段不写行。
     Stage 4 claims / claim_evidence_links 允许存在（由 4A 引入），不在这里约束。"""
     async with env["sessionmaker"]() as session:
         for table in _STAGE5_TABLES:
@@ -599,3 +601,11 @@ async def test_no_stage5_report_tables(env) -> None:
             await session.execute(text("SELECT count(*) FROM report_outlines"))
         ).scalar_one()
         assert int(outline_rows) == 0
+        # Stage 5C 的 reports / report_check_results（migration 0034）已存在，
+        # 但本阶段不写行。
+        report_rows = (await session.execute(text("SELECT count(*) FROM reports"))).scalar_one()
+        assert int(report_rows) == 0
+        check_rows = (
+            await session.execute(text("SELECT count(*) FROM report_check_results"))
+        ).scalar_one()
+        assert int(check_rows) == 0

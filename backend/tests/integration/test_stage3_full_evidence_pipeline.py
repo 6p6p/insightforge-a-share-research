@@ -445,8 +445,8 @@ async def test_pdf_full_pipeline_source_to_evidence_card(env, chroma_manager) ->
 
 async def test_full_pipeline_creates_no_stage5_report_tables(env, chroma_manager) -> None:
     """Stage 边界：Stage 3 full-chain 只产出 evidence_cards，不产生 Stage 5
-    report 表（report_outlines/report_sections/reports/review_issues）。Stage 4
-    claims 表由 Stage 4A 单独引入，不在这里约束（用精确阶段边界名，避免以后过期）。"""
+    report 表（Stage 5D+ 的 report_sections/review_issues）。Stage 4 claims 表
+    由 Stage 4A 单独引入，不在这里约束（用精确阶段边界名，避免以后过期）。"""
     collection_name = f"test_fullchain_boundary_{uuid4().hex[:12]}"
     index, _ = _index_retrieval(env, chroma_manager, collection_name)
     client = await chroma_manager.get_client()
@@ -460,16 +460,22 @@ async def test_full_pipeline_creates_no_stage5_report_tables(env, chroma_manager
                         "SELECT count(*) FROM information_schema.tables "
                         "WHERE table_schema='public' "
                         "AND table_name IN ('report_sections',"
-                        "'reports','review_issues')"
+                        "'review_issues')"
                     )
                 )
             ).scalar_one()
             assert extra == 0
-            # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+            # Stage 5A/5B/5C 表已存在（migration 0032/0033/0034），但本阶段不写行。
             outline_rows = (
                 await session.execute(text("SELECT count(*) FROM report_outlines"))
             ).scalar_one()
             assert int(outline_rows) == 0
+            report_rows = (await session.execute(text("SELECT count(*) FROM reports"))).scalar_one()
+            assert int(report_rows) == 0
+            check_rows = (
+                await session.execute(text("SELECT count(*) FROM report_check_results"))
+            ).scalar_one()
+            assert int(check_rows) == 0
     finally:
         await client.delete_collection(collection_name)
     assert src is not None

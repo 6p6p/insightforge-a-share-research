@@ -1339,16 +1339,22 @@ async def test_macro_claim_boundary_no_stage5_tables(env, monkeypatch) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','reports','review_issues')"
+                    "('report_sections','review_issues')"
                 )
             )
         ).scalar_one()
         assert stage5_tables == 0
-        # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+        # Stage 5A/5B/5C 表已存在（migration 0032/0033/0034），但本阶段不写行。
         outline_rows = (
             await session.execute(text("SELECT count(*) FROM report_outlines"))
         ).scalar_one()
         assert int(outline_rows) == 0
+        report_rows = (await session.execute(text("SELECT count(*) FROM reports"))).scalar_one()
+        assert int(report_rows) == 0
+        check_rows = (
+            await session.execute(text("SELECT count(*) FROM report_check_results"))
+        ).scalar_one()
+        assert int(check_rows) == 0
 
 
 async def test_macro_claim_service_takes_only_sessionmaker(env, monkeypatch) -> None:

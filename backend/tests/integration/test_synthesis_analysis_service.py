@@ -448,19 +448,26 @@ async def test_boundary_no_stage5_service_holds_only_deps(env, monkeypatch) -> N
     )
     # read-side integrity 委托 SynthesisService，不复制 replay 规则。
     assert list(vars(service).keys()) == ["_sessionmaker", "_model", "_synthesis"]
-    # 无 Stage 5C/5D 表（reports / audits 等）；Stage 5A/5B 表
-    # （report_outlines / draft_sections，migration 0032/0033）允许存在。
+    # 无 Stage 5D+ 表（audits / report_sections / review_issues）；Stage 5A/5B/5C
+    # 表（report_outlines / draft_sections / reports / report_check_results，
+    # migration 0032/0033/0034）允许存在。
     async with env["sessionmaker"]() as session:
         result = await session.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('reports', 'audits', 'report_sections', 'review_issues')"
+                "('audits', 'report_sections', 'review_issues')"
             )
         )
         assert result.scalars().all() == []
-        # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+        # Stage 5A/5B/5C 表已存在（migration 0032/0033/0034），但本阶段不写行。
         outline_rows = (
             await session.execute(text("SELECT count(*) FROM report_outlines"))
         ).scalar_one()
         assert int(outline_rows) == 0
+        report_rows = (await session.execute(text("SELECT count(*) FROM reports"))).scalar_one()
+        assert int(report_rows) == 0
+        check_rows = (
+            await session.execute(text("SELECT count(*) FROM report_check_results"))
+        ).scalar_one()
+        assert int(check_rows) == 0

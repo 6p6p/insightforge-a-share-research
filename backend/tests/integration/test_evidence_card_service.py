@@ -672,9 +672,10 @@ async def test_missing_chunk_set_row_raises_provenance_integrity_error(env) -> N
 async def test_create_card_creates_no_stage5_report_tables(env) -> None:
     """Stage 边界：EvidenceCard 不产生 Stage 5 report 表。
 
-    report_outlines / report_sections / reports / review_issues 是 Stage 5 表。
-    Stage 4 claims 表由 Stage 4A 单独引入，不在这里约束（精确阶段边界名，
-    避免以后过期）。
+    Stage 5D+ 的 report_sections / review_issues 仍是 Stage 5 表；Stage 5A/5B/5C
+    表（report_outlines / draft_sections / reports / report_check_results）已存在
+    但本阶段不写行。Stage 4 claims 表由 Stage 4A 单独引入，不在这里约束
+    （精确阶段边界名，避免以后过期）。
     """
     _, _, _, chunks = await _seed_html_source(env)
     chunk = chunks[0]
@@ -686,16 +687,22 @@ async def test_create_card_creates_no_stage5_report_tables(env) -> None:
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' "
                     "AND table_name IN ('report_sections',"
-                    "'reports','review_issues')"
+                    "'review_issues')"
                 )
             )
         ).scalar_one()
         assert extra_tables == 0
-        # Stage 5A 的 report_outlines 表已存在（migration 0032），但本阶段不写行。
+        # Stage 5A/5B/5C 表已存在（migration 0032/0033/0034），但本阶段不写行。
         outline_rows = (
             await session.execute(text("SELECT count(*) FROM report_outlines"))
         ).scalar_one()
         assert int(outline_rows) == 0
+        report_rows = (await session.execute(text("SELECT count(*) FROM reports"))).scalar_one()
+        assert int(report_rows) == 0
+        check_rows = (
+            await session.execute(text("SELECT count(*) FROM report_check_results"))
+        ).scalar_one()
+        assert int(check_rows) == 0
         # 0 vector manifest（不触发任何 index / Chroma 写入）。
         manifests = (
             await session.execute(text("SELECT count(*) FROM chunk_vector_indexes"))

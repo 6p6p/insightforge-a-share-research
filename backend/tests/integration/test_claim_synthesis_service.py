@@ -835,14 +835,15 @@ async def test_cross_domain_e2e_single_run_replay(four_claims) -> None:
 
 async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
     async with env["sessionmaker"]() as session:
-        # Stage 5C/5D 表（reports / audits / report_sections / review_issues）不得存在；
-        # Stage 5A/5B 表（report_outlines / draft_sections，migration 0032/0033）允许存在。
+        # Stage 5D+ 表（audits / report_sections / review_issues）不得存在；
+        # Stage 5A/5B/5C 表（report_outlines / draft_sections / reports /
+        # report_check_results，migration 0032/0033/0034）允许存在。
         stage5 = (
             await session.execute(
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('reports','audits','report_sections','review_issues')"
+                    "('audits','report_sections','review_issues')"
                 )
             )
         ).scalar_one()
@@ -852,6 +853,14 @@ async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
         await session.execute(text("SELECT count(*) FROM report_outlines"))
     ).scalar_one()
     assert int(outline_rows) == 0
+    # Stage 5C 的 reports / report_check_results 表已存在（migration 0034），
+    # 但本阶段不写行。
+    report_rows = (await session.execute(text("SELECT count(*) FROM reports"))).scalar_one()
+    assert int(report_rows) == 0
+    check_rows = (
+        await session.execute(text("SELECT count(*) FROM report_check_results"))
+    ).scalar_one()
+    assert int(check_rows) == 0
     service = SynthesisService(env["sessionmaker"])
     # 只持有 sessionmaker + integrity gateway（无 LLM / 无 LangGraph / 无 storage 副作用）。
     assert list(service.__dict__.keys()) == ["_sessionmaker", "_gateway"]
