@@ -18,6 +18,16 @@ class ReportOutlineError(Exception):
         super().__init__(message if message is not None else self.message)
 
 
+class ReportOutlineNotFound(ReportOutlineError):
+    """verify_outline_integrity 引用的 Outline 在 PG 中不存在。
+
+    Writer 只消费已登记的提纲；outline 缺失 → 拒绝起草（不猜提纲 / 不自动
+    创建）。"""
+
+    code = "report_outline_not_found"
+    message = "report outline not found"
+
+
 class ReportOutlineClaimCoverageError(ReportOutlineError):
     """input Claims 未被提纲覆盖（既不在任何 theme section，也不是 duplicate_ref）。
 

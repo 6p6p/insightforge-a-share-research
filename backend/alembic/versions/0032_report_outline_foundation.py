@@ -26,9 +26,9 @@ version）。提纲不是 Report / DraftSection / Audit 正文。
    新提纲（旧行保留，无 update API）；
 7. `created_at` now()。
 
-**downgrade**：直接 drop（提纲是确定性派生数据，可由 synthesis result 重放，
-不需要 0029 那样的不可重放数据保护；注册的 synthesis result 仍在
-claim_synthesis_results）。
+**downgrade guard**：`report_outlines` 存在任何行 → 拒绝回滚。ReportOutline 是
+正式 immutable research artifact（即使可确定性重放，也不在 downgrade 时静默
+删除历史）；alembic_version 保持 0032，数据保留。全部为空时才允许回到 0031。
 """
 
 from collections.abc import Sequence
@@ -46,6 +46,12 @@ depends_on: str | Sequence[str] | None = None
 _TABLE = "report_outlines"
 
 _SHA256_CHECK = "~ '^[0-9a-f]{64}$'"
+
+
+def _table_has_row(table: str) -> bool:
+    bind = op.get_bind()
+    rows = bind.execute(sa.text(f"SELECT 1 FROM {table} LIMIT 1"))
+    return rows.first() is not None
 
 
 def upgrade() -> None:
@@ -112,5 +118,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 提纲是确定性派生数据，可由 synthesis result 重放 → 直接 drop 安全。
+    # 数据安全：ReportOutline 是正式 immutable research artifact，即使可确定性
+    # 重放，也不在 downgrade 时静默删除历史。存在任何行 → 拒绝回滚（不删除
+    # 数据 / 不修改行），alembic_version 保持 0032。全部为空时才允许回到 0031。
+    if _table_has_row(_TABLE):
+        raise RuntimeError(
+            "cannot downgrade migration 0032: "
+            f"rows present in {_TABLE}; refusing to drop registered report "
+            "outlines (alembic_version stays 0032)"
+        )
     op.drop_table(_TABLE)

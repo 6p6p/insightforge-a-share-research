@@ -38,9 +38,10 @@ from app.report_outline.contracts import (
     SECTION_TYPE_RISKS_AND_GAPS,
     SECTION_TYPE_THEME,
     compute_outline_fingerprint,
+    parse_outline_sections,
 )
 from app.report_outline.derive import derive_outline_payload
-from app.report_outline.errors import ReportOutlineClaimCoverageError
+from app.report_outline.errors import ReportOutlineClaimCoverageError, ReportOutlineIntegrityError
 
 _QUESTION = "贵州茅台2026年营收与估值是否合理？"
 _AS_OF = date(2026, 8, 10)
@@ -292,3 +293,71 @@ def test_outline_fingerprint_sensitive_to_derived_fields() -> None:
     assert changed_company != fp
     changed_cutoff = compute_outline_fingerprint(**{**base, "analysis_as_of": date(2026, 8, 11)})
     assert changed_cutoff != fp
+
+
+# ---------------------------------------------------------------- parse_outline_sections
+
+
+def _section(
+    *,
+    section_id: str = "S1",
+    order: int = 1,
+    section_type: str = SECTION_TYPE_THEME,
+    title: str = "营收增长",
+    claim_ids: list[str] | None = None,
+    conflict_indexes: list[int] | None = None,
+    evidence_gap_indexes: list[int] | None = None,
+) -> dict:
+    return {
+        "section_id": section_id,
+        "section_order": order,
+        "section_type": section_type,
+        "title": title,
+        "claim_ids": claim_ids or [],
+        "conflict_indexes": conflict_indexes or [],
+        "evidence_gap_indexes": evidence_gap_indexes or [],
+    }
+
+
+def test_parse_outline_sections_valid() -> None:
+    claim_ids = [str(uuid4()), str(uuid4())]
+    payload = {
+        "sections": [
+            _section(claim_ids=claim_ids),
+            _section(
+                section_id="S2",
+                order=2,
+                section_type=SECTION_TYPE_RISKS_AND_GAPS,
+                title=OUTLINE_RISKS_AND_GAPS_TITLE,
+                conflict_indexes=[0],
+                evidence_gap_indexes=[0, 1],
+            ),
+        ]
+    }
+    sections = parse_outline_sections(payload)
+
+    assert len(sections) == 2
+    assert sections[0].section_id == "S1"
+    assert sections[0].section_type == SECTION_TYPE_THEME
+    assert sections[0].claim_ids == tuple(UUID(cid) for cid in claim_ids)
+    assert sections[0].conflict_indexes == ()
+    assert sections[1].claim_ids == ()
+    assert sections[1].conflict_indexes == (0,)
+    assert sections[1].evidence_gap_indexes == (0, 1)
+
+
+def test_parse_outline_sections_rejects_empty_sections() -> None:
+    with pytest.raises(ReportOutlineIntegrityError):
+        parse_outline_sections({"sections": []})
+
+
+def test_parse_outline_sections_rejects_invalid_claim_id() -> None:
+    payload = {"sections": [_section(claim_ids=["not-a-uuid"])]}
+    with pytest.raises(ReportOutlineIntegrityError):
+        parse_outline_sections(payload)
+
+
+def test_parse_outline_sections_rejects_invalid_section() -> None:
+    payload = {"sections": [{"section_id": "S1"}]}  # 缺 section_order/title 等
+    with pytest.raises(ReportOutlineIntegrityError):
+        parse_outline_sections(payload)

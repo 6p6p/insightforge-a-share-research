@@ -15,6 +15,7 @@
   SynthesisResultIntegrityError（verify_result_integrity 拒，0 行 outline）。
 """
 
+import json
 from uuid import UUID, uuid4
 
 import pytest
@@ -30,6 +31,7 @@ from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
 from app.report_outline.contracts import REPORT_OUTLINE_SCHEMA_VERSION
+from app.report_outline.errors import ReportOutlineIntegrityError, ReportOutlineNotFound
 from app.report_outline.service import ReportOutlineService
 from app.services.source_registry_service import SourceRegistryService
 from app.stage4.runner import Stage4WorkflowRunner
@@ -260,3 +262,143 @@ async def test_create_outline_rejects_tampered_result_schema_version(
     service = ReportOutlineService(env["sessionmaker"])
     with pytest.raises(SynthesisResultIntegrityError):
         await service.create_or_get_outline(synthesis_result_id)
+
+
+# ------------------------------------------------ verify_outline_integrity (Stage 5B)
+
+
+async def _create_outline(env, monkeypatch, connection_uri) -> UUID:
+    """完整 Stage4 → result → outline，返回 outline_id。"""
+    synthesis_result_id = await _run_stage4_to_result(env, monkeypatch, connection_uri)
+    service = ReportOutlineService(env["sessionmaker"])
+    outline = await service.create_or_get_outline(synthesis_result_id)
+    return outline.outline_id
+
+
+async def _tamper_outline(env, outline_id: UUID, sql: str, **params) -> None:
+    async with env["sessionmaker"]() as session:
+        await session.execute(text(sql).bindparams(**params))
+        await session.commit()
+
+
+async def test_verify_outline_integrity_valid_passes(env, monkeypatch, connection_uri) -> None:
+    """有效 outline → verify_outline_integrity 返回 VerifiedReportOutline。"""
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    service = ReportOutlineService(env["sessionmaker"])
+
+    verified = await service.verify_outline_integrity(outline_id)
+
+    assert verified.outline_id == outline_id
+    assert verified.outline_schema_version == REPORT_OUTLINE_SCHEMA_VERSION
+    assert len(verified.outline_fingerprint) == 64
+    assert len(verified.research_question_sha256) == 64
+    assert verified.company_id == env["company_id"]
+    # sections 从重派生 payload 解析：theme + risks_and_gaps。
+    assert [s.section_type for s in verified.sections] == ["theme", "risks_and_gaps"]
+    assert [s.section_order for s in verified.sections] == [1, 2]
+    theme = verified.sections[0]
+    assert theme.claim_ids  # 5 claims（无 duplicate）
+    assert all(isinstance(cid, UUID) for cid in theme.claim_ids)
+    gaps = verified.sections[1]
+    assert gaps.claim_ids == ()
+    assert gaps.conflict_indexes == ()
+    assert gaps.evidence_gap_indexes == (0,)
+    # 携带已验证上游结果（Writer 恢复 risks_and_gaps 用）。
+    assert verified.verified_synthesis_result.synthesis_result_id is not None
+    assert verified.verified_synthesis_result.output.themes
+
+
+async def test_verify_outline_integrity_missing_rejected(env) -> None:
+    service = ReportOutlineService(env["sessionmaker"])
+    with pytest.raises(ReportOutlineNotFound):
+        await service.verify_outline_integrity(uuid4())
+
+
+async def test_verify_outline_integrity_rejects_tampered_payload(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    # SQL 篡改 outline_payload（标题改掉）→ 重派生对比不一致 → 拒绝。
+    await _tamper_outline(
+        env,
+        outline_id,
+        "UPDATE report_outlines SET outline_payload = CAST(:payload AS jsonb) "
+        "WHERE outline_id = :oid",
+        payload=json.dumps({"sections": [{"section_id": "S1", "title": "被篡改"}]}),
+        oid=outline_id,
+    )
+    service = ReportOutlineService(env["sessionmaker"])
+    with pytest.raises(ReportOutlineIntegrityError) as excinfo:
+        await service.verify_outline_integrity(outline_id)
+    assert excinfo.value.code == "report_outline_integrity_error"
+
+
+async def test_verify_outline_integrity_rejects_tampered_company(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    # company_id 改为真实存在的 peer company（满足 FK）→ 重派生不一致 → 拒绝。
+    peer_id = env["peer_company_ids"][0]
+    await _tamper_outline(
+        env,
+        outline_id,
+        "UPDATE report_outlines SET company_id = CAST(:cid AS uuid) WHERE outline_id = :oid",
+        cid=peer_id,
+        oid=outline_id,
+    )
+    service = ReportOutlineService(env["sessionmaker"])
+    with pytest.raises(ReportOutlineIntegrityError):
+        await service.verify_outline_integrity(outline_id)
+
+
+async def test_verify_outline_integrity_rejects_tampered_cutoff(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    # analysis_as_of 篡改（cutoff 不是派生自 result 的值）→ 拒绝。
+    await _tamper_outline(
+        env,
+        outline_id,
+        "UPDATE report_outlines SET analysis_as_of = CAST(:asof AS date) WHERE outline_id = :oid",
+        asof="2026-08-01",
+        oid=outline_id,
+    )
+    service = ReportOutlineService(env["sessionmaker"])
+    with pytest.raises(ReportOutlineIntegrityError):
+        await service.verify_outline_integrity(outline_id)
+
+
+async def test_verify_outline_integrity_rejects_tampered_fingerprint(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    await _tamper_outline(
+        env,
+        outline_id,
+        "UPDATE report_outlines SET outline_fingerprint = :fp WHERE outline_id = :oid",
+        fp="f" * 64,
+        oid=outline_id,
+    )
+    service = ReportOutlineService(env["sessionmaker"])
+    with pytest.raises(ReportOutlineIntegrityError):
+        await service.verify_outline_integrity(outline_id)
+
+
+async def test_verify_outline_integrity_rejects_tampered_upstream_result(
+    env, monkeypatch, connection_uri
+) -> None:
+    outline_id = await _create_outline(env, monkeypatch, connection_uri)
+    # 上游 SynthesisResult 被篡改（result_fingerprint）→ verify_result_integrity
+    # 拒，verify_outline_integrity 原样传播 integrity 错误。
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE claim_synthesis_results SET result_fingerprint = :fp "
+                "WHERE synthesis_result_id = "
+                "(SELECT synthesis_result_id FROM report_outlines WHERE outline_id = :oid)"
+            ).bindparams(fp="f" * 64, oid=outline_id)
+        )
+        await session.commit()
+    service = ReportOutlineService(env["sessionmaker"])
+    with pytest.raises(SynthesisResultIntegrityError):
+        await service.verify_outline_integrity(outline_id)

@@ -32,11 +32,14 @@ from app.db.models.report_outline import ReportOutlineModel
 from app.report_outline.contracts import (
     REPORT_OUTLINE_SCHEMA_VERSION,
     ReportOutlineResult,
+    VerifiedReportOutline,
     compute_outline_fingerprint,
+    parse_outline_sections,
 )
 from app.report_outline.derive import derive_outline_payload
 from app.report_outline.errors import (
     ReportOutlineIntegrityError,
+    ReportOutlineNotFound,
     ReportOutlinePersistenceFailed,
 )
 from app.report_outline.repository import ReportOutlineRepository
@@ -86,6 +89,75 @@ class ReportOutlineService:
             outline_fingerprint=row.outline_fingerprint,
             replayed=not was_created,
             section_count=len(payload["sections"]),
+        )
+
+    # ------------------------------------------- public read-side verify (Stage 5B)
+
+    async def verify_outline_integrity(self, outline_id: UUID) -> VerifiedReportOutline:
+        """公共 read-only 完整性校验（Stage 5B：Writer 的 verified 输入）。
+
+        流程（短 DB session + 纯函数，**0 LLM / 0 写**）：
+        1. 短 session 加载 ReportOutline 行；缺失 → `ReportOutlineNotFound`；
+        2. 关闭 session → `SynthesisAnalysisService.verify_result_integrity`
+           （read-side 公共 API，**不复制** replay 逻辑）→ 上游 result 损坏 →
+           `SynthesisResultIntegrityError`（不自动 repair）；
+        3. 纯函数重派生 `derive_outline_payload` + 重算 `compute_outline_fingerprint`；
+        4. 与 persisted 7 字段逐一对比（synthesis_result_id / company_id /
+           research_question_sha256 / analysis_as_of / outline_schema_version /
+           outline_payload / outline_fingerprint），任一不同 →
+           `ReportOutlineIntegrityError`；
+        5. 从**重派生** payload 解析 `OutlineSection`（等于 persisted 才通过）。
+
+        返回 `VerifiedReportOutline`（含 `verified_synthesis_result`）。**不 repair /
+        不 update**——Writer 只消费本投影，不直接相信 `outline_payload`。
+        """
+        async with self._sessionmaker() as session:
+            row = await ReportOutlineRepository(session).get_by_id(outline_id)
+            if row is None:
+                raise ReportOutlineNotFound()
+
+        verified = await self._synthesis_analysis.verify_result_integrity(row.synthesis_result_id)
+        payload = derive_outline_payload(verified)
+        fingerprint = compute_outline_fingerprint(
+            outline_schema_version=REPORT_OUTLINE_SCHEMA_VERSION,
+            synthesis_result_id=verified.synthesis_result_id,
+            synthesis_result_fingerprint=verified.result_fingerprint,
+            company_id=verified.company_id,
+            research_question_sha256=verified.research_question_sha256,
+            analysis_as_of=verified.analysis_as_of,
+            outline_payload=payload,
+        )
+        checks = [
+            (row.synthesis_result_id, verified.synthesis_result_id, "synthesis_result_id"),
+            (row.company_id, verified.company_id, "company_id"),
+            (
+                row.research_question_sha256,
+                verified.research_question_sha256,
+                "research_question_sha256",
+            ),
+            (row.analysis_as_of, verified.analysis_as_of, "analysis_as_of"),
+            (
+                row.outline_schema_version,
+                REPORT_OUTLINE_SCHEMA_VERSION,
+                "outline_schema_version",
+            ),
+            (row.outline_payload, payload, "outline_payload"),
+            (row.outline_fingerprint, fingerprint, "outline_fingerprint"),
+        ]
+        for actual, want, field in checks:
+            if actual != want:
+                raise ReportOutlineIntegrityError(f"report outline {field} mismatch")
+
+        return VerifiedReportOutline(
+            outline_id=row.outline_id,
+            synthesis_result_id=row.synthesis_result_id,
+            company_id=row.company_id,
+            research_question_sha256=row.research_question_sha256,
+            analysis_as_of=row.analysis_as_of,
+            outline_schema_version=row.outline_schema_version,
+            outline_fingerprint=row.outline_fingerprint,
+            sections=parse_outline_sections(payload),
+            verified_synthesis_result=verified,
         )
 
     # ------------------------------------------------------------------ 内部
