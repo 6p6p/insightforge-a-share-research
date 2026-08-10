@@ -26,6 +26,17 @@ class SynthesisDraftError(SynthesisError):
     message = "invalid claim synthesis draft"
 
 
+class SynthesisRunNotFound(SynthesisError):
+    """SynthesisRun 不存在（read-side：verify_synthesis_integrity 找不到 run）。
+
+    与 integrity 错误区分：run 从未登记是"调用方传错 id"，不是"已登记 run
+    被篡改"。消费方（SynthesisAnalysisService）映射为自身的 RunNotFound。
+    """
+
+    code = "synthesis_run_not_found"
+    message = "synthesis run not found"
+
+
 class SynthesisResearchQuestionMismatch(SynthesisError):
     """输入 Claim 的 research_question_sha256 与 synthesis draft 不一致。
 

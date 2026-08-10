@@ -20,6 +20,7 @@ SynthesisRun；综合分析经 SynthesisAnalysisService + FakeSynthesisAnalysisM
 """
 
 import json
+from datetime import date
 from uuid import uuid4
 
 import pytest
@@ -342,6 +343,74 @@ async def test_corrupted_input_claim_rejected(env, monkeypatch) -> None:
         await service.analyze(SynthesisAnalysisRequest(synthesis_id=run.synthesis_id))
 
 
+# ---------------------------------------------------------------- Gate 0 read-side integrity
+
+
+async def _seed_run(env, monkeypatch):
+    """seed 合法跨 domain run + 合法 Fake 输出，返回 (service, request, model)。"""
+    claim_ids = await _seed_cross_domain_claims(env, monkeypatch)
+    run = await SynthesisService(env["sessionmaker"]).create_or_get_synthesis(
+        _draft(env, claim_ids)
+    )
+    model = FakeSynthesisAnalysisModel(output=_valid_output())
+    service = SynthesisAnalysisService(env["sessionmaker"], model)
+    request = SynthesisAnalysisRequest(synthesis_id=run.synthesis_id)
+    return service, request, model
+
+
+async def test_tampered_cutoff_rejected_zero_model_calls(env, monkeypatch) -> None:
+    """SQL 篡改 run.analysis_as_of（fingerprint 不变）→ read-side 重算指纹不匹配
+    → 拒绝，LLM 一次都不调用。"""
+    service, request, model = await _seed_run(env, monkeypatch)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE claim_synthesis_runs SET analysis_as_of = :c "
+                "WHERE synthesis_id = :sid"
+            ).bindparams(c=date(2026, 8, 20), sid=request.synthesis_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisIntegrityError):
+        await service.analyze(request)
+    assert model.calls == []
+
+
+async def test_tampered_input_links_rejected_zero_model_calls(env, monkeypatch) -> None:
+    """SQL 篡改 input link set（删一条）→ claim set 变化 → 重算指纹不匹配
+    → 拒绝，LLM 一次都不调用。"""
+    service, request, model = await _seed_run(env, monkeypatch)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "DELETE FROM claim_synthesis_input_links "
+                "WHERE synthesis_id = :sid AND claim_id = ("
+                "SELECT claim_id FROM claim_synthesis_input_links "
+                "WHERE synthesis_id = :sid ORDER BY claim_id::text LIMIT 1)"
+            ).bindparams(sid=request.synthesis_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisIntegrityError):
+        await service.analyze(request)
+    assert model.calls == []
+
+
+async def test_tampered_fingerprint_rejected_zero_model_calls(env, monkeypatch) -> None:
+    """SQL 篡改 run.synthesis_fingerprint → 重算指纹 != persisted → 拒绝，
+    LLM 一次都不调用。"""
+    service, request, model = await _seed_run(env, monkeypatch)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE claim_synthesis_runs SET synthesis_fingerprint = :fp "
+                "WHERE synthesis_id = :sid"
+            ).bindparams(fp="f" * 64, sid=request.synthesis_id)
+        )
+        await session.commit()
+    with pytest.raises(SynthesisIntegrityError):
+        await service.analyze(request)
+    assert model.calls == []
+
+
 async def test_tampered_result_rejected_on_replay(env, monkeypatch) -> None:
     claim_ids = await _seed_cross_domain_claims(env, monkeypatch)
     run = await SynthesisService(env["sessionmaker"]).create_or_get_synthesis(
@@ -378,7 +447,8 @@ async def test_boundary_no_stage5_service_holds_only_deps(env, monkeypatch) -> N
     service = SynthesisAnalysisService(
         env["sessionmaker"], FakeSynthesisAnalysisModel(output=_valid_output())
     )
-    assert list(vars(service).keys()) == ["_sessionmaker", "_model", "_gateway"]
+    # read-side integrity 委托 SynthesisService，不复制 replay 规则。
+    assert list(vars(service).keys()) == ["_sessionmaker", "_model", "_synthesis"]
     # 无 Stage 5 report / draft / audit 表。
     async with env["sessionmaker"]() as session:
         result = await session.execute(

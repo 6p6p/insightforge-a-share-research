@@ -56,6 +56,7 @@ from app.synthesis.contracts import (
     SynthesisInputDraft,
     SynthesisInputSummary,
     VerifiedSynthesisClaim,
+    VerifiedSynthesisRun,
     build_synthesis_input_summary,
     compute_synthesis_fingerprint,
 )
@@ -66,6 +67,7 @@ from app.synthesis.errors import (
     SynthesisIntegrityError,
     SynthesisPersistenceFailed,
     SynthesisResearchQuestionMismatch,
+    SynthesisRunNotFound,
     SynthesisTemporalEvidenceInsufficient,
 )
 from app.synthesis.integrity import ClaimIntegrityGateway
@@ -104,7 +106,13 @@ class SynthesisService:
         """
         # 1. 短 DB session：加载 + gateway + 隔离 + temporal 校验（0 写）。
         async with self._sessionmaker() as session:
-            verified = await self._load_and_validate(session, draft, draft.claim_ids)
+            verified = await self._load_and_validate(
+                session,
+                company_id=draft.company_id,
+                research_question=draft.research_question,
+                analysis_as_of=draft.analysis_as_of,
+                claim_ids=draft.claim_ids,
+            )
 
         # 2-3. 关闭 session；纯函数派生（不持有 DB connection）。
         question_sha256 = compute_research_question_sha256(draft.research_question)
@@ -161,31 +169,91 @@ class SynthesisService:
             summary=summary,
         )
 
+    async def verify_synthesis_integrity(
+        self,
+        session: AsyncSession,
+        synthesis_id: UUID,
+    ) -> VerifiedSynthesisRun:
+        """公共 read-only：验证已登记 SynthesisRun 的完整 read-side integrity。
+
+        与 create/replay **完全同一 policy**（spec Gate 0）：
+        1. 重新加载 SynthesisRun（缺失 → SynthesisRunNotFound）；
+        2. 重新加载 input links → exact claim set（link 增删 → fingerprint
+           变化 → 拒绝）；
+        3. 逐 claim 经 ClaimIntegrityGateway 完整性校验（domain dispatch）；
+        4. 以 run 自身字段为预期重跑 company isolation / research-question
+           isolation / temporal no-lookahead / domain analysis cutoff；
+        5. 重新计算 synthesis_fingerprint 并与 persisted 比较。
+
+        任一损坏 → 稳定错误（SynthesisIntegrityError 或同族子类），**不自动
+        repair**。返回 VerifiedSynthesisRun（claim_ids canonical），消费方只
+        消费该投影，不复制 replay 规则。
+        """
+        run = await ClaimSynthesisRunRepository(session).get_by_id(synthesis_id)
+        if run is None:
+            raise SynthesisRunNotFound()
+        links = await ClaimSynthesisInputLinkRepository(session).list_by_synthesis(synthesis_id)
+        if not links:
+            raise SynthesisIntegrityError("synthesis run has no input links")
+        claim_ids = sorted((link.claim_id for link in links), key=str)
+        verified = await self._load_and_validate(
+            session,
+            company_id=run.company_id,
+            research_question=run.research_question,
+            analysis_as_of=run.analysis_as_of,
+            claim_ids=claim_ids,
+        )
+        question_sha256 = compute_research_question_sha256(run.research_question)
+        fingerprint = compute_synthesis_fingerprint(
+            synthesis_schema_version=CLAIM_SYNTHESIS_SCHEMA_VERSION,
+            company_id=run.company_id,
+            research_question=run.research_question,
+            research_question_sha256=question_sha256,
+            analysis_as_of=run.analysis_as_of,
+            claims=verified,
+        )
+        if fingerprint != run.synthesis_fingerprint:
+            raise SynthesisIntegrityError("synthesis run fingerprint mismatch")
+        return VerifiedSynthesisRun(
+            synthesis_id=run.synthesis_id,
+            company_id=run.company_id,
+            research_question=run.research_question,
+            research_question_sha256=question_sha256,
+            analysis_as_of=run.analysis_as_of,
+            synthesis_fingerprint=run.synthesis_fingerprint,
+            verified_claims=verified,
+        )
+
     # ------------------------------------------------------------------ 内部
 
     async def _load_and_validate(
         self,
         session: AsyncSession,
-        draft: SynthesisInputDraft,
+        *,
+        company_id: UUID,
+        research_question: str,
+        analysis_as_of: date,
         claim_ids: list[UUID],
     ) -> list[VerifiedSynthesisClaim]:
         """短 session 加载 + 完整校验（gateway / question / company / temporal）。
 
         逐 claim 校验其 domain provenance 完整性，再校验 research-question 与
         company 隔离（spec L/M），随后 temporal no-lookahead（spec O）。
+        create/replay 与 read-side verify（verify_synthesis_integrity）共用同一
+        policy：预期值由调用方显式给出（draft 字段或 run 自身字段）。
         """
         gateway = self._gateway
-        question_sha256 = compute_research_question_sha256(draft.research_question)
+        question_sha256 = compute_research_question_sha256(research_question)
         verified: list[VerifiedSynthesisClaim] = []
         for claim_id in claim_ids:
             claim = await gateway.verify_claim(session, claim_id)
             if claim.research_question_sha256 != question_sha256:
                 raise SynthesisResearchQuestionMismatch()
-            if claim.company_id != draft.company_id:
+            if claim.company_id != company_id:
                 raise SynthesisCompanyMismatch()
             verified.append(claim)
         verified.sort(key=lambda claim: str(claim.claim_id))
-        await self._check_temporal(session, verified, draft.analysis_as_of)
+        await self._check_temporal(session, verified, analysis_as_of)
         return verified
 
     async def _check_temporal(
@@ -305,7 +373,13 @@ class SynthesisService:
         if linked_claim_ids != draft.claim_ids:
             raise SynthesisIntegrityError("synthesis run claim set mismatch")
 
-        verified = await self._load_and_validate(session, draft, draft.claim_ids)
+        verified = await self._load_and_validate(
+            session,
+            company_id=draft.company_id,
+            research_question=draft.research_question,
+            analysis_as_of=draft.analysis_as_of,
+            claim_ids=draft.claim_ids,
+        )
         fingerprint = compute_synthesis_fingerprint(
             synthesis_schema_version=CLAIM_SYNTHESIS_SCHEMA_VERSION,
             company_id=draft.company_id,

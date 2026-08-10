@@ -126,6 +126,30 @@ class VerifiedSynthesisClaim:
 
 
 @dataclass(frozen=True)
+class VerifiedSynthesisRun:
+    """经 read-side integrity 校验的 SynthesisRun 投影（不可变）。
+
+    `SynthesisService.verify_synthesis_integrity` 的输出：重新加载 run + input
+    links → gateway 校验全部 Claims → 以 run 自身字段为预期重跑 company /
+    research-question / temporal 政策 → 重算 synthesis_fingerprint 并与
+    persisted 比较 → 任一损坏即抛错（**不自动 repair**）。消费方（LangGraph
+    合成节点 / SynthesisAnalysisService）只消费 VerifiedSynthesisRun，**不
+    重新实现** SynthesisRun replay 规则。
+
+    - verified_claims：全部经 gateway + 隔离 + temporal 校验的 Claim，按
+      claim_id canonical 排序（与 fingerprint 计算顺序一致）。
+    """
+
+    synthesis_id: UUID
+    company_id: UUID
+    research_question: str
+    research_question_sha256: str
+    analysis_as_of: date
+    synthesis_fingerprint: str
+    verified_claims: list[VerifiedSynthesisClaim]
+
+
+@dataclass(frozen=True)
 class SynthesisInputSummary:
     """一次 synthesis 输入的确定性结构摘要（纯函数派生，无 DB）。
 

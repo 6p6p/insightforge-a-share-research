@@ -2,11 +2,13 @@
 
 流程（两步提交，镜像 SynthesisService / MacroAnalysisService）：
 1. 防御性 request 校验（构造已校验，服务层再兜底）；
-2. 短 DB session：加载 SynthesisRun（缺失 → SynthesisAnalysisRunNotFound，
-   **不调用 LLM**）+ input links + 逐 claim 经 ClaimIntegrityGateway 完整校验
-   （同 Gate 0：generic / financial / macro / valuation dispatch，child artifact
-   integrity 委托各 domain public verify API，损坏 → SynthesisClaimIntegrityError）
-   + company_name；
+2. 短 DB session：调 **SynthesisService.verify_synthesis_integrity**（read-side
+   公共 API，**不复制** SynthesisRun replay 规则）——重新加载 run + input links
+   + 逐 claim 经 ClaimIntegrityGateway 完整校验（domain dispatch）+ 以 run 字段
+   为预期重跑 company / research-question / temporal / cutoff 政策 + 重算
+   synthesis_fingerprint 与 persisted 对比；缺失 → SynthesisAnalysisRunNotFound
+   （**不调用 LLM**），损坏 → 稳定 integrity 错误，不自动 repair。再取 company
+   name；
 3. 关闭 DB session（**LLM 调用期间不持有 DB transaction / connection**）；
 4. 纯函数构造 deterministic Claim Pack（C alias 按 analysis_domain + claim_id
    canonical 排序，**LLM 永不看 UUID**）；
@@ -58,20 +60,12 @@ from app.analysis.synthesis.model import SynthesisAnalysisModel
 from app.analysis.synthesis.packs import SynthesisClaimPack, build_claim_pack
 from app.db.models.claim_synthesis_result import ClaimSynthesisResultModel
 from app.db.models.company import CompanyModel
-from app.financial.calculations.service import FinancialCalculationService
-from app.repositories.claim_synthesis_input_link_repository import (
-    ClaimSynthesisInputLinkRepository,
-)
 from app.repositories.claim_synthesis_result_repository import (
     ClaimSynthesisResultRepository,
 )
-from app.repositories.claim_synthesis_run_repository import ClaimSynthesisRunRepository
-from app.services.claim_service import ClaimService
-from app.services.macro_claim_service import MacroClaimService
-from app.synthesis.contracts import VerifiedSynthesisClaim
-from app.synthesis.errors import SynthesisIntegrityError
-from app.synthesis.integrity import ClaimIntegrityGateway
-from app.valuation.comparison_service import RelativeValuationComparisonService
+from app.synthesis.contracts import VerifiedSynthesisClaim, VerifiedSynthesisRun
+from app.synthesis.errors import SynthesisIntegrityError, SynthesisRunNotFound
+from app.synthesis.service import SynthesisService
 
 
 @dataclass(frozen=True)
@@ -94,12 +88,8 @@ class SynthesisAnalysisService:
     ) -> None:
         self._sessionmaker = sessionmaker
         self._model = model
-        self._gateway = ClaimIntegrityGateway(
-            claim_service=ClaimService(sessionmaker),
-            macro_claim_service=MacroClaimService(sessionmaker),
-            financial_calculation_service=FinancialCalculationService(sessionmaker),
-            valuation_comparison_service=RelativeValuationComparisonService(sessionmaker),
-        )
+        # read-side integrity（Gate 0）委托 SynthesisService 公共 API，不复制规则。
+        self._synthesis = SynthesisService(sessionmaker)
 
     async def analyze(self, request: SynthesisAnalysisRequest) -> SynthesisAnalysisResult:
         # 1. 防御性 request 校验（构造已校验，服务层再兜底）。
@@ -174,34 +164,32 @@ class SynthesisAnalysisService:
             raise SynthesisAnalysisInputError("synthesis_id 必须是 UUID")
 
     async def _load_synthesis(self, request: SynthesisAnalysisRequest) -> _LoadedSynthesisInput:
-        """短 DB session 加载并校验综合分析输入（run 缺失 → RunNotFound）。
+        """短 DB session：SynthesisService.verify_synthesis_integrity（read-side 校验）。
 
-        run 已登记过的 question / company / temporal 边界**不重跑**（不可变输入
-        集边界），但每条 input Claim 必须**重新**经 gateway 完整性校验——综合是
-        消费方，claim / child artifact 在登记后被篡改 → 拒绝，不自动 repair。
+        只消费 VerifiedSynthesisRun（**不复制** SynthesisRun replay 规则）：
+        重新加载 run + input links → 逐 claim gateway 校验 → 以 run 字段为预期
+        重跑 company / research-question / temporal / cutoff → 重算 fingerprint
+        对比。缺失 → SynthesisAnalysisRunNotFound；已登记 run 被篡改 → 稳定
+        integrity 错误，**不自动 repair**。
         """
         async with self._sessionmaker() as session:
-            run = await ClaimSynthesisRunRepository(session).get_by_id(request.synthesis_id)
-            if run is None:
-                raise SynthesisAnalysisRunNotFound()
-            links = await ClaimSynthesisInputLinkRepository(session).list_by_synthesis(
-                request.synthesis_id
-            )
-            if not links:
-                raise SynthesisIntegrityError("synthesis run has no input links")
-            claim_ids = sorted((link.claim_id for link in links), key=str)
-            claims = [await self._gateway.verify_claim(session, claim_id) for claim_id in claim_ids]
-            company = await session.get(CompanyModel, run.company_id)
+            try:
+                verified_run: VerifiedSynthesisRun = (
+                    await self._synthesis.verify_synthesis_integrity(session, request.synthesis_id)
+                )
+            except SynthesisRunNotFound:
+                raise SynthesisAnalysisRunNotFound() from None
+            company = await session.get(CompanyModel, verified_run.company_id)
             if company is None:
                 raise SynthesisIntegrityError("synthesis run company missing")
             company_name = company.short_name or company.official_name
         return _LoadedSynthesisInput(
-            synthesis_id=run.synthesis_id,
-            research_question=run.research_question,
-            analysis_as_of=run.analysis_as_of,
+            synthesis_id=verified_run.synthesis_id,
+            research_question=verified_run.research_question,
+            analysis_as_of=verified_run.analysis_as_of,
             company_name=company_name,
-            synthesis_fingerprint=run.synthesis_fingerprint,
-            claims=claims,
+            synthesis_fingerprint=verified_run.synthesis_fingerprint,
+            claims=verified_run.verified_claims,
         )
 
     async def _call_model(
