@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import get_settings  # noqa: E402
 from app.core.runtime import configure_asyncio_runtime  # noqa: E402
 from app.db import models as _db_models  # noqa: E402, F401
+from app.db.alembic_autogen import include_object  # noqa: E402
 from app.db.base import Base  # noqa: E402
 
 config = context.config
@@ -37,13 +38,21 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        # include_object：LangGraph AsyncPostgresSaver.setup() runtime 管理的
+        # checkpoint 表不是 Alembic migration owner，autogenerate 一律排除
+        # （见 app/db/alembic_autogen.py）。
+        include_object=include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

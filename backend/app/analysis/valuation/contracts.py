@@ -14,14 +14,16 @@ ValuationClaimService.create_claim 原子持久化。
 - 确定性代码负责：V1..Vn alias 构造（按 metric_code pe_ttm/pb_mrq/ps_ttm 排序）、
   ref resolution（V → comparison_id）、未知引用 / 跨 relation 冲突 / 遗漏 input
   comparison 拒绝、direction consistency（无 hidden thresholds）、uncertain
-  importance policy、`render_valuation_claim_statement(assessment)` 确定性渲染、
-  v7 Claim 创建 / replay；
+  importance policy、`render_valuation_claim_statement(assessment, metric_codes)`
+  确定性渲染（v2 statement-scope：single PE/PB/PS vs multi 综合）、v7 Claim
+  创建 / replay；
 - Analyst **不负责**：Retrieval / 搜索 / 访问 Chroma / 读 RawArtifact / 写数据库 /
   计算任何数值 / 生成 Claim statement。
 
 冻结：
 - `VALUATION_ANALYST_NAME = "structured_relative_valuation_analyst"`；
-  `VALUATION_ANALYST_VERSION = 1`；production model_id =
+  `VALUATION_ANALYST_VERSION = 2`（current statement-scope-safe；v1 =
+  historical pre-final）；production model_id =
   `deepseek:deepseek-v4-flash`（thinking disabled / temperature=0 / structured
   output / 无 tools / 无 web search）。
 - `ValuationAnalysisRequest`：company_id + research_question（trim 非空）+
@@ -55,7 +57,11 @@ from app.valuation.claim_contracts import (
 
 # structured relative valuation analyst 的身份常量（persisted analyst_name）。
 VALUATION_ANALYST_NAME = "structured_relative_valuation_analyst"
-VALUATION_ANALYST_VERSION = 1
+# analyst_version=1 = historical pre-final（statement 无 metric-scope 区分）；
+# current = 2 = statement-scope-safe（`render_valuation_claim_statement(assessment,
+# metric_codes)` 区分 single PE/PB/PS 与 multi 综合）。历史 v1 Claim 不修改 /
+# 不 backfill（修改 = 新 Claim，无 update API）。
+VALUATION_ANALYST_VERSION = 2
 
 # 单次分析 1..3 条 comparison（v1 只有 PE / PB / PS，每个 metric 最多一个）。
 MIN_VALUATION_COMPARISONS_PER_REQUEST = 1

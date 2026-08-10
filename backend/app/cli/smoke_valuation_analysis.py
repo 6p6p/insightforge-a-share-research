@@ -470,7 +470,8 @@ async def _main() -> int:
         if result.assessment is not None:
             print(f"assessment = {result.assessment.value}")
             print(
-                f"deterministic_statement = {render_valuation_claim_statement(result.assessment)}"
+                "deterministic_statement = "
+                f"{render_valuation_claim_statement(result.assessment, ('pe_ttm',))}"
             )
             print(f"expected = {_EXPECTED_ASSESSMENT}")
             print(

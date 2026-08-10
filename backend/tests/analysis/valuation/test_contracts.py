@@ -50,7 +50,8 @@ def _uuid(n: int) -> UUID:
 
 def test_analyst_identity_frozen() -> None:
     assert VALUATION_ANALYST_NAME == "structured_relative_valuation_analyst"
-    assert VALUATION_ANALYST_VERSION == 1
+    # v2 = current statement-scope-safe；v1 = historical pre-final。
+    assert VALUATION_ANALYST_VERSION == 2
 
 
 def test_limits_frozen() -> None:

@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     String,
     UniqueConstraint,
     text,
@@ -39,6 +40,13 @@ class MacroTransmissionEvidenceLinkModel(Base):
             "transmission_id",
             "evidence_card_id",
             name="uq_macro_transmission_evidence_links_transmission_evidence",
+        ),
+        # 真实 DB 已存在（migration 0023）：按 evidence_card_id 反查传道链。
+        # metadata 必须真实描述 current DB，供 alembic check 不产生
+        # remove_index drift。
+        Index(
+            "ix_macro_transmission_evidence_links_evidence_card_id",
+            "evidence_card_id",
         ),
     )
 

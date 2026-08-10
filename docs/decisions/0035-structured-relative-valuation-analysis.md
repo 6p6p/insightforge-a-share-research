@@ -22,7 +22,8 @@ no-cherry-picking 覆盖、direction consistency、statement 渲染与 v7 Claim 
 - 确定性代码负责：V1..Vn alias（按 metric_code pe_ttm/pb_mrq/ps_ttm 排序）、
   ref resolution（V → comparison_id）、未知引用 / 跨 relation / 遗漏 input
   comparison 拒绝、direction consistency（无 hidden thresholds）、uncertain
-  importance policy、`render_valuation_claim_statement(assessment)` 确定性渲染、
+  importance policy、`render_valuation_claim_statement(assessment, metric_codes)`
+  确定性渲染（v2）、
   v7 Claim 创建 / replay；
 - **LLM 不**：计算 median / premium / percent、选择 peers、生成任何数值、
   生成 Claim statement、生成 target price / fair value / 交易建议 / 买入卖出评级。
@@ -101,10 +102,18 @@ no-cherry-picking 覆盖、direction consistency、statement 渲染与 v7 Claim 
    context 允许任意 sign（反证 / 背景）。
 
 9. **确定性 statement renderer（spec C）**：`render_valuation_claim_statement
-   (assessment)` 用**冻结中文映射**渲染最终 Claim statement（5 种 assessment →
-   5 句固定语句），**LLM 不生成 statement**。statement 不含任何数字 / 百分比 /
-   threshold，也不带 company / peer 名称插值（避免把模型输出或未审计文本引入
-   Claim）。未知 assessment → `ValuationClaimDraftError`。
+   (assessment, metric_codes)`（v2）用**冻结中文映射**渲染最终 Claim statement。
+   `metric_codes` 来自**实际 selected verified Comparisons**（supports ∪
+   contradicts ∪ context 的 metric_code，**不是模型输出**），按 metric 数量区分
+   scope：single PE/PB/PS → "基于市盈率/市净率/市销率比较……"；multi → "基于所选
+   估值指标综合比较……"（mixed="不同估值指标对公司的相对估值判断存在分化。"、
+   uncertain="现有估值指标比较不足以形成明确的方向性判断。"）。single metric
+   不可能合法 mixed（mixed policy 要求 support 正负方向都有）→ 稳定 policy
+   error。**LLM 不生成 statement**；statement 不含任何数字 / 百分比 / threshold，
+   也不带 company / peer 名称插值（避免把模型输出或未审计文本引入 Claim）。未知
+   assessment / metric_code → `ValuationClaimDraftError`。`VALUATION_ANALYST_
+   VERSION=2`（v1=historical pre-final，无 metric-scope 区分；历史 v1 Claim
+   **不修改 / 不 backfill**）。
 
 10. **Model boundary（spec H）**：`ValuationAnalysisModel` Protocol 放独立
     `model.py`（避免 packs↔contracts 循环导入）；实现契约 = `model_id` 稳定
@@ -154,7 +163,8 @@ no-cherry-picking 覆盖、direction consistency、statement 渲染与 v7 Claim 
     4C.2B.1 的 v7 Claim schema 与持久化链。Claim 固定
     analysis_domain=valuation、claim_kind=relative_valuation；analyst 身份 =
     `VALUATION_ANALYST_NAME = "structured_relative_valuation_analyst"` /
-    version=1；`analyst_model_id = model.model_id`（真实适配器 =
+    `VALUATION_ANALYST_VERSION=2`（v1=historical pre-final，无 metric-scope
+    区分；历史 v1 Claim 不修改 / 不 backfill）；`analyst_model_id = model.model_id`（真实适配器 =
     deepseek:deepseek-v4-flash）；Profile（assessment / analysis_as_of /
     profile_schema_version=1）；Comparison links（supports / contradicts /
     context）；自动 context Evidence links（target + 全部 peers 的 source
@@ -182,6 +192,25 @@ no-cherry-picking 覆盖、direction consistency、statement 渲染与 v7 Claim 
 
 18. **Docs（spec X）**：本 ADR；README + stage-4-plan 状态更新（4C.1=FINAL、
     4C.2A=completed、4C.2B.1=completed、4C.2B.2=completed、4D=later）。
+
+## Runtime acceptance（spec A closeout，2026-08-10）
+
+4C final acceptance 的 runtime 部分已完成并如实记录（本阶段**不运行新的真实
+LLM smoke**）：
+
+- **Windows runtime**：在 HEAD（含本 ADR 对应代码）上运行
+  `python -m app.cli.run_backend`，live / ready 各 **5×200**；ready 五项
+  checks（configuration / database / chroma / checkpoint / raw_storage）
+  全部 ok。停止 host backend。
+- **Docker rebuild**：`docker compose up -d --build backend` 重建当前代码，
+  容器 healthy，live / ready 各 5×200、五项 checks ok；从 Docker runtime
+  **实际读取** `alembic_version=0027` 与三张 valuation 表
+  （relative_valuation_comparisons /
+  claim_relative_valuation_comparison_links / relative_valuation_claim_profiles），
+  表存在且可读。
+- **版本边界（spec D）**：`VALUATION_ANALYST_VERSION=2`（v1=historical
+  pre-final，无 metric-scope 区分；历史 v1 Claim **不修改 / 不 backfill**）；
+  v2 = current statement-scope-safe version。Claim schema 仍 v7、无新 migration。
 
 ## 受控 smoke（spec 允许一次 controlled DeepSeek V4 Flash smoke）
 

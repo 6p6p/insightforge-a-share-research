@@ -132,6 +132,14 @@ class FinancialCalculationInputModel(Base):
             "btrim(input_role) <> ''",
             name="ck_financial_calculation_inputs_input_role_not_blank",
         ),
+        # 真实 DB 已存在（migration 0021）：同一 calculation 对同一 observation
+        # 只能绑定一种 input_role。metadata 必须真实描述 current DB，供
+        # alembic check 不产生 remove_constraint drift。
+        UniqueConstraint(
+            "calculation_id",
+            "metric_observation_id",
+            name="uq_financial_calculation_inputs_calc_observation",
+        ),
         Index(
             "ix_financial_calculation_inputs_metric_observation_id",
             "metric_observation_id",

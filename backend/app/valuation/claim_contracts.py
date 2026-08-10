@@ -33,6 +33,7 @@ deterministic fact，EvidenceCard = source-backed fact，保持分层。
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -87,24 +88,106 @@ _VALUATION_CLAIM_ASSESSMENTS = frozenset(
 )
 
 
-def render_valuation_claim_statement(assessment: ValuationClaimAssessment) -> str:
-    """v1 精确冻结的 Relative Valuation Claim statement 渲染（deterministic，LLM 不生成）。
+# v1 冻结的估值 metric_code（deterministic canonical order；与
+# app.analysis.valuation.packs 的 V alias 排序一致：pe_ttm → pb_mrq → ps_ttm）。
+VALUATION_METRIC_CODES = ("pe_ttm", "pb_mrq", "ps_ttm")
+_VALUATION_METRIC_ORDER = {code: i for i, code in enumerate(VALUATION_METRIC_CODES)}
 
-    Assessment → 固定中文 statement（4C.2B.2 spec C）：模型只返回 assessment，
-    **程序**渲染最终 Claim statement——statement 里不含任何数字 / 百分比 / 阈值，
-    也不带 company / peer 名称插值（避免把模型输出或未审计文本引入 Claim）。
+# metric_code → statement 中的中文指标名（v2 statement-scope 渲染用）。
+_VALUATION_METRIC_LABELS = {
+    "pe_ttm": "市盈率",
+    "pb_mrq": "市净率",
+    "ps_ttm": "市销率",
+}
+
+
+def _normalize_metric_codes(metric_codes: Iterable[str]) -> tuple[str, ...]:
+    """去重 + canonical sort（pe_ttm → pb_mrq → ps_ttm）。
+
+    metric_codes 来自真实 verified Comparisons（Service 传入），**不是模型输出**；
+    未知 metric / 空集合 → 稳定错误（renderer 无法确定 statement scope）。
     """
-    frozen = {
-        ValuationClaimAssessment.RELATIVE_HIGH: ("公司当前相对估值水平高于所选可比公司整体水平。"),
-        ValuationClaimAssessment.BROADLY_IN_LINE: (
-            "公司当前相对估值水平与所选可比公司整体大致相当。"
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for code in metric_codes:
+        if code not in _VALUATION_METRIC_ORDER:
+            raise ValuationClaimDraftError(f"不支持的 metric_code: {code}")
+        if code not in seen:
+            seen.add(code)
+            ordered.append(code)
+    if not ordered:
+        raise ValuationClaimDraftError("statement 渲染需要至少一个 metric_code")
+    ordered.sort(key=_VALUATION_METRIC_ORDER.__getitem__)
+    return tuple(ordered)
+
+
+# single-metric（PE / PB / PS 之一）→ assessment → 固定 statement（无 mixed：
+# single metric 不可能合法 mixed，见 render 函数）。
+_SINGLE_METRIC_STATEMENTS: dict[str, dict[ValuationClaimAssessment, str]] = {}
+for _metric, _label in _VALUATION_METRIC_LABELS.items():
+    _SINGLE_METRIC_STATEMENTS[_metric] = {
+        ValuationClaimAssessment.RELATIVE_HIGH: (
+            f"基于{_label}比较，公司当前估值水平高于所选可比公司整体水平。"
         ),
-        ValuationClaimAssessment.RELATIVE_LOW: ("公司当前相对估值水平低于所选可比公司整体水平。"),
-        ValuationClaimAssessment.MIXED: ("不同估值指标对公司的相对估值判断存在分化。"),
-        ValuationClaimAssessment.UNCERTAIN: ("现有相对估值比较不足以形成明确的方向性判断。"),
+        ValuationClaimAssessment.BROADLY_IN_LINE: (
+            f"基于{_label}比较，公司当前估值水平与所选可比公司整体大致相当。"
+        ),
+        ValuationClaimAssessment.RELATIVE_LOW: (
+            f"基于{_label}比较，公司当前估值水平低于所选可比公司整体水平。"
+        ),
+        ValuationClaimAssessment.UNCERTAIN: (f"现有{_label}比较不足以形成明确的相对估值判断。"),
     }
+
+# multiple-metrics（PE / PB / PS 综合）→ assessment → 固定 statement。
+_MULTI_METRIC_STATEMENTS: dict[ValuationClaimAssessment, str] = {
+    ValuationClaimAssessment.RELATIVE_HIGH: (
+        "基于所选估值指标综合比较，公司当前相对估值水平高于所选可比公司整体水平。"
+    ),
+    ValuationClaimAssessment.BROADLY_IN_LINE: (
+        "基于所选估值指标综合比较，公司当前相对估值水平与所选可比公司整体大致相当。"
+    ),
+    ValuationClaimAssessment.RELATIVE_LOW: (
+        "基于所选估值指标综合比较，公司当前相对估值水平低于所选可比公司整体水平。"
+    ),
+    ValuationClaimAssessment.MIXED: "不同估值指标对公司的相对估值判断存在分化。",
+    ValuationClaimAssessment.UNCERTAIN: "现有估值指标比较不足以形成明确的方向性判断。",
+}
+
+
+def render_valuation_claim_statement(
+    assessment: ValuationClaimAssessment,
+    metric_codes: Iterable[str],
+) -> str:
+    """v2 确定性 Relative Valuation Claim statement 渲染（deterministic，LLM 不生成）。
+
+    metric_codes 来自真实 verified Comparisons（Service 传入，**不是模型输出**），
+    按 metric 数量区分 statement scope：
+
+    - **single metric**（只用了 PE / PB / PS 之一）：按指标名渲染
+      （"基于市盈率/市净率/市销率比较……"）。single metric 不可能合法 mixed（现有
+      mixed policy 要求 support 中正负方向都有，至少 2 个 support）——若发生 →
+      稳定 policy error（ValuationClaimDraftError）。
+    - **multiple metrics**（PE / PB / PS 综合）：渲染"基于所选估值指标综合比较……"
+      的 multi 文本。
+
+    statement 不含任何数字 / 百分比 / 阈值，也不带 company / peer 名称插值
+    （避免把模型输出或未审计文本引入 Claim）。v1 = historical pre-final（无
+    metric-scope 区分）；v2 = current statement-scope-safe version；历史 v1 Claim
+    **不修改 / 不 backfill**。
+    """
+    codes = _normalize_metric_codes(metric_codes)
+    if len(codes) == 1:
+        if assessment == ValuationClaimAssessment.MIXED:
+            raise ValuationClaimDraftError(
+                "single metric comparison 不可能合法 mixed（mixed policy 要求 "
+                "support 中正负方向都有）"
+            )
+        try:
+            return _SINGLE_METRIC_STATEMENTS[codes[0]][assessment]
+        except KeyError as exc:
+            raise ValuationClaimDraftError(f"不支持 assessment: {assessment}") from exc
     try:
-        return frozen[assessment]
+        return _MULTI_METRIC_STATEMENTS[assessment]
     except KeyError as exc:
         raise ValuationClaimDraftError(f"不支持 assessment: {assessment}") from exc
 

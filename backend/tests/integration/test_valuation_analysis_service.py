@@ -167,9 +167,9 @@ async def test_analyze_creates_v7_claim_with_analyst_identity(env) -> None:
     assert claim.analysis_domain == "valuation"
     assert claim.claim_kind == "relative_valuation"
     assert claim.claim_schema_version == VALUATION_CLAIM_SCHEMA_VERSION
-    # LLM 不生成 statement：确定性渲染自 assessment。
+    # LLM 不生成 statement：确定性渲染自 assessment + 实际 selected metric_codes。
     assert claim.statement == render_valuation_claim_statement(
-        ValuationClaimAssessment.RELATIVE_HIGH
+        ValuationClaimAssessment.RELATIVE_HIGH, ("pe_ttm",)
     )
     assert claim.analyst_name == VALUATION_ANALYST_NAME
     assert claim.analyst_version == VALUATION_ANALYST_VERSION
@@ -203,7 +203,7 @@ async def test_analyze_broadly_in_line_accepted_no_threshold(env) -> None:
     async with env["sessionmaker"]() as session:
         claim = await ClaimRepository(session).get_by_id(result.claim_id)
     assert claim.statement == render_valuation_claim_statement(
-        ValuationClaimAssessment.BROADLY_IN_LINE
+        ValuationClaimAssessment.BROADLY_IN_LINE, ("pe_ttm",)
     )
 
 

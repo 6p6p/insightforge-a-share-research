@@ -18,8 +18,9 @@
    input comparison → ComparisonOmitted——no-cherry-picking 硬边界）；
 8. direction / uncertain-importance 策略（复用 shared policy）：
    relative_high 全正 / relative_low 全负 / mixed 正负都有 / uncertain→normal；
-9. 确定性 statement 渲染（`render_valuation_claim_statement`，LLM 不生成
-   statement）+ ValuationClaimDraft(schema v7) 构造；
+9. 确定性 statement 渲染（`render_valuation_claim_statement(assessment,
+   metric_codes)`，v2 statement-scope：metric_codes 来自实际 selected verified
+   Comparisons，LLM 不生成 statement）+ ValuationClaimDraft(schema v7) 构造；
 10. ValuationClaimService.create_claim 原子登记（含 fingerprint replay）→
     ValuationAnalysisResult（relevant / claim_id / replayed / assessment /
     reason_code）。
@@ -147,7 +148,7 @@ class ValuationAnalysisService:
         self._check_policy(resolved, verified)
 
         # 9. 确定性 statement 渲染 + ValuationClaimDraft(v7) 构造。
-        draft = self._build_draft(request, resolved)
+        draft = self._build_draft(request, resolved, verified)
 
         # 10. 原子登记（create_claim：fingerprint replay / 0 partial write）。
         result = await ValuationClaimService(self._sessionmaker).create_claim(draft)
@@ -288,15 +289,27 @@ class ValuationAnalysisService:
         self,
         request: ValuationAnalysisRequest,
         resolved: ResolvedValuationDecision,
+        verified: dict[UUID, VerifiedComparison],
     ) -> ValuationClaimDraft:
         """确定性 statement 渲染 + ValuationClaimDraft(v7) 构造（LLM 不生成 statement）。
 
-        statement 由 `render_valuation_claim_statement(assessment)` 从冻结映射
-        生成，不含任何数字 / 百分比 / company / peer 名称插值；additional
-        Evidence 一律为空（v1 Analyst 只做纯相对估值判断）。
+        statement 由 `render_valuation_claim_statement(assessment, metric_codes)`
+        从冻结映射生成：metric_codes = **实际 selected comparison**（supports ∪
+        contradicts ∪ context，全部经 replay 校验的 verified Comparisons）的
+        metric_code——v2 据此区分 single PE/PB/PS 与 multi 综合文本。statement 不含
+        任何数字 / 百分比 / company / peer 名称插值；additional Evidence 一律为空
+        （Analyst 只做纯相对估值判断）。
         """
+        metric_codes = [
+            verified[comparison_id].metric_code
+            for comparison_id in (
+                *resolved.support_comparison_ids,
+                *resolved.contradict_comparison_ids,
+                *resolved.context_comparison_ids,
+            )
+        ]
         try:
-            statement = render_valuation_claim_statement(resolved.assessment)
+            statement = render_valuation_claim_statement(resolved.assessment, metric_codes)
         except ValuationClaimDraftError as exc:
             raise ValuationAnalysisClaimDraftError() from exc
         try:
