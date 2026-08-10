@@ -74,6 +74,32 @@ class WorkflowRunRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def claim_failed_for_retry(
+        self,
+        run_id: UUID,
+        started_at: datetime,
+    ) -> WorkflowRunModel | None:
+        """Atomically reclaim a failed run for retry; returns None if not failed.
+
+        Stage 4 durable resume（spec N-O）：run 失败后，新 runner + 同
+        thread_id 从最后 checkpoint 继续。仅允许 FAILED → RUNNING。
+        """
+        stmt = (
+            update(WorkflowRunModel)
+            .where(
+                WorkflowRunModel.run_id == run_id,
+                WorkflowRunModel.status == WorkflowRunStatus.FAILED.value,
+            )
+            .values(
+                status=WorkflowRunStatus.RUNNING.value,
+                started_at=started_at,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(WorkflowRunModel)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def claim_waiting_human(
         self,
         run_id: UUID,

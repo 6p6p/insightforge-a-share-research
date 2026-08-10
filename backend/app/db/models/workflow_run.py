@@ -43,10 +43,10 @@ class WorkflowRunModel(Base):
     )
 
     run_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    task_id: Mapped[UUID] = mapped_column(
+    task_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("research_tasks.task_id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     graph_name: Mapped[str] = mapped_column(String(64), nullable=False)
