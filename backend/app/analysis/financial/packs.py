@@ -8,9 +8,11 @@
   升序），允许空包（additional evidence 0..20 条）；
 - **numeric-literal guard**：statement 禁止 ASCII/full-width digits / % / 中文数字
   字符（零〇二两三四五六七八九十百千万亿兆）/ 定量短语（百分之 / 倍 / 翻倍 / 翻番 /
-  过半 / 半数 / 一成 / 一半 / 一点）（不自动删数字、不改写、不让第二个 LLM 修正）；
+  过半 / 半数 / 一成 / 一半 / 一点）/ numeric-context 表达（第 X 季度 / 第 X 月 /
+  第 X 年 / 第 X 期 / 第 X 日 / 第 X 号，如"一季度 / 第一年度 / 一月 / 一号"）
+  （不自动删数字、不改写、不让第二个 LLM 修正）；
   "一/点"本身允许（"一定/进一步/观点"等常用非数量词），但真正的量与数字仍由字符 /
-  短语零暴露；
+  短语 / numeric-context 规则零暴露；
 - **C/E ref resolution**：C<number> → calculation_id、E<number> →
   evidence_card_id；未知引用 / 跨 relation 冲突 → 整次失败（0 写）；不做 fuzzy
   resolve、不自动猜 UUID。
@@ -19,6 +21,7 @@
 ref resolution 可复现。
 """
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -57,18 +60,28 @@ _FORBIDDEN_CHARS = frozenset("%％") | _ASCII_DIGITS | _FULLWIDTH_DIGITS | _CHIN
 # 定量短语（不含数字也表达量）：百分之 / 倍 / 翻倍 / 翻番 / 过半 / 半数，以及依赖
 # "一"的量词表达：一成（10%）/ 一半 / 一点（"一点"为模糊量，一并拒绝）。
 _FORBIDDEN_PHRASES = ("百分之", "翻倍", "翻番", "过半", "半数", "倍", "一成", "一半", "一点")
+# numeric-context：单独放开"一"是为了保留"一定/进一步/观点"等非数量词，但"一"在
+# 期间/序数表达中仍是量词，必须拒绝：第一季度收入改善 / 一季度收入改善 / 一月份需求
+# 增加 / 第一期项目完成 / 第一年度经营改善 / 一日发生变化 / 一号项目。单个语义明确
+# 的 pattern（第? + 一 + 季/月/年/期/日/号）覆盖全部 required 用例，不用大量硬编码
+# if；"一"后接非上述量词语素（定/步/个/致等）不命中，继续允许。
+_NUMERIC_CONTEXT_RE = re.compile(r"(?:第)?一(?:季|月|年|期|日|号)")
 
 
 def assert_statement_has_no_numeric_literals(statement: str) -> None:
-    """numeric-literal boundary：statement 禁止任何数字形式与定量短语。
+    """numeric-literal boundary：statement 禁止任何数字形式、定量短语与 numeric-context 表达。
 
     - 字符：ASCII digits（0-9）/ full-width digits（０-９）/ %（%％）/ 中文数字
       （零〇二两三四五六七八九十百千万亿兆）；
-    - 短语：百分之 / 倍 / 翻倍 / 翻番 / 过半 / 半数 / 一成 / 一半 / 一点。
+    - 短语：百分之 / 倍 / 翻倍 / 翻番 / 过半 / 半数 / 一成 / 一半 / 一点；
+    - numeric-context：第? + 一 + 季/月/年/期/日/号（含"季度/一季度/一月/一月份/
+      一年/第一年度/一期/一日/一号"），此时"一"是量词而非非数量词语素。
     "收入同比增长20%" / "营业收入增长两成" / "盈利能力提升一倍" / "利润实现翻倍" /
-    "二〇二五年收入改善" / "利润增长一成" → 拒绝；"营业收入保持增长态势。" /
-    "公司经营保持一定增长"（"一"在非数量词中）允许。**不自动删数字 / 不改写 / 不让
-    第二个 LLM 修正**——违反即整次分析失败（0 写）。
+    "二〇二五年收入改善" / "利润增长一成" / "第一季度收入改善" / "一季度收入改善" /
+    "一月份需求增加" / "第一期项目完成" / "第一年度经营改善" / "一日发生变化" /
+    "一号项目" → 拒绝；"营业收入保持增长态势。" / "公司经营保持一定增长" /
+    "管理层观点"（"一/点"在非数量词中）允许。**不自动删数字 / 不改写 / 不让第二个
+    LLM 修正**——违反即整次分析失败（0 写）。
     """
     if any(ch in _FORBIDDEN_CHARS for ch in statement):
         raise FinancialAnalysisNumericLiteralForbidden(
@@ -77,6 +90,10 @@ def assert_statement_has_no_numeric_literals(statement: str) -> None:
     if any(phrase in statement for phrase in _FORBIDDEN_PHRASES):
         raise FinancialAnalysisNumericLiteralForbidden(
             "financial claim statement must not contain quantitative expressions"
+        )
+    if _NUMERIC_CONTEXT_RE.search(statement):
+        raise FinancialAnalysisNumericLiteralForbidden(
+            "financial claim statement must not contain numeric-context period expressions"
         )
 
 

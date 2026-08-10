@@ -339,6 +339,32 @@ def test_numeric_guard_accepts_spec_qualitative_statements() -> None:
         assert_statement_has_no_numeric_literals(statement)  # 不抛错
 
 
+def test_numeric_guard_rejects_numeric_context_periods() -> None:
+    # numeric-context：第? + 一 + 季/月/年/期/日/号，此时"一"是量词而非非数量词
+    # 语素 → 拒绝（Gate A required 用例）。单一语义 pattern 覆盖全部形式。
+    for statement in (
+        "第一季度收入改善",
+        "一季度收入改善",
+        "一月份需求增加",
+        "第一期项目完成",
+        "第一年度经营改善",
+        "一日发生变化",
+        "一号项目",
+    ):
+        with pytest.raises(FinancialAnalysisNumericLiteralForbidden):
+            assert_statement_has_no_numeric_literals(statement)
+
+
+def test_numeric_guard_keeps_accepting_gate_a_context_phrases() -> None:
+    # Gate A 要求继续允许：非数量词中的"一"（一定/进一步/观点）。
+    for statement in (
+        "公司存在一定盈利空间",
+        "盈利有望进一步改善",
+        "管理层观点保持谨慎",
+    ):
+        assert_statement_has_no_numeric_literals(statement)  # 不抛错
+
+
 # ---------------------------------------------------------------- Ref resolution
 
 
