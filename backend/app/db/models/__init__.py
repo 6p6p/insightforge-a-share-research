@@ -6,6 +6,8 @@ from app.db.models.claim_financial_calculation_link import ClaimFinancialCalcula
 from app.db.models.claim_relative_valuation_comparison_link import (
     ClaimRelativeValuationComparisonLinkModel,
 )
+from app.db.models.claim_synthesis_input_link import ClaimSynthesisInputLinkModel
+from app.db.models.claim_synthesis_run import ClaimSynthesisRunModel
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.document_chunk import DocumentChunkModel
@@ -45,6 +47,8 @@ __all__ = [
     "ClaimFinancialCalculationLinkModel",
     "ClaimModel",
     "ClaimRelativeValuationComparisonLinkModel",
+    "ClaimSynthesisInputLinkModel",
+    "ClaimSynthesisRunModel",
     "CompanyAliasModel",
     "CompanyModel",
     "DocumentChunkModel",

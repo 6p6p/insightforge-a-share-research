@@ -3,7 +3,7 @@
 > 阶段 4 目标：把 Stage 3 已确认的 Evidence 单元（EvidenceCard）进一步登记为**可追溯、可回放的 Claim 分析结论**，经结构化 Analyst（4B）、专项分析（4C）与综合（4D）推进；**Report 生成与 Agent Audit 属于 Stage 5**，不在 Stage 4 范围内。详细接口在对应子阶段冻结。
 > 顶层证据链：**Source → Evidence → Claim → Report → Audit**；但**开发阶段不与其混淆**——Stage 4 只能是：**4A Claim provenance / persistence → 4B Structured Analysts → 4C Financial/Macro specialized analysis → 4D Claim synthesis / conflict / evidence gaps → Stage 4 final acceptance**；Stage 5 才是：**ReportOutline / DraftSection / Report / Deterministic Check / Agent Audit / Retry / Human confirmation**。**不得写 4C=Report、4D=Audit，也不得写 Stage 4 = Claim → Report → Audit**。
 >
-> 总进度：**4A = completed（Claim Foundation）**，**4B.1 = completed（Business / Event / Risk Claim Analysis）**，**4B.2A = completed（Financial Metric Observation Foundation）**，**4B.2B = completed（Deterministic Financial Calculation）**，**4B.2C.1 = completed（Financial Claim Provenance）**，**4B.2C.2 = completed（Structured Financial Analysis）**——**4B.2 = FINAL**；**4C.1A = FINAL（Macro Transmission Provenance v2 Closeout）**，**4C.1B = FINAL（Structured Macro Context Analyst，Gate 验收关闭）**，**4C.2A = completed（Relative Valuation Comparison Foundation）**，**4C.2B.1 = completed（Relative Valuation Claim Provenance）**，**4C.2B.2 = completed（Relative Valuation Claim 分析；runtime acceptance completed；`VALUATION_ANALYST_VERSION=2`、v1=historical）**——**4C.2 = FINAL**；**4D = later（Claim Synthesis / Conflict / Evidence Gap）**；**Stage 5 = Report + Audit，不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
+> 总进度：**4A = completed（Claim Foundation）**，**4B.1 = completed（Business / Event / Risk Claim Analysis）**，**4B.2A = completed（Financial Metric Observation Foundation）**，**4B.2B = completed（Deterministic Financial Calculation）**，**4B.2C.1 = completed（Financial Claim Provenance）**，**4B.2C.2 = completed（Structured Financial Analysis）**——**4B.2 = FINAL**；**4C.1A = FINAL（Macro Transmission Provenance v2 Closeout）**，**4C.1B = FINAL（Structured Macro Context Analyst，Gate 验收关闭）**，**4C.2A = completed（Relative Valuation Comparison Foundation）**，**4C.2B.1 = completed（Relative Valuation Claim Provenance）**，**4C.2B.2 = completed（Relative Valuation Claim 分析；runtime acceptance completed；`VALUATION_ANALYST_VERSION=2`、v1=historical）**——**4C.2 = FINAL**；**4D.1A = completed（Claim Synthesis Input & Provenance Foundation，`CLAIM_SYNTHESIS_SCHEMA_VERSION=1`、migration 0028；Windows + Docker runtime acceptance completed）**，**4D.1B = next（Claim Synthesis）**；**Stage 5 = Report + Audit，不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
 
 ## 4A：Claim Provenance + Persistence Foundation（当前，completed）
 
@@ -197,9 +197,22 @@
 - **无新 migration（Alembic head 保持 0027）**：本阶段复用 4C.2B.1 的 v7 Claim schema 与 `relative_valuation_claim_profiles` 表。
 - **决策记录**：[docs/decisions/0035-structured-relative-valuation-analysis.md](decisions/0035-structured-relative-valuation-analysis.md)。
 
-## 4D：Claim 综合 / 冲突 / 证据缺口（later）
+## 4D：Claim 综合 / 冲突 / 证据缺口
 
-- **状态：未开始（later）**。Claim Synthesis / Conflict Resolution / Evidence Gap 检测在 4C 之后推进；**本阶段不是 Audit**。
+- **状态：4D.1A = completed（Claim Synthesis Input & Provenance Foundation，2026-08-10）**；4D.1B = next（Claim Synthesis）。Claim Synthesis / Conflict Resolution / Evidence Gap 检测在 4C 之后推进；**本阶段不是 Audit**。
+
+### 4D.1A Claim Synthesis Input & Provenance Foundation（completed）
+
+- **状态（2026-08-10）：implementation completed / automated tests completed / Windows + Docker runtime acceptance completed——4D.1A = completed**。把调用方**显式选出的 2..50 条跨 domain Claim + company + research_question + analysis_as_of** 登记为一个不可变 `SynthesisRun`，并校验每条输入 Claim 的**完整性 / 隔离 / no-lookahead**，使未来 LangGraph 合成节点只能消费"已验证、同公司、同问题、不掺未来信息"的 Claim 集合。**不调用 LLM、不接 LangGraph 合成节点、不做语义筛选**。migration **0028**（`claim_synthesis_runs` + `claim_synthesis_input_links`，UNIQUE synthesis_fingerprint、claim_id FK RESTRICT、downgrade guard）。
+- **版本边界**：`CLAIM_SYNTHESIS_SCHEMA_VERSION=1`；synthesis 无 analyst version（本阶段无 Analyst，只有输入登记）。
+- **包位置**：`app/synthesis/`（contracts / errors / integrity / service）+ `app/repositories/claim_synthesis_run_repository.py` / `claim_synthesis_input_link_repository.py` + 2 个 DB model。
+- **ClaimIntegrityGateway（spec N）**：按 Claim 真实 analysis_domain + claim_schema_version dispatch 到 generic（business / event / risk v1）/ Financial（v2/v3）/ Macro（v4/v5/v6）/ Valuation（v7）；从 persisted links + domain 子表重建 fingerprint 输入 → 调用各 domain **公开** `compute_*_fingerprint` → 对比 claim.claim_fingerprint（唯一能处理含 automatic Evidence 的历史 Claim 的方案）；**禁止复制** domain formula / policy 逻辑。缺失 / 损坏 → `SynthesisClaimIntegrityError`，**不自动 repair**；legacy macro v1/v2 链无 analysis_as_of → `SynthesisUnsupportedClaimSchema`。
+- **隔离 / temporal**：research-question 隔离（每个 claim.research_question_sha256 == draft hash，`SynthesisResearchQuestionMismatch`）；company 隔离（`SynthesisCompanyMismatch`）；no-lookahead（evidence availability <= analysis_as_of，复用 `resolve_availability`，document → published_at 否则 acquired_at、macro → snapshot.fetched_at，**绝不用 reporting_period_end**；future → `SynthesisFutureEvidence`；无法解析 → `SynthesisTemporalEvidenceInsufficient`）；domain_analysis_as_of（macro chain / valuation profile）也必须 <= cutoff。
+- **Fingerprint / persistence / replay**：`compute_synthesis_fingerprint` = canonical JSON + SHA-256（含 schema version / company / question / sha256 / cutoff / claims 按 claim_id 排序；**不含 synthesis_id / created_at**）；两步提交（短 session 校验 → 关闭 → 纯函数派生 → 短 transaction `create_or_get`，ON CONFLICT 并发去重，0 partial write）；fingerprint 命中 → 完整重放校验（run 字段 + exact claim set + 重新执行全部校验），损坏 → `SynthesisIntegrityError`，**不自动 repair**。`SynthesisClaimIntegrityError` 与 `SynthesisIntegrityError` 是兄弟子类。
+- **测试（54 项新增）**：**25 项单元**（`tests/synthesis/test_contracts.py`，零 DB：draft 构造 / fingerprint 确定性 + 敏感性 / summary 计数 / resolve_availability None 映射）+ **26 项集成**（`tests/integration/test_claim_synthesis_service.py`，真实 PG + 真实服务链：gateway dispatch 全 domain + missing / unsupported / corrupted、isolation、temporal、persistence / replay / 并发 / corruption / no mutation、cross-domain E2E 1 run + 4 links + replay、boundary）+ **3 项 migration 0028 downgrade guard**（`tests/integration/test_migration_0028_downgrade_guard.py`，isolated 临时 PG：空库降级成功 / runs 有行拒绝 / links 有行拒绝）。全量 **1694 非集成 + 639 集成通过**。全程 0 真实 LLM / 0 Chroma / 0 LangGraph / 0 Report 表。
+- **Runtime acceptance（2026-08-10）**：Windows + Docker 各 live/ready **5×200**、ready 五项 checks ok；Docker runtime `alembic_version=0028` + 两张 synthesis 表可读。
+- **边界**：不创建 Report / DraftSection / Report / ReviewIssue / Audit；不接 LangGraph 合成节点；不开放 HTTP API；不做语义筛选 / 冲突检测 / 证据缺口（4D.1B 及以后）；不修改既有 schema；**不开始 4D.1B**。
+- 决策记录：[docs/decisions/0036-claim-synthesis-input-foundation.md](decisions/0036-claim-synthesis-input-foundation.md)。
 
 ## Stage 5（Report + Audit）及以后
 
