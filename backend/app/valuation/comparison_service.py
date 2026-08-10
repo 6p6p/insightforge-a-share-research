@@ -41,6 +41,7 @@ LLM / Chroma / Retrieval。
 
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal
 from uuid import UUID
 
@@ -156,6 +157,30 @@ class _DerivedComparison:
     stats: DerivedComparisonStats
     peer_entries: list[dict]  # 按 peer_company_id 排序，供 fingerprint
     comparison_fingerprint: str
+
+
+@dataclass(frozen=True)
+class VerifiedComparison:
+    """`verify_comparison_integrity` 的返回：完整校验后的 comparison + 真实引用。
+
+    供 4C.2B.1 ValuationClaimService / 未来 Analyst 复用（spec I）：一次调用
+    同时获得 comparison integrity 验证、真实 peer company / observation 集合、
+    target / peer Observation 与全部 source EvidenceCard（供 automatic Evidence
+    expansion 与 critical policy），**无需复制 formula / replay logic**。
+    """
+
+    comparison_id: UUID
+    comparison_fingerprint: str
+    target_company_id: UUID
+    target_observation_id: UUID
+    analysis_as_of: date
+    metric_code: str
+    metric_as_of: date
+    peer_companies: tuple[UUID, ...]  # 去重后的真实 peer company 集合
+    peer_observation_ids: tuple[UUID, ...]  # 全部 peer observation id
+    target_observation: ValuationMetricObservationModel
+    peer_observations: tuple[ValuationMetricObservationModel, ...]
+    evidence: dict[UUID, EvidenceCardModel]  # card_id -> card（target + peers 的 source Evidence）
 
 
 class RelativeValuationComparisonService:
@@ -435,7 +460,7 @@ class RelativeValuationComparisonService:
         session: AsyncSession,
         persisted: RelativeValuationComparisonModel,
         draft: ComparisonDraft,
-    ) -> None:
+    ) -> _LoadedComparisonRefs:
         """已有 fingerprint 的 comparison replay 完整性校验。
 
         重新加载 target observation / peer links / peer observations / evidence
@@ -443,6 +468,9 @@ class RelativeValuationComparisonService:
         no-lookahead 校验与 stats / fingerprint 派生，逐项核实 persisted
         comparison 与 peer links。发现损坏只抛 ValuationIntegrityError，
         **不自动 repair**（修改 = 新 comparison，无 update API）。
+
+        返回 `_LoadedComparisonRefs`（已重新加载校验的真实引用），供
+        `verify_comparison_integrity` / 调用方复用，避免重复加载。
         """
         loaded = await self._load_validate(session, draft)
         derived = self._derive(draft, loaded)
@@ -502,3 +530,56 @@ class RelativeValuationComparisonService:
             raise ValuationIntegrityError(
                 "valuation comparison replay integrity check failed on peer links"
             )
+        return loaded
+
+    # -------------------------------------------------- shared helper（4C.2B.1 spec I）
+
+    async def verify_comparison_integrity(
+        self, session: AsyncSession, comparison_id: UUID
+    ) -> VerifiedComparison | None:
+        """加载并完整校验一个既有 comparison 的内部一致性（供 Claim service / Analyst 复用）。
+
+        用 comparison 的**自身持久化字段** + peer links 重建 `ComparisonDraft`，
+        重新执行 `_load_validate` + `_derive` + `_verify_replay`（metric / date /
+        positive / peer distinctness / no-lookahead / stats / fingerprint /
+        peer links 全部逐项核实）——**不复制 formula / replay logic**，直接复用
+        本 service 的既有实现。
+
+        - comparison_id 不存在 → 返回 None（由调用方决定错误语义，如
+          `ValuationClaimComparisonNotFound`）；
+        - 任一内部损坏（含 peer links 缺失 / 非法导致 ComparisonDraft 构造失败）
+          → `ValuationIntegrityError`，**不自动 repair**（修改 = 新 comparison）。
+        """
+        persisted = await RelativeValuationComparisonRepository(session).get_by_id(comparison_id)
+        if persisted is None:
+            return None
+        links = await RelativeValuationComparisonPeerRepository(session).list_by_comparison(
+            comparison_id
+        )
+        # peer links 是持久化事实；若损坏（<3 / 重复 / 含 target）→ 构造 draft
+        # 抛 ValuationInputError，视为 comparison 损坏（调用方包装为 integrity）。
+        draft = ComparisonDraft(
+            target_company_id=persisted.target_company_id,
+            target_observation_id=persisted.target_observation_id,
+            peer_observation_ids=tuple(link.peer_observation_id for link in links),
+            analysis_as_of=persisted.analysis_as_of,
+        )
+        loaded = await self._verify_replay(session, persisted, draft)
+        return VerifiedComparison(
+            comparison_id=persisted.comparison_id,
+            comparison_fingerprint=persisted.comparison_fingerprint,
+            target_company_id=persisted.target_company_id,
+            target_observation_id=persisted.target_observation_id,
+            analysis_as_of=persisted.analysis_as_of,
+            metric_code=persisted.metric_code,
+            metric_as_of=persisted.metric_as_of,
+            peer_companies=tuple(
+                sorted({obs.company_id for obs in loaded.peer_observations}, key=str)
+            ),
+            peer_observation_ids=tuple(
+                obs.valuation_observation_id for obs in loaded.peer_observations
+            ),
+            target_observation=loaded.target_observation,
+            peer_observations=loaded.peer_observations,
+            evidence=loaded.evidence,
+        )

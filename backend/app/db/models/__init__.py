@@ -3,6 +3,9 @@ from app.db.models.chunk_vector_index import ChunkVectorIndexModel
 from app.db.models.claim import ClaimModel
 from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.claim_financial_calculation_link import ClaimFinancialCalculationLinkModel
+from app.db.models.claim_relative_valuation_comparison_link import (
+    ClaimRelativeValuationComparisonLinkModel,
+)
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.document_chunk import DocumentChunkModel
@@ -25,6 +28,7 @@ from app.db.models.news_source_verification import NewsSourceVerificationModel
 from app.db.models.parsed_source import ParsedSourceModel
 from app.db.models.parsed_source_block import ParsedSourceBlockModel
 from app.db.models.raw_artifact import RawArtifactModel
+from app.db.models.relative_valuation_claim_profile import RelativeValuationClaimProfileModel
 from app.db.models.relative_valuation_comparison import RelativeValuationComparisonModel
 from app.db.models.relative_valuation_comparison_peer import RelativeValuationComparisonPeerModel
 from app.db.models.research_task import ResearchTaskModel
@@ -40,6 +44,7 @@ __all__ = [
     "ClaimEvidenceLinkModel",
     "ClaimFinancialCalculationLinkModel",
     "ClaimModel",
+    "ClaimRelativeValuationComparisonLinkModel",
     "CompanyAliasModel",
     "CompanyModel",
     "DocumentChunkModel",
@@ -60,6 +65,7 @@ __all__ = [
     "ParsedSourceModel",
     "ParsedSourceBlockModel",
     "RawArtifactModel",
+    "RelativeValuationClaimProfileModel",
     "RelativeValuationComparisonModel",
     "RelativeValuationComparisonPeerModel",
     "ResearchTaskModel",

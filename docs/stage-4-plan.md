@@ -3,7 +3,7 @@
 > 阶段 4 目标：把 Stage 3 已确认的 Evidence 单元（EvidenceCard）进一步登记为**可追溯、可回放的 Claim 分析结论**，经结构化 Analyst（4B）、专项分析（4C）与综合（4D）推进；**Report 生成与 Agent Audit 属于 Stage 5**，不在 Stage 4 范围内。详细接口在对应子阶段冻结。
 > 顶层证据链：**Source → Evidence → Claim → Report → Audit**；但**开发阶段不与其混淆**——Stage 4 只能是：**4A Claim provenance / persistence → 4B Structured Analysts → 4C Financial/Macro specialized analysis → 4D Claim synthesis / conflict / evidence gaps → Stage 4 final acceptance**；Stage 5 才是：**ReportOutline / DraftSection / Report / Deterministic Check / Agent Audit / Retry / Human confirmation**。**不得写 4C=Report、4D=Audit，也不得写 Stage 4 = Claim → Report → Audit**。
 >
-> 总进度：**4A = completed（Claim Foundation）**，**4B.1 = completed（Business / Event / Risk Claim Analysis）**，**4B.2A = completed（Financial Metric Observation Foundation）**，**4B.2B = completed（Deterministic Financial Calculation）**，**4B.2C.1 = completed（Financial Claim Provenance）**，**4B.2C.2 = completed（Structured Financial Analysis）**——**4B.2 = FINAL**；**4C.1A = FINAL（Macro Transmission Provenance v2 Closeout）**，**4C.1B = FINAL（Structured Macro Context Analyst，Gate 验收关闭）**，**4C.2A = completed（Relative Valuation Comparison Foundation）**，**4C.2B = next（Relative Valuation Claim）**，**4D = later（Claim Synthesis / Conflict / Evidence Gap）**；**Stage 5 = Report + Audit，不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
+> 总进度：**4A = completed（Claim Foundation）**，**4B.1 = completed（Business / Event / Risk Claim Analysis）**，**4B.2A = completed（Financial Metric Observation Foundation）**，**4B.2B = completed（Deterministic Financial Calculation）**，**4B.2C.1 = completed（Financial Claim Provenance）**，**4B.2C.2 = completed（Structured Financial Analysis）**——**4B.2 = FINAL**；**4C.1A = FINAL（Macro Transmission Provenance v2 Closeout）**，**4C.1B = FINAL（Structured Macro Context Analyst，Gate 验收关闭）**，**4C.2A = completed（Relative Valuation Comparison Foundation）**，**4C.2B.1 = completed（Relative Valuation Claim Provenance）**，**4C.2B.2 = next（Relative Valuation Claim 分析）**，**4D = later（Claim Synthesis / Conflict / Evidence Gap）**；**Stage 5 = Report + Audit，不提前标记**（Report / Audit 语义未到验收门槛，不提前开工）。
 
 ## 4A：Claim Provenance + Persistence Foundation（当前，completed）
 
@@ -128,7 +128,7 @@
 
 ## 4C：Macro Context / Valuation
 
-- **状态：4C.1A = FINAL（Macro Transmission Provenance v2 Closeout）**；**4C.1B = FINAL（Structured Macro Context Analyst，Gate 验收关闭）**；**4C.2A = completed（Relative Valuation Comparison Foundation）**；**4C.2B = next（Relative Valuation Claim）**；4D = later。4C.1B 在 4B 完成之后推进；**Financial 属于 4B.2，不在 4C**；**本阶段不是 Report 生成**。
+- **状态：4C.1A = FINAL（Macro Transmission Provenance v2 Closeout）**；**4C.1B = FINAL（Structured Macro Context Analyst，Gate 验收关闭）**；**4C.2A = completed（Relative Valuation Comparison Foundation）**；**4C.2B.1 = completed（Relative Valuation Claim Provenance）**；**4C.2B.2 = next（Relative Valuation Claim 分析）**；4D = later。4C.1B 在 4B 完成之后推进；**Financial 属于 4B.2，不在 4C**；**本阶段不是 Report 生成**。
 
 ### 4C.1A Macro Transmission Provenance（FINAL）
 
@@ -177,9 +177,16 @@
 - **边界**：不实现 4C.2B Relative Valuation Claim（**不开始 4C.2B**）；不做估值分类 / 绝对公允价值 / target price / DCF / PEG / EV / EBITDA / FCFF / FCFE / dividend model；不自动选 peer / 不 LLM 选 peer；不修改 0023 / 0024 / 0025；不批量 update 历史 rows；不反推历史 cutoff；不接 LangGraph 分析节点；不开放 HTTP API；不创建 Claim / Report / DraftSection / ReviewIssue / Audit。
 - 决策记录：[docs/decisions/0033-relative-valuation-comparison-foundation.md](decisions/0033-relative-valuation-comparison-foundation.md)。
 
-### 4C.2B Relative Valuation Claim（next）
+### 4C.2B Relative Valuation Claim（4C.2B.1 completed / 4C.2B.2 next）
 
-- **状态：未开始（next）**。把 4C.2A 的 Observation + Comparison 数值接上 LLM，形成 Relative Valuation Claim（Analyst 只做判断，确定性交给代码）；不实现绝对公允价值 / target price / DCF / 买卖建议。
+- **4C.2B.1 Relative Valuation Claim Provenance（completed，2026-08-10）**：把引用已登记 `RelativeValuationComparison` 的 Relative Valuation Claim 确定性登记为 Claim + RelativeValuationClaimProfile + ClaimRelativeValuationComparisonLink + 自动展开的 Evidence links，形成 **Claim → ClaimRelativeValuationComparisonLink → RelativeValuationComparison → ValuationMetricObservation → EvidenceCard → Source** 完整可重算证据链（migration **0027**：`claim_relative_valuation_comparison_links` + `relative_valuation_claim_profiles`，全列 CHECK / UNIQUE / INDEX；downgrade guard：任一表有行 → 拒绝回滚，alembic_version 保持 0027）。版本边界：**当前 `VALUATION_CLAIM_SCHEMA_VERSION=7` / `VALUATION_CLAIM_PROFILE_SCHEMA_VERSION=1`**，不改 generic / Financial / Macro 既有 schema。`ValuationClaimDraft` 专用新类（固定 analysis_domain=valuation、claim_kind=relative_valuation；至少 1 个 support_comparison_id；v1 最多 3 个 comparison）。Comparison integrity 通过共享 public helper `verify_comparison_integrity` 复用真实 RelativeValuationComparisonService（不复制 formula / replay logic）；dates / peer-set / metric uniqueness 严格一致校验；relation 由 draft 显式指定（程序不根据 premium 自动决定）；automatic Evidence expansion（每 comparison → target + 全部 peer Observations 的 source Evidence 自动 context，幂等去重）；additional Evidence 保持 caller relation；critical policy（每个 support Comparison 的 target + peer 全部 source Evidence 必须 `critical_claim_eligible_snapshot=true`）；assessment 是分析判断（无 hidden thresholds）；v7 fingerprint（comparison groups + evidence groups）；two-phase commit（0 partial write）、并发 → 1 完整集合、batch 1..3 all-drafts-validate-first + 单 transaction、replay 重新验证（损坏 → `ValuationClaimIntegrityError`，不 repair）。**0 LLM / 0 Chroma / 0 LangGraph / 0 Report / 0 Audit**。
+- **测试**：**34 项集成**（`tests/integration/test_valuation_claim_service.py`：Gate / claim contract / comparison validation / automatic evidence / critical / persistence / batch / corruption / E2E provenance / boundary）+ **3 项 migration 0027 downgrade guard**（`tests/integration/test_migration_0027_downgrade_guard.py`，isolated 临时 PG：空库降级成功 / profiles 行拒绝 / links 行拒绝且数据保留）。全程 0 真实 LLM / 0 Chroma / 0 LangGraph / 0 Report 表。
+- **边界**：不开始 4C.2B.2（LLM 分析阶段）；不调用 LLM / 不调 DeepSeek / 不查 Chroma / 0 Retrieval；不创建 Report / DraftSection / ReviewIssue / Audit；不接 LangGraph 分析节点；不开放 HTTP API；不修改 generic / Financial / Macro 既有 schema；不实现绝对公允价值 / target price / DCF / 买卖建议；不把 `RelativeValuationComparison` 伪装成 EvidenceCard。
+- **决策记录**：[docs/decisions/0034-relative-valuation-claim-provenance.md](decisions/0034-relative-valuation-claim-provenance.md)。
+
+### 4C.2B.2 Relative Valuation Claim 分析（next）
+
+- **状态：未开始（next）**。把 4C.2B.1 的 Comparison + Claim provenance 接上 LLM，形成 Relative Valuation Claim 分析（Analyst 只做判断，确定性交给代码）；不实现绝对公允价值 / target price / DCF / 买卖建议。
 
 ## 4D：Claim 综合 / 冲突 / 证据缺口（later）
 
