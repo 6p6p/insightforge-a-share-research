@@ -35,6 +35,17 @@ ps_ttm）。**不计算**相对估值比较 / 不调用 LLM / 不自动选 peer 
 估值）。observation 允许 0 / 负倍数（来源事实快照；可比较性由 comparison
 阶段校验）。
 
+**producer 输入边界（deterministic vs structured semantics）**：本 service
+的 **deterministic 强验证**覆盖 Evidence/source provenance、company、
+document metric Evidence、exact numeric-token、Decimal/storage bounds。
+`metric_code`（该数字是否 pe_ttm / pb_mrq / ps_ttm）与 `metric_as_of`（该数字
+的市场观测日）**由 structured producer 语义输入**（`ValuationMetricDraft`）
+声明，程序只确定性校验其取值范围（metric_code 白名单 / metric_as_of 为
+date），**不自动从 quote / 表格表头验证**"这个数字一定是 PE_TTM / 这个日期
+一定是 metric_as_of"。automatic semantic extraction 是未来 official
+market-data provider / deterministic table extractor 的职责（仍是确定性
+路径）；本阶段不实现中文 PE/PB/PS label NLP parser。
+
 **不访问** Chroma / BGE / LLM / RawArtifact bytes；**不复制 locator_refs**
 （PG EvidenceCard 是 provenance truth source）。同一完全相同 observation →
 replay 同一行；value / metric / date / source evidence 任一变化 → 新

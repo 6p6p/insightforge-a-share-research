@@ -77,7 +77,17 @@ quote 里作为完整 token 出现"，两者语义正交、全部可达。该修
    `validate_valuation_decimal_storage`（复用 `fits_numeric_38_12`，小数位
    <= 12 且 abs < 10^26）→ 超界 `ValuationStorageRangeError`（禁止静默
    quantize / round / truncate）。**observation 允许 0 / 负倍数**（来源事实
-   快照），可比较性由 comparison 校验。
+   快照），可比较性由 comparison 校验。**producer 输入边界**：本 policy 的
+   **deterministic 强验证**覆盖 Evidence/source provenance、company、
+   document metric Evidence、exact numeric token、Decimal/storage bounds；
+   `metric_code`（该数字是否 `pe_ttm` / `pb_mrq` / `ps_ttm`）与 `metric_as_of`
+   （该数字的市场观测日）**当前来自 structured producer 语义输入**
+   （`ValuationMetricDraft`），程序只确定性校验其取值范围（白名单 / date）与
+   跨 observation 一致性，**不自动从 quote / 表格表头验证**"这个数字一定是
+   PE_TTM / 这个日期一定是 metric_as_of"。automatic semantic extraction 是
+   **未来** official market-data provider / deterministic table extractor 的
+   职责（仍是确定性路径）；本阶段不实现中文 PE/PB/PS label NLP parser，也不把
+   本阶段表述为"所有估值语义已从原文自动验证"。
 
 5. **Peer 规则（显式 peer，程序不自动选）**：调用方传 `peer_observation_ids`
    （3..20，构造时校验去重、target 不在 peer 内）。Service 从真实 Observation
