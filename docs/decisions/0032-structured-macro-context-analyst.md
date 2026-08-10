@@ -68,9 +68,10 @@ fingerprint 与 `MacroClaimDraft`（语义输入），**不是查询列**——f
 4. **请求 / 决策契约**（`app/analysis/macro/contracts.py`）：`MacroAnalysisRequest`
    （macro_driver_evidence_ids 1..20、company_evidence_ids 1..30、两池**不重叠**、
    去重 + canonical 排序、research_question 非空）；`MacroClaimCandidate`
-   （claim_kind **只允许 inference/risk**——**schema 层拒绝 fact**：宏观定量事实由
-   Macro Evidence 承载，Analyst 只解释并判断风险，`MacroClaimDraft` 更低层契约仍
-   支持 fact 但 service `_check_kind_policy` 兜底；每条 ≥1 macro_driver_ref（`M<number>`）
+   （claim_kind **只允许 inference/risk**——**契约层直接拒绝 fact**：宏观定量事实由
+   Macro Evidence 承载，Analyst 只解释并判断风险，`MacroClaimDraft.__post_init__`
+   与 service `_check_kind_policy` **双重拒绝 fact（无任何下层契约接受 fact）**；
+   每条 ≥1 macro_driver_ref（`M<number>`）
    + ≥1 company_exposure_ref（`E<number>`），**无 reasoning / CoT / UUID /
    fingerprint**）；`MacroAnalysisDecision`（relevant=false → 空 claims + 可选
    reason_code ∈ {not_relevant, insufficient_macro_evidence,
