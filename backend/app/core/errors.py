@@ -221,3 +221,16 @@ class TaskArtifactIntegrityError(DomainError):
     code = "task_artifact_integrity"
     http_status = 409
     message = "任务产物完整性校验失败"
+
+
+class CitationNotFound(DomainError):
+    """Citation 目标不存在 / 不属于当前任务（Stage 6B.2 spec J）。
+
+    Evidence / Claim 必须属于该 task 的 canonical lineage scope；不属于 → 404。
+    **不要通过响应暴露「这个 UUID 在别的 task 存在」**——与本任务内不存在返回
+    完全相同（不区分 UUID 存在性，统一 404）。
+    """
+
+    code = "citation_not_found"
+    http_status = 404
+    message = "引用不存在"

@@ -390,6 +390,40 @@ class TaskArtifactService:
         resp.research_backflow = await self._resolve_research_backflow(anchor)
         return resp
 
+    # ------------------------------------------------------------------ citation scope（spec J/L）
+
+    async def resolve_evidence_scope(self, task_id: UUID) -> set[UUID]:
+        """canonical lineage 的任务级 evidence scope（spec J）。
+
+        Citation API 必须先得到 allowed evidence IDs 再决定 404 / 消费——
+        不能仅凭任意 UUID 直接读取全库 Evidence。
+        """
+        anchor = await self._anchor(task_id)
+        verified_result, verified_run = await self._resolve_verified(anchor)
+        return await self._evidence_ids(anchor, verified_run)
+
+    async def resolve_claim_scope(self, task_id: UUID) -> set[UUID]:
+        """canonical synthesis 的 exact input claim IDs（spec L）。
+
+        Claim Citation 只允许 canonical synthesis input claim；不属于 → 404。
+        """
+        anchor = await self._anchor(task_id)
+        verified_result, _ = await self._resolve_verified(anchor)
+        if verified_result is None:
+            return set()
+        return set(verified_result.input_claim_ids)
+
+    async def resolve_verified_claims(self, task_id: UUID) -> list[VerifiedSynthesisClaim]:
+        """canonical synthesis 的 verified claims（供 claim citation 元数据）。
+
+        经 `verify_synthesis_integrity` 重建一致；tamper → 上游 integrity error。
+        """
+        anchor = await self._anchor(task_id)
+        _, verified_run = await self._resolve_verified(anchor)
+        if verified_run is None:
+            return []
+        return list(verified_run.verified_claims)
+
     async def count_artifacts(self, task_id: UUID) -> ArtifactSummary:
         """任务级产物计数（workspace 投影；与各 tab 共用同一 canonical 推导）。"""
         anchor = await self._anchor(task_id)

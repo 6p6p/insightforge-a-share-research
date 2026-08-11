@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.api.dependencies import (
     get_research_execution_service,
     get_task_artifact_service,
+    get_task_citation_service,
     get_task_service,
     get_task_workspace_service,
     get_workflow_service,
@@ -24,6 +25,7 @@ from app.schemas.artifact import (
     ReviewsArtifactResponse,
     SourceArtifactListResponse,
 )
+from app.schemas.citation import ClaimCitationResponse, EvidenceCitationResponse
 from app.schemas.research_execution import (
     ResearchExecutionRequest,
     TaskWorkspaceResponse,
@@ -33,6 +35,7 @@ from app.schemas.workflow import WorkflowRunResponse
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.sse_service import format_sse_event, parse_last_event_id
 from app.services.task_artifact_service import TaskArtifactService
+from app.services.task_citation_service import TaskCitationService
 from app.services.task_service import TaskService
 from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
@@ -148,6 +151,41 @@ async def get_task_reviews(
 ) -> ReviewsArtifactResponse:
     """任务最新审核视图：audit 摘要 + issues。"""
     return await service.get_reviews(task_id)
+
+
+@router.get(
+    "/{task_id}/citations/evidence/{evidence_card_id}",
+    response_model=EvidenceCitationResponse,
+)
+async def get_evidence_citation(
+    task_id: UUID,
+    evidence_card_id: UUID,
+    service: Annotated[TaskCitationService, Depends(get_task_citation_service)],
+) -> EvidenceCitationResponse:
+    """Evidence citation（Stage 6B.2 spec K）。
+
+    Report → click citation → Evidence（头部 + canonical Claim relations +
+    verified Document / Macro provenance）。task-scoped（spec J）；Document /
+    Macro 全链 integrity 失败 → 409。
+    """
+    return await service.get_evidence_citation(task_id, evidence_card_id)
+
+
+@router.get(
+    "/{task_id}/citations/claims/{claim_id}",
+    response_model=ClaimCitationResponse,
+)
+async def get_claim_citation(
+    task_id: UUID,
+    claim_id: UUID,
+    service: Annotated[TaskCitationService, Depends(get_task_citation_service)],
+) -> ClaimCitationResponse:
+    """Claim citation（Stage 6B.2 spec L）。
+
+    只允许 canonical synthesis input claim；返回 claim 元数据 + evidence
+    relation list（relation 保留 supports / contradicts / context）。
+    """
+    return await service.get_claim_citation(task_id, claim_id)
 
 
 @router.post(

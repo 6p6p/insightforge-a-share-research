@@ -6,11 +6,12 @@ macro 卡专用标识（macro_observation_id / snapshot_id / series_id）。
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import { getTaskEvidence, taskKeys } from '../../api/tasks';
 import type { EvidenceArtifactResponse } from '../../types/artifacts';
+import type { CitationTarget } from '../../types/citation';
 import { artifactErrorMessage } from './integrity';
 
 const { Text } = Typography;
@@ -31,9 +32,11 @@ const RELATION_COLOR: Record<string, string> = {
 
 interface Props {
   taskId: string;
+  /** 「查看引用」→ 打开该 evidence 的 citation。 */
+  onOpenCitation?: (target: CitationTarget) => void;
 }
 
-export function EvidenceTab({ taskId }: Props): React.JSX.Element {
+export function EvidenceTab({ taskId, onOpenCitation }: Props): React.JSX.Element {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const { data, isLoading, isError, error } = useQuery({
@@ -94,6 +97,23 @@ export function EvidenceTab({ taskId }: Props): React.JSX.Element {
       width: 180,
       render: (v: string) => v,
     },
+    ...(onOpenCitation
+      ? [
+          {
+            title: '操作',
+            width: 100,
+            render: (_: unknown, row: EvidenceArtifactResponse) => (
+              <Button
+                size="small"
+                type="link"
+                onClick={() => onOpenCitation({ kind: 'evidence', evidenceCardId: row.evidence_card_id })}
+              >
+                查看引用
+              </Button>
+            ),
+          },
+        ]
+      : []),
   ];
 
   if (isError) {

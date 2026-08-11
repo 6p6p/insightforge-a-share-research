@@ -17,6 +17,11 @@ if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
   });
 }
 
+// ReportTab「定位报告」调用 scrollIntoView；jsdom 未实现，stub 掉避免报错。
+if (typeof Element !== 'undefined' && typeof Element.prototype.scrollIntoView !== 'function') {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 // antd 某些组件使用 getComputedStyle + ResizeObserver。
 if (typeof window !== 'undefined' && typeof window.ResizeObserver !== 'function') {
   class ResizeObserverStub {

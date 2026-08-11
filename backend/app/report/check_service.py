@@ -41,14 +41,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.db.models.claim import ClaimModel
 from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.evidence_card import EvidenceCardModel
-from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
-from app.db.models.macro_observation import MacroObservationModel
-from app.db.models.macro_series import MacroSeriesModel
-from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
-from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.report import ReportCheckResultModel
-from app.db.models.source_provider import SourceProviderModel
-from app.db.models.source_record import SourceRecordModel
+from app.evidence.provenance_service import EvidenceProvenanceService
 from app.report.checks import CheckInput, EvidenceCheckData, run_checks
 from app.report.contracts import (
     CHECK_STATUS_FAIL,
@@ -251,143 +245,10 @@ class ReportCheckService:
     ) -> dict[UUID, bool]:
         """按 origin_type 批量验证 Evidence → source → RawArtifact 真实可追溯。
 
-        spec D：FK 非空不够——必须沿完整链走到真实 `raw_artifacts` 行：
-        - document_chunk：`EvidenceCard.source_id → SourceRecord.artifact_id →
-          RawArtifact`；
-        - macro_observation：`EvidenceCard.macro_observation_id →
-          MacroObservation.snapshot_id → MacroDatasetSnapshot →（series /
-          provider + macro_snapshot_artifacts 链接）→ RawArtifact`。
-
-        任一环节断裂 → `has_provenance=False`（`citation_provenance_closure`
-        check 捕获，**不 repair / 不重新 retrieval**）。同一短 session 内批量
-        IN 查询，避免 N+1。
+        委托 `EvidenceProvenanceService.load_closure`（spec I：Document 与
+        Macro 共用这一条 verified provenance path，此处不维护私有第三套逻辑）。
         """
-        provenance: dict[UUID, bool] = {}
-        doc_source_by_card: dict[UUID, UUID] = {
-            cid: card.source_id
-            for cid, card in cards.items()
-            if card.origin_type == "document_chunk" and card.source_id is not None
-        }
-        macro_obs_by_card: dict[UUID, UUID] = {
-            cid: card.macro_observation_id
-            for cid, card in cards.items()
-            if card.origin_type == "macro_observation" and card.macro_observation_id is not None
-        }
-        for cid in cards:
-            if cid not in doc_source_by_card and cid not in macro_obs_by_card:
-                provenance[cid] = False
-
-        if doc_source_by_card:
-            provenance.update(await self._document_provenance(session, doc_source_by_card))
-        if macro_obs_by_card:
-            provenance.update(await self._macro_provenance(session, macro_obs_by_card))
-        return provenance
-
-    @staticmethod
-    async def _document_provenance(session, source_by_card: dict[UUID, UUID]) -> dict[UUID, bool]:
-        """document_chunk 闭包：SourceRecord → artifact → RawArtifact。"""
-        source_ids = list(dict.fromkeys(source_by_card.values()))
-        result = await session.execute(
-            select(SourceRecordModel.source_id, SourceRecordModel.artifact_id).where(
-                SourceRecordModel.source_id.in_(source_ids)
-            )
-        )
-        artifact_by_source = {row.source_id: row.artifact_id for row in result.all()}
-        artifact_ids = [aid for aid in artifact_by_source.values() if aid is not None]
-        existing_artifacts: set[UUID] = set()
-        if artifact_ids:
-            result = await session.execute(
-                select(RawArtifactModel.artifact_id).where(
-                    RawArtifactModel.artifact_id.in_(artifact_ids)
-                )
-            )
-            existing_artifacts = {row.artifact_id for row in result.all()}
-        return {
-            cid: (sid in artifact_by_source and artifact_by_source[sid] in existing_artifacts)
-            for cid, sid in source_by_card.items()
-        }
-
-    @staticmethod
-    async def _macro_provenance(session, obs_by_card: dict[UUID, UUID]) -> dict[UUID, bool]:
-        """macro_observation 闭包：Observation → Snapshot →（Series/Provider +
-        artifact links）→ RawArtifact。
-
-        Snapshot 的 artifact links 是可选的（不像 document 链那样被 FK 完整
-        保证）——若链接行被删 / 从未归档，Observation / Snapshot / Series /
-        Provider 仍在而 RawArtifact 不可达 → 判定无 provenance。
-        """
-        obs_ids = list(dict.fromkeys(obs_by_card.values()))
-        result = await session.execute(
-            select(MacroObservationModel.observation_id, MacroObservationModel.snapshot_id).where(
-                MacroObservationModel.observation_id.in_(obs_ids)
-            )
-        )
-        snapshot_by_obs = {row.observation_id: row.snapshot_id for row in result.all()}
-
-        snapshot_ids = [sid for sid in snapshot_by_obs.values() if sid is not None]
-        series_by_snapshot: dict[UUID, UUID] = {}
-        if snapshot_ids:
-            result = await session.execute(
-                select(
-                    MacroDatasetSnapshotModel.snapshot_id,
-                    MacroDatasetSnapshotModel.series_id,
-                ).where(MacroDatasetSnapshotModel.snapshot_id.in_(snapshot_ids))
-            )
-            series_by_snapshot = {row.snapshot_id: row.series_id for row in result.all()}
-
-        series_ids = [sid for sid in series_by_snapshot.values() if sid is not None]
-        provider_by_series: dict[UUID, str] = {}
-        if series_ids:
-            result = await session.execute(
-                select(MacroSeriesModel.series_id, MacroSeriesModel.provider_key).where(
-                    MacroSeriesModel.series_id.in_(series_ids)
-                )
-            )
-            provider_by_series = {row.series_id: row.provider_key for row in result.all()}
-
-        provider_keys = [key for key in provider_by_series.values() if key]
-        existing_providers: set[str] = set()
-        if provider_keys:
-            result = await session.execute(
-                select(SourceProviderModel.provider_key).where(
-                    SourceProviderModel.provider_key.in_(provider_keys)
-                )
-            )
-            existing_providers = {row.provider_key for row in result.all()}
-
-        artifact_ids_by_snapshot: dict[UUID, list[UUID]] = {}
-        if snapshot_ids:
-            result = await session.execute(
-                select(
-                    MacroSnapshotArtifactModel.snapshot_id,
-                    MacroSnapshotArtifactModel.artifact_id,
-                ).where(MacroSnapshotArtifactModel.snapshot_id.in_(snapshot_ids))
-            )
-            for snapshot_id, artifact_id in result.all():
-                artifact_ids_by_snapshot.setdefault(snapshot_id, []).append(artifact_id)
-        all_artifact_ids = [aid for ids in artifact_ids_by_snapshot.values() for aid in ids]
-        existing_artifacts: set[UUID] = set()
-        if all_artifact_ids:
-            result = await session.execute(
-                select(RawArtifactModel.artifact_id).where(
-                    RawArtifactModel.artifact_id.in_(all_artifact_ids)
-                )
-            )
-            existing_artifacts = {row.artifact_id for row in result.all()}
-
-        def snapshot_ok(snapshot_id: UUID) -> bool:
-            series_id = series_by_snapshot.get(snapshot_id)
-            if series_id is None or series_id not in provider_by_series:
-                return False
-            if provider_by_series[series_id] not in existing_providers:
-                return False
-            linked = artifact_ids_by_snapshot.get(snapshot_id, [])
-            return any(aid in existing_artifacts for aid in linked)
-
-        return {
-            cid: (obs_id in snapshot_by_obs and snapshot_ok(snapshot_by_obs[obs_id]))
-            for cid, obs_id in obs_by_card.items()
-        }
+        return await EvidenceProvenanceService.load_closure(session, cards)
 
 
 def _finding_from_dict(data: dict) -> CheckFinding:

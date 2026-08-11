@@ -34,6 +34,7 @@ from app.db.models.evidence_card import EvidenceCardModel
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
 from app.draft_section.service import DraftSectionService
+from app.evidence.provenance_service import EvidenceProvenanceService
 from app.report.check_service import ReportCheckService
 from app.report.service import ReportService
 from app.services.source_registry_service import SourceRegistryService
@@ -150,12 +151,12 @@ async def test_document_provenance_closure_valid_chain_true(env) -> None:
 async def test_document_provenance_closure_dangling_source_false(sessionmaker) -> None:
     """spec D：closure 真实查询 DB——FK 字段非空但源记录不存在 → False（防恒真退化）。"""
     async with sessionmaker() as session:
-        ok = await ReportCheckService._document_provenance(session, {uuid4(): uuid4()})
+        ok = await EvidenceProvenanceService.document_closure(session, {uuid4(): uuid4()})
     assert list(ok.values()) == [False]
 
 
 async def test_macro_provenance_closure_orphan_observation_false(sessionmaker) -> None:
     """spec D：closure 真实查询 DB——FK 字段非空但 Observation 不存在 → False。"""
     async with sessionmaker() as session:
-        ok = await ReportCheckService._macro_provenance(session, {uuid4(): uuid4()})
+        ok = await EvidenceProvenanceService.macro_closure(session, {uuid4(): uuid4()})
     assert list(ok.values()) == [False]

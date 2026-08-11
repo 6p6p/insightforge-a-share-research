@@ -2,7 +2,7 @@
 
 > 阶段 6 目标：**Web 工作台**——把已 FINAL 的证据链（Source → Evidence → Claim → Report → Audit → ReviewAction → Revision / ResearchBackflow）暴露为真实可操作的前端界面，供分析师创建研究任务、观察 LangGraph 执行进度并完成人工确认。**Stage 6 不做 LLM 功能开发、不做 Stage 7 evaluation**；本轮（6A）只做**工作台基础 + Task/Progress 垂直切片**。
 >
-> 总进度：**6A = completed（FINAL）**；**6B.1 = completed（FINAL，Research Artifact Workspace）**；**6B.2 = next（工作台增强，见下）**。
+> 总进度：**6A = completed（FINAL）**；**6B.1 = completed（FINAL，Research Artifact Workspace）**；**6B.2 = completed（FINAL，Citation Navigation + Provenance Viewer）**；**6C = next（工作台增强，见下）**。
 
 ## 6A：Web Workbench Task Foundation（completed，FINAL）
 
@@ -48,7 +48,16 @@
 - **evidence relations**：`used_by_claim_ids`（必填）+ `claim_relations:[{claim_id,relation}]`；analysis 投影含 themes / conflicts / evidence_gaps（alias refs 解析为真实 claim_ids）；report 投影含真实 body（sections[].paragraphs[]）；reviews 分层投影（Deterministic Check + Agent Audit + ReviewAction + Human Review + Research Backflow，缺失层=null）。
 - 前端：工作台 antd Tabs（概览 / 来源 / 证据 / 分析 / 报告 / 审核），惰性挂载，5 个 artifact tab 组件渲染新字段；完整性错误显示「产物完整性校验失败」。后端回归 1891 非集成 + 834 集成；前端 typecheck + 35 tests + build 全绿；alembic 保持 0038（0 新迁移）。
 
-## 6B.2（next）：工作台增强
+## 6B.2：Citation Navigation + Evidence/Claim Provenance（completed，FINAL）
+
+- **共享只读 provenance 服务**：`EvidenceProvenanceService`（`app/evidence/provenance_service.py`）从 audit provenance 提取为最小公共只读路径，Document（EvidenceCard→DocumentChunk→ChunkSet→ParsedSource→SourceRecord→RawArtifact→SourceProvider）与 Macro（EvidenceCard→MacroObservation→Snapshot→Series→SourceProvider + MacroSnapshotArtifact links→RawArtifact）共用同一条 verified provenance 链；`document_closure` / `macro_closure` 做真实闭包校验（macro FK 非空不够，删 artifact links → False）。
+- **`TaskCitationService`（task-scoped 只读）**：给定 task_id + evidence_card_id / claim_id，先从 TaskArtifactService canonical lineage 得到 allowed evidence/claim ID 集，跨 task Evidence / 跨 canonical Claim → `CitationNotFound` 404；不允许凭任意 UUID 直接读全库。
+- **Citation API**：`GET /tasks/{id}/citations/evidence/{card}`（evidence 头 + claim_relations（保留 supports / contradicts / context）+ discriminated-union provenance）与 `GET /tasks/{id}/citations/claims/{claim}`（仅 canonical synthesis input claim）。任一 hop 缺失或 tamper → `TaskArtifactIntegrityError` 409，不 repair。
+- **原文打开策略**：后端 content 端点仅服务 PDF（非 PDF 415）；前端只在 `media_type === 'application/pdf'` 时显示「打开原文 PDF」（新标签页打开后端流式端点）。
+- **前端**：`CitationDrawer`（evidence/claim citation 只读视图，Document/Macro provenance 分派，relation 导航 evidence⇄claim）；ReportTab 观点/证据 Tag 可点击、EvidenceTab「查看引用」、ReviewsTab「定位报告」（`?tab=report&section=&paragraph=` URL 定位 → 高亮并滚动）。
+- 后端 8 个 R-scenario 集成测试 + E2E（真实 PostgreSQL + Fake models + FastAPI，0 real DeepSeek）；前端 48 tests + typecheck + build 全绿；alembic 保持 0038（0 新迁移）。
+
+## 6C（next）：工作台增强
 
 - Task 列表分页 / 搜索 / 状态筛选。
 - workspace 产物卡片按 Stage 4/5 类型细化（evidence cards / calculations / comparisons / outline / draft sections / report）。

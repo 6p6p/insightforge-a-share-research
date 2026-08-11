@@ -6,7 +6,12 @@ import zhCN from 'antd/locale/zh_CN';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import { createTestQueryClient } from '../test/render';
-import type { AnalysisArtifactResponse } from '../types/artifacts';
+import type {
+  AnalysisArtifactResponse,
+  ReportArtifactResponse,
+  ReviewsArtifactResponse,
+} from '../types/artifacts';
+import type { ClaimCitationResponse, EvidenceCitationResponse } from '../types/citation';
 import { ApiError } from '../types/api';
 import type { TaskWorkspaceResponse } from '../types/workspace';
 import { TaskWorkspacePage } from './TaskWorkspacePage';
@@ -18,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   getTaskAnalysis: vi.fn(),
   getTaskReport: vi.fn(),
   getTaskReviews: vi.fn(),
+  getEvidenceCitation: vi.fn(),
+  getClaimCitation: vi.fn(),
   useTaskEvents: vi.fn(),
 }));
 
@@ -32,6 +39,8 @@ vi.mock('../api/tasks', () => ({
     analysis: (id: string) => ['tasks', 'artifacts', id, 'analysis'],
     report: (id: string) => ['tasks', 'artifacts', id, 'report'],
     reviews: (id: string) => ['tasks', 'artifacts', id, 'reviews'],
+    citationEvidence: (id: string, cid: string) => ['tasks', 'citations', id, 'evidence', cid],
+    citationClaim: (id: string, cid: string) => ['tasks', 'citations', id, 'claims', cid],
   },
   getTaskWorkspace: mocks.getTaskWorkspace,
   getTaskSources: mocks.getTaskSources,
@@ -39,6 +48,8 @@ vi.mock('../api/tasks', () => ({
   getTaskAnalysis: mocks.getTaskAnalysis,
   getTaskReport: mocks.getTaskReport,
   getTaskReviews: mocks.getTaskReviews,
+  getEvidenceCitation: mocks.getEvidenceCitation,
+  getClaimCitation: mocks.getClaimCitation,
 }));
 
 vi.mock('../hooks/useTaskEvents', () => ({
@@ -102,6 +113,8 @@ beforeEach(() => {
   mocks.getTaskAnalysis.mockReset();
   mocks.getTaskReport.mockReset();
   mocks.getTaskReviews.mockReset();
+  mocks.getEvidenceCitation.mockReset();
+  mocks.getClaimCitation.mockReset();
   mocks.useTaskEvents.mockReset();
   mocks.useTaskEvents.mockReturnValue({
     events: [],
@@ -219,5 +232,203 @@ describe('TaskWorkspacePage artifact tabs（Stage 6B.1）', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '分析' }));
     expect(await screen.findByText('产物完整性校验失败')).toBeInTheDocument();
+  });
+});
+
+// ------------------------------------------------------------------ 6B.2 fixtures
+
+const reportData: ReportArtifactResponse = {
+  report_id: 'rpt-1',
+  outline_id: 'out-1',
+  company_id: 'c1',
+  research_question_sha256: 'rq-1',
+  analysis_as_of: '2026-08-10',
+  report_schema_version: 1,
+  report_fingerprint: 'fp-rpt-1',
+  section_count: 1,
+  sections: [
+    {
+      section_id: 'S2',
+      draft_section_id: 'ds-1',
+      section_order: 1,
+      section_type: 'analysis',
+      title: '营收分析',
+      paragraphs: [
+        {
+          paragraph_index: 3,
+          text: '2026 年营收增长与行业均值相符。',
+          claim_ids: ['cl-claim-a'],
+          evidence_card_ids: ['ev-card-a'],
+          conflict_indexes: [],
+          evidence_gap_indexes: [],
+        },
+      ],
+    },
+  ],
+};
+
+const claimCitationData: ClaimCitationResponse = {
+  claim_id: 'cl-claim-a',
+  statement: '2026 年营收增长与行业均值相符。',
+  domain: 'business',
+  kind: 'fact',
+  confidence: 'high',
+  importance: 'high',
+  evidence_relations: [
+    { evidence_card_id: 'ev-card-a', evidence_statement: '行业均值数据', relation: 'supports' },
+  ],
+};
+
+const evidenceCitationData: EvidenceCitationResponse = {
+  evidence: {
+    evidence_card_id: 'ev-card-a',
+    statement: '行业均值数据',
+    quote_text: '营收增长 12%',
+    evidence_type: 'financial',
+    origin_type: 'document_chunk',
+  },
+  claim_relations: [
+    { claim_id: 'cl-claim-a', claim_statement: '2026 年营收增长与行业均值相符。', relation: 'supports' },
+  ],
+  provenance: {
+    origin_type: 'document_chunk',
+    source_id: 'src-1',
+    provider_key: 'xinhuanet',
+    provider_label: '新华网',
+    title: '贵州茅台 2026 半年报',
+    source_url: 'https://example.com/report',
+    published_at: '2026-08-01T00:00:00Z',
+    authority_tier: 3,
+    document_type: 'annual_report',
+    raw_artifact_id: 'raw-1',
+    media_type: 'application/pdf',
+    parsed_source_id: 'ps-1',
+    chunk_id: 'chunk-1',
+    locator: {
+      locator_type: 'pdf_page',
+      block_ordinal: null,
+      char_start: null,
+      char_end: null,
+      ordinal: null,
+      tag: null,
+      xpath: null,
+      element_id: null,
+      page_number: 2,
+      line_index: 5,
+      bbox: null,
+      page_width: null,
+      page_height: null,
+    },
+    locator_refs: [],
+    context_text: '…营收增长 12%…',
+    quote_text: '营收增长 12%',
+  },
+};
+
+describe('TaskWorkspacePage citation navigation（Stage 6B.2 spec O/P/Q）', () => {
+  it('报告 tab 点击观点 Tag → 打开 claim citation 抽屉', async () => {
+    mocks.getTaskReport.mockResolvedValue(reportData);
+    mocks.getClaimCitation.mockResolvedValue(claimCitationData);
+    renderPage();
+    await screen.findByText('任务概要');
+
+    fireEvent.click(screen.getByRole('tab', { name: '报告' }));
+    await screen.findByText('营收分析');
+    fireEvent.click(screen.getByText('观点 cl-claim'));
+
+    expect(await screen.findByText('支撑该观点的证据（1）')).toBeInTheDocument();
+    expect(mocks.getClaimCitation).toHaveBeenCalledWith('task-1', 'cl-claim-a');
+  });
+
+  it('报告 tab 点击证据 Tag → 打开 evidence citation 抽屉并渲染 Document provenance', async () => {
+    mocks.getTaskReport.mockResolvedValue(reportData);
+    mocks.getEvidenceCitation.mockResolvedValue(evidenceCitationData);
+    renderPage();
+    await screen.findByText('任务概要');
+
+    fireEvent.click(screen.getByRole('tab', { name: '报告' }));
+    await screen.findByText('营收分析');
+    fireEvent.click(screen.getByText('证据 ev-card-'));
+
+    expect(await screen.findByText('来源追溯（Document）')).toBeInTheDocument();
+    expect(mocks.getEvidenceCitation).toHaveBeenCalledWith('task-1', 'ev-card-a');
+  });
+
+  it('证据 tab「查看引用」→ 打开 evidence citation 抽屉', async () => {
+    mocks.getTaskEvidence.mockResolvedValue({
+      items: [
+        {
+          evidence_card_id: 'ev-card-a',
+          source_id: 'src-1',
+          company_id: 'c1',
+          evidence_statement: '行业均值数据',
+          evidence_type: 'financial',
+          extractor_confidence: 'high',
+          quote_text: null,
+          origin_type: 'document_chunk',
+          created_at: '2026-08-01T00:00:00Z',
+          used_by_claim_ids: ['cl-claim-a'],
+          claim_relations: [{ claim_id: 'cl-claim-a', relation: 'supports' }],
+          macro_observation_id: null,
+          macro_snapshot_id: null,
+          macro_series_id: null,
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    mocks.getEvidenceCitation.mockResolvedValue(evidenceCitationData);
+    renderPage();
+    await screen.findByText('任务概要');
+
+    fireEvent.click(screen.getByRole('tab', { name: '证据' }));
+    await screen.findByText('行业均值数据');
+    fireEvent.click(screen.getByRole('button', { name: '查看引用' }));
+
+    expect(mocks.getEvidenceCitation).toHaveBeenCalledWith('task-1', 'ev-card-a');
+    expect(await screen.findByText('来源追溯（Document）')).toBeInTheDocument();
+  });
+
+  it('审核 tab「定位报告」→ 切到报告 tab 并高亮定位段落', async () => {
+    const reviewsData: ReviewsArtifactResponse = {
+      audit_id: 'audit-1',
+      report_id: 'rpt-1',
+      audit_status: 'completed',
+      recommended_route: 'approve',
+      issue_count: 1,
+      audit_fingerprint: 'fp-audit-1',
+      issues: [
+        {
+          review_issue_id: 'issue-1',
+          ordinal: 1,
+          issue_type: 'missing_evidence',
+          severity: 'major',
+          section_id: 'S2',
+          paragraph_index: 3,
+          message: '缺少关键证据',
+          related_claim_ids: [],
+          related_evidence_card_ids: [],
+        },
+      ],
+      check: null,
+      review_action: null,
+      human_review: null,
+      research_backflow: null,
+    };
+    mocks.getTaskReviews.mockResolvedValue(reviewsData);
+    mocks.getTaskReport.mockResolvedValue(reportData);
+    renderPage();
+    await screen.findByText('任务概要');
+
+    fireEvent.click(screen.getByRole('tab', { name: '审核' }));
+    await screen.findByText('缺少关键证据');
+    fireEvent.click(screen.getByRole('button', { name: '定位报告' }));
+
+    await screen.findByText('营收分析');
+    const located = document.getElementById('report-para-S2:3');
+    expect(located).not.toBeNull();
+    // jsdom 会把 #fffbe6 序列化为 rgb(255, 251, 230)
+    expect(located?.getAttribute('style')).toContain('rgb(255, 251, 230)');
   });
 });

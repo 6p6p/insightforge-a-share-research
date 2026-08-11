@@ -3,8 +3,13 @@
 展示真实正文：sections[].paragraphs[].{text, claim_ids, evidence_card_ids,
 conflict_indexes, evidence_gap_indexes}。section_id 是 outline 符号键（如 "S2"），
 与审核 issue 的 section_id 关联。
+
+Stage 6B.2（spec O/Q）：段落里的「观点」「证据」Tag 可点击 → 打开
+CitationDrawer（evidence / claim citation）；ReviewsTab「定位报告」通过
+`locateSection`/`locateParagraph` 传进来 → 高亮并滚动到对应段落。
  */
 
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Card, Descriptions, Divider, Space, Tag, Typography } from 'antd';
 
@@ -13,6 +18,7 @@ import type {
   ReportArtifactResponse,
   ReportSectionArtifact,
 } from '../../types/artifacts';
+import type { CitationTarget } from '../../types/citation';
 import { artifactErrorMessage } from './integrity';
 
 const { Text } = Typography;
@@ -28,14 +34,31 @@ const SECTION_TYPE_LABEL: Record<string, string> = {
 
 interface Props {
   taskId: string;
+  /** 点击观点/证据 Tag → 打开对应 citation。 */
+  onOpenCitation?: (target: CitationTarget) => void;
+  /** ReviewsTab「定位报告」：高亮并滚动到该 section/paragraph。 */
+  locateSection?: string | null;
+  locateParagraph?: number | null;
 }
 
-export function ReportTab({ taskId }: Props): React.JSX.Element {
+/** 段落定位 key：`<section_id>:<paragraph_index>`（paragraph_index 为 -1 表示定位整节）。 */
+function locateKeyOf(sectionId: string, paragraphIndex: number | null): string {
+  return `${sectionId}:${paragraphIndex ?? -1}`;
+}
+
+export function ReportTab({
+  taskId,
+  onOpenCitation,
+  locateSection,
+  locateParagraph,
+}: Props): React.JSX.Element {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: taskKeys.report(taskId),
     queryFn: () => getTaskReport(taskId),
     refetchInterval: 5000,
   });
+
+  const locateKey = locateSection ? locateKeyOf(locateSection, locateParagraph ?? null) : null;
 
   if (isError) {
     return <Alert type="error" showIcon message={artifactErrorMessage(error, '加载报告失败')} />;
@@ -46,10 +69,41 @@ export function ReportTab({ taskId }: Props): React.JSX.Element {
   if (!data.report_id) {
     return <Alert type="info" showIcon message="该任务尚无报告（未执行 Stage 5 或审核未通过）。" />;
   }
-  return <ReportContent data={data} />;
+  return (
+    <ReportContent
+      data={data}
+      onOpenCitation={onOpenCitation}
+      locateKey={locateKey}
+    />
+  );
 }
 
-function ReportContent({ data }: { data: ReportArtifactResponse }): React.JSX.Element {
+function ReportContent({
+  data,
+  onOpenCitation,
+  locateKey,
+}: {
+  data: ReportArtifactResponse;
+  onOpenCitation?: (target: CitationTarget) => void;
+  locateKey: string | null;
+}): React.JSX.Element {
+  const [located, setLocated] = useState<string | null>(null);
+
+  // 数据就绪后再执行滚动，避免 locateKey 到达时正文尚未渲染。
+  useEffect(() => {
+    setLocated(locateKey);
+  }, [locateKey]);
+
+  useEffect(() => {
+    if (!located) {
+      return;
+    }
+    const el = document.getElementById(`report-para-${located}`);
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [located, data.report_id]);
+
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <Card title="报告概览">
@@ -71,7 +125,13 @@ function ReportContent({ data }: { data: ReportArtifactResponse }): React.JSX.El
       {data.sections.length > 0 ? (
         <Card title={`报告正文（${data.sections.length} 节）`}>
           {data.sections.map((section, index) => (
-            <SectionBlock key={section.section_id} section={section} last={index === data.sections.length - 1} />
+            <SectionBlock
+              key={section.section_id}
+              section={section}
+              last={index === data.sections.length - 1}
+              onOpenCitation={onOpenCitation}
+              located={located}
+            />
           ))}
         </Card>
       ) : (
@@ -81,7 +141,17 @@ function ReportContent({ data }: { data: ReportArtifactResponse }): React.JSX.El
   );
 }
 
-function SectionBlock({ section, last }: { section: ReportSectionArtifact; last: boolean }): React.JSX.Element {
+function SectionBlock({
+  section,
+  last,
+  onOpenCitation,
+  located,
+}: {
+  section: ReportSectionArtifact;
+  last: boolean;
+  onOpenCitation?: (target: CitationTarget) => void;
+  located: string | null;
+}): React.JSX.Element {
   return (
     <div>
       <Space wrap size="small" style={{ marginBottom: 8 }}>
@@ -93,12 +163,29 @@ function SectionBlock({ section, last }: { section: ReportSectionArtifact; last:
         <Text type="secondary">（无正文段落）</Text>
       ) : (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          {section.paragraphs.map((paragraph) => (
-            <div key={paragraph.paragraph_index}>
-              <Text>{paragraph.text}</Text>
-              <ParagraphMeta paragraph={paragraph} />
-            </div>
-          ))}
+          {section.paragraphs.map((paragraph) => {
+            const key = locateKeyOf(section.section_id, paragraph.paragraph_index);
+            const isLocated = located === key;
+            return (
+              <div
+                key={paragraph.paragraph_index}
+                id={`report-para-${key}`}
+                style={
+                  isLocated
+                    ? {
+                        background: '#fffbe6',
+                        border: '1px solid #faad14',
+                        borderRadius: 6,
+                        padding: 8,
+                      }
+                    : undefined
+                }
+              >
+                <Text>{paragraph.text}</Text>
+                <ParagraphMeta paragraph={paragraph} onOpenCitation={onOpenCitation} />
+              </div>
+            );
+          })}
         </Space>
       )}
       {!last ? <Divider style={{ margin: '16px 0' }} /> : null}
@@ -113,15 +200,35 @@ interface ParagraphMetaProps {
     conflict_indexes: number[];
     evidence_gap_indexes: number[];
   };
+  onOpenCitation?: (target: CitationTarget) => void;
 }
 
-function ParagraphMeta({ paragraph }: ParagraphMetaProps): React.JSX.Element {
+function ParagraphMeta({ paragraph, onOpenCitation }: ParagraphMetaProps): React.JSX.Element {
   const tags: React.JSX.Element[] = [];
   paragraph.claim_ids.forEach((claimId) =>
-    tags.push(<Tag key={`c-${claimId}`} color="blue">观点 {claimId.slice(0, 8)}</Tag>),
+    tags.push(
+      <Tag
+        key={`c-${claimId}`}
+        color="blue"
+        style={onOpenCitation ? { cursor: 'pointer' } : undefined}
+        onClick={onOpenCitation ? () => onOpenCitation({ kind: 'claim', claimId }) : undefined}
+        title={onOpenCitation ? '查看该观点引用' : undefined}
+      >
+        观点 {claimId.slice(0, 8)}
+      </Tag>,
+    ),
   );
   paragraph.evidence_card_ids.forEach((cardId) =>
-    tags.push(<Tag key={`e-${cardId}`}>证据 {cardId.slice(0, 8)}</Tag>),
+    tags.push(
+      <Tag
+        key={`e-${cardId}`}
+        style={onOpenCitation ? { cursor: 'pointer' } : undefined}
+        onClick={onOpenCitation ? () => onOpenCitation({ kind: 'evidence', evidenceCardId: cardId }) : undefined}
+        title={onOpenCitation ? '查看该证据引用' : undefined}
+      >
+        证据 {cardId.slice(0, 8)}
+      </Tag>,
+    ),
   );
   paragraph.conflict_indexes.forEach((idx) =>
     tags.push(<Tag key={`x-${idx}`} color="orange">冲突 #{idx}</Tag>),

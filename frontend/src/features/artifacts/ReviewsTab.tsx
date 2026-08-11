@@ -6,7 +6,7 @@ Deterministic Check / ReviewAction / Human Review / Research Backflow 各自
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Card, Descriptions, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Descriptions, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import { getTaskReviews, taskKeys } from '../../api/tasks';
@@ -52,9 +52,11 @@ const HUMAN_DECISION_COLOR: Record<string, string> = {
 
 interface Props {
   taskId: string;
+  /** 「定位报告」→ 切到报告 tab 并滚动到该 section/paragraph。 */
+  onLocateReport?: (sectionId: string, paragraphIndex: number | null) => void;
 }
 
-export function ReviewsTab({ taskId }: Props): React.JSX.Element {
+export function ReviewsTab({ taskId, onLocateReport }: Props): React.JSX.Element {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: taskKeys.reviews(taskId),
     queryFn: () => getTaskReviews(taskId),
@@ -70,10 +72,16 @@ export function ReviewsTab({ taskId }: Props): React.JSX.Element {
   if (!data.audit_id) {
     return <Alert type="info" showIcon message="该任务尚无审核（未执行 Stage 5 审核）。" />;
   }
-  return <ReviewsContent data={data} />;
+  return <ReviewsContent data={data} onLocateReport={onLocateReport} />;
 }
 
-function ReviewsContent({ data }: { data: ReviewsArtifactResponse }): React.JSX.Element {
+function ReviewsContent({
+  data,
+  onLocateReport,
+}: {
+  data: ReviewsArtifactResponse;
+  onLocateReport?: (sectionId: string, paragraphIndex: number | null) => void;
+}): React.JSX.Element {
   const issueColumns: ColumnsType<ReviewIssueArtifactResponse> = [
     { title: '序号', dataIndex: 'ordinal', width: 64 },
     {
@@ -86,6 +94,24 @@ function ReviewsContent({ data }: { data: ReviewsArtifactResponse }): React.JSX.
     { title: '章节', dataIndex: 'section_id', width: 120 },
     { title: '段落', dataIndex: 'paragraph_index', width: 64, render: (v: number | null) => v ?? '—' },
     { title: '问题描述', dataIndex: 'message', ellipsis: true },
+    ...(onLocateReport
+      ? [
+          {
+            title: '定位',
+            width: 90,
+            render: (_: unknown, row: ReviewIssueArtifactResponse) => (
+              <Button
+                size="small"
+                type="link"
+                disabled={!row.section_id}
+                onClick={() => onLocateReport(row.section_id, row.paragraph_index)}
+              >
+                定位报告
+              </Button>
+            ),
+          },
+        ]
+      : []),
   ];
 
   const checkColumns: ColumnsType<CheckFindingArtifact> = [

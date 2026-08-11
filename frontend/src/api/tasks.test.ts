@@ -4,6 +4,8 @@ vi.mock('./client', () => ({ apiRequest: vi.fn() }));
 
 import { apiRequest } from './client';
 import {
+  getClaimCitation,
+  getEvidenceCitation,
   getTaskAnalysis,
   getTaskEvidence,
   getTaskReport,
@@ -57,5 +59,32 @@ describe('task artifact API（Stage 6B.1）', () => {
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/analysis');
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/report');
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/reviews');
+  });
+});
+
+describe('citation API（Stage 6B.2 spec K/L）', () => {
+  beforeEach(() => {
+    mockedApiRequest.mockReset();
+  });
+
+  it('taskKeys 覆盖 evidence/claim citation key（task-scoped）', () => {
+    expect(taskKeys.citationEvidence('t1', 'ev-1')).toEqual([
+      'tasks', 'citations', 't1', 'evidence', 'ev-1',
+    ]);
+    expect(taskKeys.citationClaim('t1', 'cl-1')).toEqual([
+      'tasks', 'citations', 't1', 'claims', 'cl-1',
+    ]);
+  });
+
+  it('getEvidenceCitation → /tasks/{task}/citations/evidence/{card}', async () => {
+    mockedApiRequest.mockResolvedValue({ evidence: {}, claim_relations: [], provenance: {} });
+    await getEvidenceCitation('t1', 'ev-1');
+    expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/citations/evidence/ev-1');
+  });
+
+  it('getClaimCitation → /tasks/{task}/citations/claims/{claim}', async () => {
+    mockedApiRequest.mockResolvedValue({ claim_id: 'cl-1', evidence_relations: [] });
+    await getClaimCitation('t1', 'cl-1');
+    expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/citations/claims/cl-1');
   });
 });

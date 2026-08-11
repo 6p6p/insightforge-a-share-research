@@ -8,6 +8,10 @@ import type {
   ReviewsArtifactResponse,
   SourceArtifactListResponse,
 } from '../types/artifacts';
+import type {
+  ClaimCitationResponse,
+  EvidenceCitationResponse,
+} from '../types/citation';
 import type { TaskCreateRequest, TaskListResponse, TaskResponse } from '../types/task';
 import type {
   ResearchExecutionRequest,
@@ -29,6 +33,11 @@ export const taskKeys = {
   analysis: (taskId: string) => [...taskKeys.all, 'artifacts', taskId, 'analysis'] as const,
   report: (taskId: string) => [...taskKeys.all, 'artifacts', taskId, 'report'] as const,
   reviews: (taskId: string) => [...taskKeys.all, 'artifacts', taskId, 'reviews'] as const,
+  /** Stage 6B.2 citation navigation（task-scoped 只读）。 */
+  citationEvidence: (taskId: string, evidenceCardId: string) =>
+    [...taskKeys.all, 'citations', taskId, 'evidence', evidenceCardId] as const,
+  citationClaim: (taskId: string, claimId: string) =>
+    [...taskKeys.all, 'citations', taskId, 'claims', claimId] as const,
 };
 
 export async function createTask(payload: TaskCreateRequest): Promise<TaskResponse> {
@@ -93,6 +102,28 @@ export async function getTaskReport(taskId: string): Promise<ReportArtifactRespo
 /** 任务最新审核视图：audit 摘要 + issues。 */
 export async function getTaskReviews(taskId: string): Promise<ReviewsArtifactResponse> {
   return apiRequest<ReviewsArtifactResponse>(`/tasks/${taskId}/reviews`);
+}
+
+/** Evidence citation（Stage 6B.2 spec K）：evidence 头部 + canonical Claim
+ * relations + verified Document/Macro provenance。task-scoped。 */
+export async function getEvidenceCitation(
+  taskId: string,
+  evidenceCardId: string,
+): Promise<EvidenceCitationResponse> {
+  return apiRequest<EvidenceCitationResponse>(
+    `/tasks/${taskId}/citations/evidence/${evidenceCardId}`,
+  );
+}
+
+/** Claim citation（Stage 6B.2 spec L）：只允许 canonical synthesis input claim，
+ * 返回 claim 元数据 + evidence relation list。task-scoped。 */
+export async function getClaimCitation(
+  taskId: string,
+  claimId: string,
+): Promise<ClaimCitationResponse> {
+  return apiRequest<ClaimCitationResponse>(
+    `/tasks/${taskId}/citations/claims/${claimId}`,
+  );
 }
 
 /** 启动真实研究执行：显式 Stage 4 work plan。返回 Stage 4 run（202）。 */

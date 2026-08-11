@@ -12,6 +12,7 @@ from app.services.research_execution_service import ResearchExecutionService
 from app.services.source_ingestion_service import SourceIngestionService
 from app.services.source_registry_service import SourceRegistryService
 from app.services.task_artifact_service import TaskArtifactService
+from app.services.task_citation_service import TaskCitationService
 from app.services.task_service import TaskService
 from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
@@ -56,6 +57,26 @@ def get_task_artifact_service(request: Request) -> TaskArtifactService:
     sessionmaker = resources.database.session_factory()
     deps = create_stage5_dependencies(settings, sessionmaker)
     return TaskArtifactService.from_dependencies(sessionmaker, resources.langgraph, deps)
+
+
+def get_task_citation_service(request: Request) -> TaskCitationService:
+    """任务级 citation navigation（Stage 6B.2）。
+
+    复用 `create_stage5_dependencies` + TaskArtifactService（canonical lineage
+    scope 判定），Evidence / Claim / Source provenance 走
+    `EvidenceProvenanceService` verified 链——只读路径 **0 LLM**，不依赖
+    DEEPSEEK_API_KEY。
+    """
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.database is None or resources.langgraph is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    settings = request.app.state.settings
+    sessionmaker = resources.database.session_factory()
+    deps = create_stage5_dependencies(settings, sessionmaker)
+    artifact_service = TaskArtifactService.from_dependencies(
+        sessionmaker, resources.langgraph, deps
+    )
+    return TaskCitationService(sessionmaker, artifact_service)
 
 
 def get_task_workspace_service(
