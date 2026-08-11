@@ -38,6 +38,7 @@ from app.db.models.relative_valuation_comparison import RelativeValuationCompari
 from app.db.models.relative_valuation_comparison_peer import RelativeValuationComparisonPeerModel
 from app.db.models.report import ReportCheckResultModel, ReportModel
 from app.db.models.report_audit import ReportAuditModel, ReviewIssueModel
+from app.db.models.report_export import ReportExportModel
 from app.db.models.report_outline import ReportOutlineModel
 from app.db.models.research_backflow import (
     ResearchBackflowFulfillmentModel,
@@ -94,6 +95,7 @@ __all__ = [
     "ReportModel",
     "ReportAuditModel",
     "ReviewIssueModel",
+    "ReportExportModel",
     "ReportOutlineModel",
     "ResearchBackflowFulfillmentModel",
     "ResearchBackflowRequestModel",

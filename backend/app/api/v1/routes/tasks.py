@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
+    get_report_export_service,
     get_research_execution_service,
     get_task_artifact_service,
     get_task_citation_service,
@@ -18,6 +19,7 @@ from app.api.dependencies import (
 )
 from app.core.errors import InvalidIdempotencyKey
 from app.domain.tasks import TaskStatus
+from app.report_export.service import ReportExportService
 from app.schemas.artifact import (
     AnalysisArtifactResponse,
     EvidenceArtifactListResponse,
@@ -26,6 +28,11 @@ from app.schemas.artifact import (
     SourceArtifactListResponse,
 )
 from app.schemas.citation import ClaimCitationResponse, EvidenceCitationResponse
+from app.schemas.export import (
+    ExportCreateRequest,
+    ExportCreateResponse,
+    ExportMetadataResponse,
+)
 from app.schemas.research_execution import (
     ResearchExecutionRequest,
     TaskWorkspaceResponse,
@@ -151,6 +158,88 @@ async def get_task_reviews(
 ) -> ReviewsArtifactResponse:
     """任务最新审核视图：audit 摘要 + issues。"""
     return await service.get_reviews(task_id)
+
+
+@router.post(
+    "/{task_id}/export",
+    response_model=ExportCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_export(
+    task_id: UUID,
+    payload: ExportCreateRequest,
+    response: Response,
+    service: Annotated[ReportExportService, Depends(get_report_export_service)],
+) -> ExportCreateResponse:
+    """确定性导出（Stage 6C spec P）。
+
+    资格判定（spec H：check pass + (audit pass/route pass) 或 (audit fail/route
+    human_review + 人工 approve)）→ 生成 / replay。同输入（指纹相同）→ 200 +
+    `X-Export-Replayed: true`；新建 → 201 + `X-Export-Replayed: false`。
+    不可导出 → `ReportNotExportable` 409。**0 LLM / 0 Retrieval / 0 Chroma /
+    0 Web**。
+    """
+    result = await service.create_or_get_export(task_id, payload.format)
+    response.headers["X-Export-Replayed"] = "true" if result.replayed else "false"
+    if result.replayed:
+        response.status_code = status.HTTP_200_OK
+    return ExportCreateResponse(
+        export_id=result.export_id,
+        format=result.format,
+        file_name=result.file_name,
+        media_type=result.media_type,
+        byte_size=result.byte_size,
+        replayed=result.replayed,
+        created_at=result.created_at,
+    )
+
+
+@router.get(
+    "/{task_id}/exports/{export_id}",
+    response_model=ExportMetadataResponse,
+)
+async def get_export_metadata(
+    task_id: UUID,
+    export_id: UUID,
+    service: Annotated[ReportExportService, Depends(get_report_export_service)],
+) -> ExportMetadataResponse:
+    """导出 metadata（task-scoped 404；不属于该 task → `ReportExportNotFound`）。"""
+    record = await service.get_export(task_id, export_id)
+    return ExportMetadataResponse(
+        export_id=record.export_id,
+        task_id=record.task_id,
+        report_id=record.report_id,
+        format=record.format,
+        file_name=record.file_name,
+        media_type=record.media_type,
+        byte_size=record.byte_size,
+        content_sha256=record.content_sha256,
+        created_at=record.created_at,
+    )
+
+
+@router.get("/{task_id}/exports/{export_id}/content")
+async def get_export_content(
+    task_id: UUID,
+    export_id: UUID,
+    service: Annotated[ReportExportService, Depends(get_report_export_service)],
+) -> Response:
+    """导出字节下载（spec N/P）。
+
+    下载前必须 `verify_export_integrity`；校验失败 → `ReportExportIntegrityError`
+    409，字节缺失 → `ExportArtifactNotFound` 404。Content-Disposition attachment
+    + 正确 MIME（text/markdown / docx / pdf）。
+    """
+    record, stream = await service.get_export_content(task_id, export_id)
+    try:
+        content = stream.read()
+    finally:
+        stream.close()
+    return Response(
+        content=content,
+        media_type=record.media_type,
+        headers={"Content-Disposition": f'attachment; filename="{record.file_name}"'},
+    )
 
 
 @router.get(

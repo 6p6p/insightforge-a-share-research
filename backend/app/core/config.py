@@ -58,6 +58,8 @@ class Settings(BaseSettings):
 
     # 本地不可变原始文件存储（开发环境本地磁盘；未来可替换为 S3/MinIO）
     raw_storage_root: Path = PROJECT_ROOT / ".data" / "raw"
+    # 导出字节内容寻址存储根（stage 6C；`.data/exports/sha256/<ab>/<cd>/<sha>.<ext>`）
+    export_storage_root: Path = PROJECT_ROOT / ".data" / "exports"
     source_max_file_size_bytes: int = _DEFAULT_SOURCE_MAX_FILE_SIZE_BYTES
     # Macro 原始 JSON 响应单文件字节上限（独立于公司 PDF 上限）
     macro_max_json_response_bytes: int = _DEFAULT_MACRO_MAX_JSON_RESPONSE_BYTES

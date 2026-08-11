@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.dependencies import get_db_session
+from app.report_export.service import ReportExportService
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
@@ -17,6 +18,7 @@ from app.services.task_service import TaskService
 from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
 from app.stage5.dependencies import create_stage5_dependencies
+from app.storage.export_store import ExportArtifactStore
 from app.storage.raw_store import LocalRawArtifactStore
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from app.workflows.execution_manager import WorkflowExecutionManager
@@ -134,6 +136,42 @@ def get_raw_storage(request: Request) -> LocalRawArtifactStore:
     if resources is None or resources.raw_storage is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
     return resources.raw_storage
+
+
+def get_export_storage(request: Request) -> ExportArtifactStore:
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.export_storage is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    return resources.export_storage
+
+
+def get_report_export_service(request: Request) -> ReportExportService:
+    """确定性导出服务（Stage 6C spec H/M/N）。
+
+    复用 `create_stage5_dependencies` 装配的同一批 Services（verify 链共享），
+    经 `TaskArtifactService.from_dependencies` 恢复 canonical lineage——导出路径
+    **0 LLM / 0 Retrieval / 0 Chroma / 0 Web**，不依赖 DEEPSEEK_API_KEY（构造
+    deps 不调 API）。字节归档走 `resources.export_storage`（内容寻址）。
+    """
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.database is None or resources.langgraph is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    settings = request.app.state.settings
+    sessionmaker = resources.database.session_factory()
+    deps = create_stage5_dependencies(settings, sessionmaker)
+    artifact_service = TaskArtifactService.from_dependencies(
+        sessionmaker, resources.langgraph, deps
+    )
+    return ReportExportService(
+        sessionmaker,
+        artifact_service,
+        report_service=deps.report_service,
+        report_check_service=deps.report_check_service,
+        report_audit_service=deps.report_audit_service,
+        review_action_service=deps.review_action_service,
+        company_service=CompanyIdentityService(sessionmaker),
+        export_store=resources.export_storage,
+    )
 
 
 def get_source_ingestion_service(request: Request) -> SourceIngestionService:

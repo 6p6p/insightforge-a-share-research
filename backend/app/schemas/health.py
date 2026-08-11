@@ -17,6 +17,7 @@ class ReadyChecks(BaseModel):
     chroma: CheckStatus = "ok"
     checkpoint: CheckStatus = "ok"
     raw_storage: CheckStatus = "ok"
+    export_storage: CheckStatus = "ok"
 
 
 class ReadyHealthResponse(BaseModel):

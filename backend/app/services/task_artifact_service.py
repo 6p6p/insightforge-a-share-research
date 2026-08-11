@@ -66,6 +66,7 @@ from app.repositories.source_record_repository import SourceRecordRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_backflow.errors import ResearchBackflowError
 from app.research_backflow.repository import ResearchBackflowRepository
+from app.review.contracts import VerifiedHumanReviewDecision
 from app.review.errors import ReviewError
 from app.schemas.artifact import (
     AnalysisArtifactResponse,
@@ -423,6 +424,39 @@ class TaskArtifactService:
         if verified_run is None:
             return []
         return list(verified_run.verified_claims)
+
+    # ------------------------------------------------- export lineage（spec H）
+
+    async def anchor_task(self, task_id: UUID) -> ResearchTaskModel:
+        """canonical lineage 锚定的 task（供导出服务读 company_query / questions）。"""
+        anchor = await self._anchor(task_id)
+        return anchor.task
+
+    async def resolve_report(self, task_id: UUID) -> VerifiedReport | None:
+        """canonical Stage5 checkpoint 的 verified Report（导出资格判定用）。"""
+        anchor = await self._anchor(task_id)
+        return await self._resolve_report(anchor)
+
+    async def resolve_reviews(self, task_id: UUID) -> VerifiedReportAudit | None:
+        """canonical 的 verified Audit（含 verified Check；导出资格 + 指纹用）。"""
+        anchor = await self._anchor(task_id)
+        return await self._resolve_reviews(anchor)
+
+    async def resolve_human_decision(self, task_id: UUID) -> VerifiedHumanReviewDecision | None:
+        """canonical 的 verified HumanDecision（导出资格 + 指纹用）。
+
+        checkpoint 无 `human_decision_id` → None（audit pass 路径）；有但 verify
+        失败 → `TaskArtifactIntegrityError`。
+        """
+        anchor = await self._anchor(task_id)
+        human_decision_id = self._state_uuid(anchor.stage5_state, "human_decision_id")
+        if human_decision_id is None:
+            return None
+        return await _guarded(
+            self._review_action_service.verify_human_decision_integrity(human_decision_id),
+            _REVIEW_VERIFY_ERRORS,
+            "human_decision",
+        )
 
     async def count_artifacts(self, task_id: UUID) -> ArtifactSummary:
         """任务级产物计数（workspace 投影；与各 tab 共用同一 canonical 推导）。"""

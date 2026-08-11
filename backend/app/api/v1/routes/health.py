@@ -6,7 +6,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.api.dependencies import get_langgraph_checkpoint_manager, get_raw_storage
+from app.api.dependencies import (
+    get_export_storage,
+    get_langgraph_checkpoint_manager,
+    get_raw_storage,
+)
 from app.core.config import get_package_version
 from app.core.logging import get_logger
 from app.db.dependencies import get_database
@@ -17,6 +21,7 @@ from app.schemas.health import (
     ReadyChecks,
     ReadyHealthResponse,
 )
+from app.storage.export_store import ExportArtifactStore
 from app.storage.raw_store import LocalRawArtifactStore
 from app.vectorstore.client import ChromaManager
 from app.vectorstore.dependencies import get_chroma
@@ -57,6 +62,7 @@ async def health_ready(
     chroma: Annotated[ChromaManager, Depends(get_chroma)],
     checkpoint: Annotated[LangGraphCheckpointManager, Depends(get_langgraph_checkpoint_manager)],
     raw_storage: Annotated[LocalRawArtifactStore, Depends(get_raw_storage)],
+    export_storage: Annotated[ExportArtifactStore, Depends(get_export_storage)],
 ) -> ReadyHealthResponse:
     settings = request.app.state.settings
 
@@ -67,6 +73,7 @@ async def health_ready(
             _probe("chroma", chroma.heartbeat()),
             _probe("checkpoint", checkpoint.check_ready()),
             _probe("raw_storage", asyncio.to_thread(raw_storage.check_ready)),
+            _probe("export_storage", asyncio.to_thread(export_storage.check_ready)),
         )
     )
 

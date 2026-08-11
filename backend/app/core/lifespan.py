@@ -14,6 +14,7 @@ from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_recovery import ResearchExecutionRecoveryCoordinator
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.workflow_recovery_service import WorkflowRecoveryService
+from app.storage.export_store import ExportArtifactStore
 from app.storage.raw_store import LocalRawArtifactStore
 from app.vectorstore.client import ChromaManager
 from app.workflows.checkpoint import LangGraphCheckpointManager
@@ -85,6 +86,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         max_bytes=settings.source_max_file_size_bytes,
         max_json_bytes=settings.macro_max_json_response_bytes,
     )
+    export_storage = ExportArtifactStore(root=settings.export_storage_root)
     resources = ApplicationResources(
         database=database,
         chroma=chroma,
@@ -92,6 +94,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         workflow_execution=workflow_execution,
         research_execution=research_execution,
         raw_storage=raw_storage,
+        export_storage=export_storage,
     )
     application.state.resources = resources
     logger.info("application_startup", environment=settings.app_env)
