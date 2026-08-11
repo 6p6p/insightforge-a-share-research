@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('./client', () => ({ apiRequest: vi.fn() }));
+vi.mock('./client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./client')>();
+  return { ...actual, apiRequest: vi.fn() };
+});
 
 import { apiRequest } from './client';
 import {
+  createExport,
+  downloadExportContent,
   getClaimCitation,
   getEvidenceCitation,
   getTaskAnalysis,
@@ -59,6 +64,51 @@ describe('task artifact API（Stage 6B.1）', () => {
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/analysis');
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/report');
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/reviews');
+  });
+});
+
+describe('export API（Stage 6C spec P）', () => {
+  beforeEach(() => {
+    mockedApiRequest.mockReset();
+  });
+
+  it('taskKeys.exports → 任务级 export key', () => {
+    expect(taskKeys.exports('t1')).toEqual(['tasks', 'exports', 't1']);
+  });
+
+  it('createExport → POST /tasks/{task}/export + {format}', async () => {
+    mockedApiRequest.mockResolvedValue({
+      export_id: 'exp-1',
+      format: 'markdown',
+      file_name: 'report_x.md',
+      media_type: 'text/markdown',
+      byte_size: 12,
+      replayed: false,
+      created_at: '2026-08-11T00:00:00Z',
+    });
+    await createExport('t1', 'pdf');
+    expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1/export', {
+      method: 'POST',
+      body: { format: 'pdf' },
+    });
+  });
+
+  it('downloadExportContent → content 端点 + 解析 Content-Disposition 文件名', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      blob: () => Promise.resolve(new Blob(['bytes'])),
+      headers: {
+        get: () => 'attachment; filename="report_x.pdf"',
+      },
+    }));
+    const { blob, fileName } = await downloadExportContent('t1', 'exp-1');
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/v1/tasks/t1/exports/exp-1/content'),
+      expect.objectContaining({ headers: { Accept: 'application/octet-stream' } }),
+    );
+    expect(fileName).toBe('report_x.pdf');
+    expect(blob.size).toBe(5);
+    vi.unstubAllGlobals();
   });
 });
 

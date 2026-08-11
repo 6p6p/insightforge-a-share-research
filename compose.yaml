@@ -39,6 +39,7 @@ services:
       CHROMA_SSL: "false"
       CHROMA_TIMEOUT_SECONDS: "5"
       RAW_STORAGE_ROOT: /app/data/raw
+      EXPORT_STORAGE_ROOT: /app/data/exports
       SOURCE_MAX_FILE_SIZE_BYTES: "104857600"
       # LLM runtime：key 通过宿主 ${DEEPSEEK_API_KEY:-} 运行时注入，**不写入
       # 镜像、不进 build ARG/ENV**；无 key 时为空串（Settings 归一化为 None），
@@ -51,6 +52,7 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     volumes:
       - raw_data:/app/data/raw
+      - export_data:/app/data/exports
     ports:
       - "8001:8000"
     depends_on:
@@ -65,7 +67,23 @@ services:
       timeout: 5s
       retries: 5
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 同源：浏览器请求 /api/v1 → nginx 反代到 backend 容器 8000（见
+        # frontend/nginx.conf）。容器内无后端时 /api 返回 502（gate 只验前端）。
+        VITE_API_BASE_URL: /api/v1
+    image: insightforge-frontend:stage6c
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   chroma_data:
   raw_data:
+  export_data:

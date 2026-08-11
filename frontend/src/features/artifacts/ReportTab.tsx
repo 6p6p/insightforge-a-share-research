@@ -13,15 +13,18 @@ Stage 6B.2（spec O/Q + Final Gate C/D）：段落里的「观点」「证据」
  */
 
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { Alert, Card, Descriptions, Divider, Space, Tag, Typography } from 'antd';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Alert, Button, Card, Descriptions, Divider, Dropdown, Space, Tag, Typography } from 'antd';
+import { DownloadOutlined } from '@ant-design/icons';
 
-import { getTaskReport, taskKeys } from '../../api/tasks';
+import { createExport, downloadExportContent, getTaskReport, taskKeys } from '../../api/tasks';
+import { ApiError } from '../../types/api';
 import type {
   ReportArtifactResponse,
   ReportSectionArtifact,
 } from '../../types/artifacts';
 import type { CitationTarget } from '../../types/citation';
+import type { ExportFormat } from '../../types/export';
 import { artifactErrorMessage } from './integrity';
 
 const { Text } = Typography;
@@ -42,6 +45,74 @@ interface Props {
   /** ReviewsTab「定位报告」：高亮并滚动到该 section/paragraph。 */
   locateSection?: string | null;
   locateParagraph?: number | null;
+}
+
+/** 导出格式下拉项（stage 6C spec Q）。 */
+const EXPORT_FORMAT_ITEMS: { key: ExportFormat; label: string }[] = [
+  { key: 'markdown', label: 'Markdown（.md）' },
+  { key: 'docx', label: 'Word（.docx）' },
+  { key: 'pdf', label: 'PDF（.pdf）' },
+];
+
+/** 「导出报告」Dropdown（spec Q）：POST 创建/replay → 下载 content 字节。
+ * 409（不可导出 / 校验失败）→ 内联警告，不假装成功。 */
+function ExportMenu({ taskId }: { taskId: string }): React.JSX.Element {
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: async (format: ExportFormat) => {
+      const created = await createExport(taskId, format);
+      const { blob, fileName } = await downloadExportContent(taskId, created.export_id);
+      return { blob, fileName };
+    },
+    onSuccess: ({ blob, fileName }) => {
+      setExportError(null);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    },
+    onError: (error: unknown) => {
+      if (error instanceof ApiError) {
+        if (error.isConflict) {
+          setExportError('报告当前不可导出（审核未通过 / 校验未通过 / 仍在运行）。');
+        } else {
+          setExportError(error.message);
+        }
+      } else {
+        setExportError('导出失败，请稍后重试。');
+      }
+    },
+  });
+
+  const items = EXPORT_FORMAT_ITEMS.map((item) => ({
+    key: item.key,
+    label: item.label,
+  }));
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }} size="small">
+      {exportError ? (
+        <Alert type="error" showIcon message="导出失败" description={exportError} />
+      ) : null}
+      <Dropdown
+        menu={{
+          items,
+          onClick: ({ key }) => mutation.mutate(key as ExportFormat),
+        }}
+        trigger={['click']}
+        disabled={mutation.isPending}
+      >
+        <Button icon={<DownloadOutlined />} loading={mutation.isPending}>
+          导出报告
+        </Button>
+      </Dropdown>
+    </Space>
+  );
 }
 
 /** 定位目标：`section + paragraph` → 段落；`section only` → 整节容器。 */
@@ -89,6 +160,7 @@ export function ReportTab({
   }
   return (
     <ReportContent
+      taskId={taskId}
       data={data}
       onOpenCitation={onOpenCitation}
       locateTarget={locateTarget}
@@ -97,10 +169,12 @@ export function ReportTab({
 }
 
 function ReportContent({
+  taskId,
   data,
   onOpenCitation,
   locateTarget,
 }: {
+  taskId: string;
   data: ReportArtifactResponse;
   onOpenCitation?: (target: CitationTarget) => void;
   locateTarget: LocateTarget;
@@ -134,6 +208,7 @@ function ReportContent({
       {locateMissing ? (
         <Alert type="warning" showIcon message="未找到对应报告位置，报告版本可能已变化。" />
       ) : null}
+      <ExportMenu taskId={taskId} />
       <Card title="报告概览">
         <Descriptions size="small" column={2}>
           <Descriptions.Item label="报告 ID">

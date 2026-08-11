@@ -2,7 +2,7 @@
 
 > 阶段 6 目标：**Web 工作台**——把已 FINAL 的证据链（Source → Evidence → Claim → Report → Audit → ReviewAction → Revision / ResearchBackflow）暴露为真实可操作的前端界面，供分析师创建研究任务、观察 LangGraph 执行进度并完成人工确认。**Stage 6 不做 LLM 功能开发、不做 Stage 7 evaluation**；本轮（6A）只做**工作台基础 + Task/Progress 垂直切片**。
 >
-> 总进度：**6A = completed（FINAL）**；**6B.1 = completed（FINAL，Research Artifact Workspace）**；**6B.2 = completed（FINAL，Citation Navigation + Provenance Viewer）**；**6C = next（工作台增强，见下）**。
+> 总进度：**6A = completed（FINAL）**；**6B.1 = completed（FINAL，Research Artifact Workspace）**；**6B.2 = completed（FINAL，Citation Navigation + Provenance Viewer）**；**6C = completed（FINAL，Deterministic Export + Production Web，见下）**。
 
 ## 6A：Web Workbench Task Foundation（completed，FINAL）
 
@@ -57,11 +57,11 @@
 - **前端**：`CitationDrawer`（evidence/claim citation 只读视图，Document/Macro provenance 分派，relation 导航 evidence⇄claim）；ReportTab 观点/证据 Tag 可点击、EvidenceTab「查看引用」、ReviewsTab「定位报告」（`?tab=report&section=&paragraph=` URL 定位 → 高亮并滚动）。
 - 后端 8 个 R-scenario 集成测试 + E2E（真实 PostgreSQL + Fake models + FastAPI，0 real DeepSeek）；前端 48 tests + typecheck + build 全绿；alembic 保持 0038（0 新迁移）。
 
-## 6C（next）：工作台增强
+## 6C：Deterministic Export + Production Web（completed，FINAL）
 
-- Task 列表分页 / 搜索 / 状态筛选。
-- workspace 产物卡片按 Stage 4/5 类型细化（evidence cards / calculations / comparisons / outline / draft sections / report）。
-- 多 run 历史视图 + 每 run 事件明细检索。
-- 执行前 Stage 4 work plan 的**前端校验**（ID 数量区间、必填字段）与后端 422 错误逐字段映射。
-- 真实 DeepSeek 接入前的 UI 演练开关（明确标注非生产 LLM 路径）。
-- 已知限制：WorkPlanEditor 的 TextArea 为受控输入、每次击键规范化（splitIds/join），逐字符连续输入 ID 可能被截断——6B 建议改为「整段提交 / blur 规范化」。
+- **确定性导出（spec F/H/I/J）**：`ReportExportService.create_or_get_export(task_id, format)` 经 TaskArtifactService canonical lineage 恢复最终报告；导出资格 = Deterministic Check=pass 且（Audit pass / recommended_route=pass，或 Audit fail / recommended_route=human_review 且 Verified HumanDecision=approve）；不满足 → `ReportNotExportable` 409。**永不修改** Audit / ReviewAction / HumanDecision，永不重写 body / 生成 claims / 判断证据。`ExportReportPack` 纯结构（task_id / report_id / analysis_as_of / company / research_question / sections / citations E1..En / audit_note）。确定性引用编号：section_order → paragraph_index → paragraph 内 evidence_card_ids 首现 → E1..En，同一证据恒同编号，段落后追加 `[1][2]` 标记，不改写原句，无 LLM 重新插入。
+- **存储与完整性（spec L/M/N）**：`ExportArtifactStore` 内容寻址存储（sha256 + 扩展名白名单 + 路径穿越防护）；`export_input_fingerprint` 支撑 replay / 并发（ON CONFLICT → 单行，败者重查）；`verify_export_integrity(export_id)` 校验导出自身 FK 链与内容哈希（tamper → `ReportExportIntegrityError`；canonical lineage tamper → `TaskArtifactIntegrityError`，均只校验不修复）。
+- **渲染（spec O）**：Markdown（UTF-8）/ DOCX（可重开）/ PDF（pdfplumber 实测中文可读）；无可靠 Docker 内中文 PDF 方案时停住上报 blocker——实际实现经系统/库字体路径解决。
+- **导出 API（spec P）**：`POST /tasks/{id}/export`（201 新建 / 200 replay + `X-Export-Replayed`）；`GET /tasks/{id}/exports/{export_id}`（metadata）；`GET /tasks/{id}/exports/{export_id}/content`（task-scoped 404、Content-Disposition attachment、正确 MIME）。
+- **前端（spec Q/R/S）**：ReportTab 「导出报告」下拉（markdown/docx/pdf，409 → 中文提示）；最小 `/tasks` 任务列表页；生产前端 Docker（multi-stage Node→build→nginx，`/api/` 反代 backend:8000，proxy_buffering off 支持 SSE，SPA fallback）。
+- **验证（spec T/U/V/W/X）**：导出服务单测 + 集成（真实 PostgreSQL + Fake models，0 real DeepSeek）+ HTTP E2E（0-LLM 哨兵证明导出路径绝不初始化 LLM 客户端）；`verify_export_integrity` tamper 场景；非集成 ≥1891 + 集成 ≥853 全绿；前端 typecheck / tests / build 全绿；alembic head = 0039 + `alembic check` clean；`pip check` / ruff check / ruff format --check 干净；Docker compose runtime gate（frontend nginx 同源反代 + SPA + /api 200）。

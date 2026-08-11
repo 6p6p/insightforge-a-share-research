@@ -1,6 +1,6 @@
 /** Research task + workspace + execute 的 API（后端 /app/api/v1/routes/tasks.py）。 */
 
-import { apiRequest } from './client';
+import { API_BASE_URL, apiRequest } from './client';
 import type {
   AnalysisArtifactResponse,
   EvidenceArtifactListResponse,
@@ -12,6 +12,7 @@ import type {
   ClaimCitationResponse,
   EvidenceCitationResponse,
 } from '../types/citation';
+import type { ExportCreateResponse, ExportFormat } from '../types/export';
 import type { TaskCreateRequest, TaskListResponse, TaskResponse } from '../types/task';
 import type {
   ResearchExecutionRequest,
@@ -38,6 +39,8 @@ export const taskKeys = {
     [...taskKeys.all, 'citations', taskId, 'evidence', evidenceCardId] as const,
   citationClaim: (taskId: string, claimId: string) =>
     [...taskKeys.all, 'citations', taskId, 'claims', claimId] as const,
+  /** Stage 6C export（任务级导出元数据；下载字节走 content 端点）。 */
+  exports: (taskId: string) => [...taskKeys.all, 'exports', taskId] as const,
 };
 
 export async function createTask(payload: TaskCreateRequest): Promise<TaskResponse> {
@@ -135,4 +138,46 @@ export async function executeTask(
     method: 'POST',
     body: payload,
   });
+}
+
+// ------------------------------------------------------------------ Stage 6C export
+
+/** 确定性报告导出：POST 创建（201）或 replay（200）。不可导出 → 409。 */
+export async function createExport(
+  taskId: string,
+  format: ExportFormat,
+): Promise<ExportCreateResponse> {
+  return apiRequest<ExportCreateResponse>(`/tasks/${taskId}/export`, {
+    method: 'POST',
+    body: { format },
+  });
+}
+
+/** 下载导出字节（content 端点）：返回 Blob + Content-Disposition 文件名。 */
+export async function downloadExportContent(
+  taskId: string,
+  exportId: string,
+): Promise<{ blob: Blob; fileName: string }> {
+  const response = await fetch(
+    `${API_BASE_URL}/tasks/${taskId}/exports/${exportId}/content`,
+    { headers: { Accept: 'application/octet-stream' } },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `导出下载失败（HTTP ${response.status}）`;
+    try {
+      const envelope = JSON.parse(text) as { error?: { message?: string } };
+      if (envelope?.error?.message) {
+        message = envelope.error.message;
+      }
+    } catch {
+      // 非 JSON 响应体：保留默认消息。
+    }
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  const fileName = match?.[1] ?? `report_${exportId}`;
+  return { blob, fileName };
 }
