@@ -24,7 +24,7 @@ LLM / 零 LangGraph / 零 Report / 零 Audit**。
   financial + 1 macro + 1 valuation Claim → 1 SynthesisRun → 4 条精确 input
   links → replay 同一 run；
 - Summary：确定性 domain / kind / confidence / importance 计数；
-- 边界：无 Stage 5 report 表；Service 只持有 sessionmaker。
+- 边界：未来阶段（5E+）表不得存在；Service 只持有 sessionmaker。
 """
 
 import asyncio
@@ -835,15 +835,15 @@ async def test_cross_domain_e2e_single_run_replay(four_claims) -> None:
 
 async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
     async with env["sessionmaker"]() as session:
-        # Stage 5D+ 表（audits / report_sections / review_issues）不得存在；
-        # Stage 5A/5B/5C 表（report_outlines / draft_sections / reports /
-        # report_check_results，migration 0032/0033/0034）允许存在。
+        # 未来阶段（5E+）表（audits / report_sections）不得存在；Stage 5A-5D
+        # 表（report_outlines / draft_sections / reports / report_check_results /
+        # report_audits / review_issues，migration 0032-0035）允许存在。
         stage5 = (
             await session.execute(
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('audits','report_sections','review_issues')"
+                    "('audits','report_sections')"
                 )
             )
         ).scalar_one()
@@ -861,6 +861,12 @@ async def test_boundary_no_stage5_no_llm_no_langgraph(env) -> None:
         await session.execute(text("SELECT count(*) FROM report_check_results"))
     ).scalar_one()
     assert int(check_rows) == 0
+    # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+    # 但本阶段不写行。
+    audit_rows = (await session.execute(text("SELECT count(*) FROM report_audits"))).scalar_one()
+    assert int(audit_rows) == 0
+    issue_rows = (await session.execute(text("SELECT count(*) FROM review_issues"))).scalar_one()
+    assert int(issue_rows) == 0
     service = SynthesisService(env["sessionmaker"])
     # 只持有 sessionmaker + integrity gateway（无 LLM / 无 LangGraph / 无 storage 副作用）。
     assert list(service.__dict__.keys()) == ["_sessionmaker", "_gateway"]

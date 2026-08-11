@@ -1027,7 +1027,7 @@ async def test_no_claims_or_stage5_report_tables(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','review_issues')"
+                    "('report_sections')"
                 )
             )
         ).scalar_one()
@@ -1044,6 +1044,12 @@ async def test_no_claims_or_stage5_report_tables(env) -> None:
         await session.execute(text("SELECT count(*) FROM report_check_results"))
     ).scalar_one()
     assert int(check_rows) == 0
+    # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+    # 但本阶段不写行。
+    audit_rows = (await session.execute(text("SELECT count(*) FROM report_audits"))).scalar_one()
+    assert int(audit_rows) == 0
+    issue_rows = (await session.execute(text("SELECT count(*) FROM review_issues"))).scalar_one()
+    assert int(issue_rows) == 0
 
 
 async def test_service_takes_only_sessionmaker(env) -> None:

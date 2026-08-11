@@ -17,7 +17,8 @@ MacroPersistenceService + MacroEvidenceService（macro），**零 Chroma / 零 L
 - E2E 回溯：document Claim → link → EvidenceCard → Chunk → ParsedSource →
   SourceRecord → RawArtifact；macro Claim → Evidence → Observation / Snapshot /
   Series / RawArtifact；
-- 边界：claims / claim_evidence_links 允许存在；Stage 5 report 表不得存在。
+- 边界：claims / claim_evidence_links 允许存在；未来阶段（5E+）表不得存在，
+  Stage 5A-5D 表允许存在但不写行。
 
 全程使用真实 PG（不手写 RetrievalHit / DocumentChunk，不 seed 伪造 Evidence）。
 """
@@ -879,7 +880,7 @@ async def test_claims_tables_exist_and_no_stage5_report_tables(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','review_issues')"
+                    "('report_sections')"
                 )
             )
         ).scalar_one()
@@ -895,6 +896,16 @@ async def test_claims_tables_exist_and_no_stage5_report_tables(env) -> None:
             await session.execute(text("SELECT count(*) FROM report_check_results"))
         ).scalar_one()
         assert int(check_rows) == 0
+        # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+        # 但本阶段不写行。
+        audit_rows = (
+            await session.execute(text("SELECT count(*) FROM report_audits"))
+        ).scalar_one()
+        assert int(audit_rows) == 0
+        issue_rows = (
+            await session.execute(text("SELECT count(*) FROM review_issues"))
+        ).scalar_one()
+        assert int(issue_rows) == 0
 
 
 async def test_claim_service_takes_only_sessionmaker(env) -> None:

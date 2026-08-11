@@ -154,6 +154,24 @@ class ReportCheckResult:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class VerifiedReportCheckResult:
+    """`verify_check_result_integrity` 的 read-side 产物（完整重建验证通过）。
+
+    - verified_report：上游已验证 Report（`verify_report_integrity` 的产物，
+      供 5D Audit 复用——一个调用同时拿到 verified Report + verified CheckResult）；
+    - findings：与 persisted 行一致的 CheckFinding 序列。
+    """
+
+    check_result_id: UUID
+    report_id: UUID
+    check_schema_version: int
+    status: str  # pass / fail（与重跑 checks 的 expected 一致才通过）
+    findings: tuple[CheckFinding, ...]
+    check_fingerprint: str
+    verified_report: VerifiedReport
+
+
 def compute_report_fingerprint(
     *,
     report_schema_version: int,

@@ -14,7 +14,8 @@ FakeEvidenceExtractionModel（零真实 LLM / 零 Chroma / 零网络）。
 - stale（DB 变更 chunk.text）→ EvidenceExtractionInputStale，0 写入，LLM 未调用；
 - relevant=false / quote not found / ambiguous / malformed → 0 写入；
 - high confidence 不提升 critical snapshot；authority/critical 复制 SourceRecord；
-- 0 manifest：不创建 chunk_vector_indexes、不创建 claims/reports/review_issues 表。
+- 0 manifest：不创建 chunk_vector_indexes；不写 claims/reports/report_audits/
+  review_issues 行。
 """
 
 from datetime import UTC, date, datetime
@@ -574,10 +575,9 @@ async def test_zero_chroma_and_no_stage5_report_tables(env) -> None:
             await session.execute(text("SELECT count(*) FROM chunk_vector_indexes"))
         ).scalar_one()
         assert manifests == 0
-        # Stage 边界：Stage 3 extraction 不产生 Stage 5 report 表
-        # （Stage 5D+ 的 report_sections / review_issues；Stage 5A/5B/5C 表
-        # report_outlines / draft_sections / reports / report_check_results
-        # 已存在但本阶段不写行）。
+        # Stage 边界：Stage 3 extraction 不产生未来阶段（5E+）表；Stage 5A-5D
+        # 表（report_outlines / draft_sections / reports / report_check_results /
+        # report_audits / review_issues，migration 0032-0035）已存在但本阶段不写行。
         # Stage 4 claims 表由 Stage 4A 单独引入，不在这里约束
         # （精确阶段边界名，避免以后过期）。
         extra = (
@@ -585,8 +585,7 @@ async def test_zero_chroma_and_no_stage5_report_tables(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' "
-                    "AND table_name IN ('report_sections',"
-                    "'review_issues')"
+                    "AND table_name IN ('report_sections')"
                 )
             )
         ).scalar_one()
@@ -602,4 +601,14 @@ async def test_zero_chroma_and_no_stage5_report_tables(env) -> None:
             await session.execute(text("SELECT count(*) FROM report_check_results"))
         ).scalar_one()
         assert int(check_rows) == 0
+        # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+        # 但本阶段不写行。
+        audit_rows = (
+            await session.execute(text("SELECT count(*) FROM report_audits"))
+        ).scalar_one()
+        assert int(audit_rows) == 0
+        issue_rows = (
+            await session.execute(text("SELECT count(*) FROM review_issues"))
+        ).scalar_one()
+        assert int(issue_rows) == 0
     assert await _card_count(env["sessionmaker"]) == 1

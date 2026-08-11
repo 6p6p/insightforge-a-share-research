@@ -822,12 +822,12 @@ async def test_no_claims_or_report_tables(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','review_issues')"
+                    "('report_sections')"
                 )
             )
         ).scalar_one()
     assert stage5_tables == 0
-    # Stage 5A/5B/5C 表已存在（migration 0032/0033/0034），但本阶段不写行。
+    # Stage 5A-5C 表已存在（migration 0032/0033/0034），但本阶段不写行。
     outline_rows = (
         await session.execute(text("SELECT count(*) FROM report_outlines"))
     ).scalar_one()
@@ -838,6 +838,12 @@ async def test_no_claims_or_report_tables(env) -> None:
         await session.execute(text("SELECT count(*) FROM report_check_results"))
     ).scalar_one()
     assert int(check_rows) == 0
+    # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+    # 但本阶段不写行。
+    audit_rows = (await session.execute(text("SELECT count(*) FROM report_audits"))).scalar_one()
+    assert int(audit_rows) == 0
+    issue_rows = (await session.execute(text("SELECT count(*) FROM review_issues"))).scalar_one()
+    assert int(issue_rows) == 0
 
 
 async def test_service_takes_only_sessionmaker(env) -> None:

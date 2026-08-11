@@ -20,7 +20,7 @@ Report / 零 Audit**。
 - E2E provenance：Claim → ClaimFinancialCalculationLink → FinancialCalculation
   → FinancialCalculationInput → FinancialMetricObservation → EvidenceCard →
   Source；
-- 边界：claim_financial_calculation_links 存在 / Stage 5 report 表不得存在；
+- 边界：claim_financial_calculation_links 存在 / 未来阶段（5E+）表不得存在；
   Service 只持有 sessionmaker。
 """
 
@@ -1062,7 +1062,7 @@ async def test_financial_claim_tables_exist_and_no_stage5_report_tables(env) -> 
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','review_issues')"
+                    "('report_sections')"
                 )
             )
         ).scalar_one()
@@ -1078,6 +1078,16 @@ async def test_financial_claim_tables_exist_and_no_stage5_report_tables(env) -> 
             await session.execute(text("SELECT count(*) FROM report_check_results"))
         ).scalar_one()
         assert int(check_rows) == 0
+        # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+        # 但本阶段不写行。
+        audit_rows = (
+            await session.execute(text("SELECT count(*) FROM report_audits"))
+        ).scalar_one()
+        assert int(audit_rows) == 0
+        issue_rows = (
+            await session.execute(text("SELECT count(*) FROM review_issues"))
+        ).scalar_one()
+        assert int(issue_rows) == 0
 
 
 async def test_financial_claim_service_takes_only_sessionmaker(env) -> None:

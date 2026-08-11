@@ -31,7 +31,7 @@ company exposure Evidence 走真实 HTML 服务链 + EvidenceCardService。**零
 - additional 证据 relation（supports/context）原样保留；time_alignment 不自动猜测；
 - 失败 → 0 partial write 且不改写任何 EvidenceCard；
 - E2E provenance：Claim → Chain → {macro 卡, doc 卡} → Observation/Source → Artifact；
-- 边界：macro_transmission_* 存在 / Stage 5 report 表不得存在；Service 只持有
+- 边界：macro_transmission_* 存在 / 未来阶段（5E+）表不得存在；Service 只持有
   sessionmaker。
 """
 
@@ -1339,7 +1339,7 @@ async def test_macro_claim_boundary_no_stage5_tables(env, monkeypatch) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','review_issues')"
+                    "('report_sections')"
                 )
             )
         ).scalar_one()
@@ -1355,6 +1355,16 @@ async def test_macro_claim_boundary_no_stage5_tables(env, monkeypatch) -> None:
             await session.execute(text("SELECT count(*) FROM report_check_results"))
         ).scalar_one()
         assert int(check_rows) == 0
+        # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+        # 但本阶段不写行。
+        audit_rows = (
+            await session.execute(text("SELECT count(*) FROM report_audits"))
+        ).scalar_one()
+        assert int(audit_rows) == 0
+        issue_rows = (
+            await session.execute(text("SELECT count(*) FROM review_issues"))
+        ).scalar_one()
+        assert int(issue_rows) == 0
 
 
 async def test_macro_claim_service_takes_only_sessionmaker(env, monkeypatch) -> None:

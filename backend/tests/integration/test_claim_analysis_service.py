@@ -14,7 +14,8 @@ LLM 一律用 FakeClaimAnalysisModel。
 - replay：同请求 + 同 decision 第二次 → replayed；
 - malformed output / model unavailable 映射；
 - 最小投影：传给模型的是 E1..En 必要字段（无 UUID / locator / raw / fingerprint）；
-- 边界：claims / claim_evidence_links 允许存在；Stage 5 report 表不得存在。
+- 边界：claims / claim_evidence_links 允许存在；未来阶段（5E+）表不得存在，
+  Stage 5A-5D 表允许存在但不写行。
 
 全程使用真实 PG + fake model（不手写 RetrievalHit / DocumentChunk）。
 """
@@ -468,7 +469,7 @@ async def test_no_stage5_report_tables_created(env) -> None:
                 text(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_schema='public' AND table_name IN "
-                    "('report_sections','review_issues')"
+                    "('report_sections')"
                 )
             )
         ).scalar_one()
@@ -484,3 +485,9 @@ async def test_no_stage5_report_tables_created(env) -> None:
         await session.execute(text("SELECT count(*) FROM report_check_results"))
     ).scalar_one()
     assert int(check_rows) == 0
+    # Stage 5D 的 report_audits / review_issues（migration 0035）已存在，
+    # 但本阶段不写行。
+    audit_rows = (await session.execute(text("SELECT count(*) FROM report_audits"))).scalar_one()
+    assert int(audit_rows) == 0
+    issue_rows = (await session.execute(text("SELECT count(*) FROM review_issues"))).scalar_one()
+    assert int(issue_rows) == 0

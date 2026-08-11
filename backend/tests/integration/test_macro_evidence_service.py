@@ -23,7 +23,7 @@ MacroPersistenceService（httpx.MockTransport，**不访问真实 World Bank**�
 """
 
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 import httpx
@@ -62,6 +62,10 @@ from tests.macro.world_bank.helpers import (
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 configure_asyncio_runtime()
+
+# 确定性 snapshot fetched_at：<= 全部测试的硬编码 as_of（2026-08-10）。
+# World Bank client 默认写 datetime.now(UTC)，次日运行会触发 MacroAnalysisFutureEvidence。
+_SEED_FETCHED_AT = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
 
 _DEFAULT_PROVIDER_KEYS = (
     "sse",
@@ -205,11 +209,23 @@ async def _seed_macro_chain(env: dict, monkeypatch) -> dict:
     """真实持久化一条 macro 链（series/snapshot/artifacts/observations）。
 
     返回 {series_id, snapshot_id, observation_id(2024), period="2024"}。
+
+    World Bank client 会把 snapshot `fetched_at` 写成 `datetime.now(UTC)`；而
+    macro availability 用 fetched_at 判断"该数据何时可知"（晚于 as_of → 未来证据
+    拒绝）。硬编码 `as_of=2026-08-10` 的测试只要在次日运行就会整链漂移失败。
+    这里把 fetched_at 固定为确定性过去日期（<= 全部测试 as_of），消除日期漂移。
     """
     provider = _build_provider(env["sessionmaker"], httpx.MockTransport(_router), monkeypatch)
     captured = await provider.fetch_with_capture(QUERY)
     persistence = MacroPersistenceService(env["sessionmaker"], env["raw_store"])
     result = await persistence.persist_captured_fetch(captured)
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE macro_dataset_snapshots SET fetched_at = :at WHERE snapshot_id = :sid"
+            ).bindparams(at=_SEED_FETCHED_AT, sid=result.snapshot_id)
+        )
+        await session.commit()
     async with env["sessionmaker"]() as session:
         observations = await MacroObservationRepository(session).list_for_snapshot(
             result.snapshot_id

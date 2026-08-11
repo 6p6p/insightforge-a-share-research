@@ -650,14 +650,14 @@ async def test_boundary_no_stage5_tables(env, monkeypatch, connection_uri) -> No
         await manager.close()
 
     async with env["sessionmaker"]() as session:
-        # 未到达的 Stage 5D+ 表不得存在；Stage 5A/5B/5C 表
-        # （report_outlines / draft_sections / reports / report_check_results，
-        # migration 0032/0033/0034）可以存在。
+        # 未来阶段（5E+）表不得存在；Stage 5A-5D 表（report_outlines /
+        # draft_sections / reports / report_check_results / report_audits /
+        # review_issues，migration 0032-0035）可以存在。
         result = await session.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'public' AND table_name IN "
-                "('audits', 'report_sections', 'review_issues')"
+                "('audits', 'report_sections')"
             )
         )
         assert result.scalars().all() == []
@@ -681,6 +681,16 @@ async def test_boundary_no_stage5_tables(env, monkeypatch, connection_uri) -> No
             await session.execute(text("SELECT count(*) FROM report_check_results"))
         ).scalar_one()
         assert int(check_rows) == 0
+        # Stage 5D 的 report_audits / review_issues 表已存在（migration 0035），
+        # 但 Stage 4 运行不产生审计 → 0 行。
+        audit_rows = (
+            await session.execute(text("SELECT count(*) FROM report_audits"))
+        ).scalar_one()
+        assert int(audit_rows) == 0
+        issue_rows = (
+            await session.execute(text("SELECT count(*) FROM review_issues"))
+        ).scalar_one()
+        assert int(issue_rows) == 0
 
 
 # ---------------------------------------------------------------- run state machine

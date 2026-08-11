@@ -84,3 +84,16 @@ class ReportCheckPersistenceFailed(ReportError):
 
     code = "report_check_persistence_failed"
     message = "report check persistence failed"
+
+
+class ReportCheckIntegrityError(ReportError):
+    """`verify_check_result_integrity` 重放校验失败。
+
+    重新 verify 上游 Report + 重跑确定性 checks（重算 expected status / findings /
+    check_fingerprint）；任一 status / findings / fingerprint / schema / report_id
+    被 SQL tamper → 拒绝（**不自动 repair**）。status 不在 check_fingerprint 内，
+    必须重跑 checks 才能发现 pass/fail 篡改。
+    """
+
+    code = "report_check_integrity_error"
+    message = "report check replay integrity error"

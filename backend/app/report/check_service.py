@@ -15,6 +15,18 @@
 6. **short transaction create_or_get**（ON CONFLICT DO NOTHING，无进程锁）→ 并发
    同输入 → 1 个 CheckResult；SQLAlchemyError → rollback + `ReportCheckPersistenceFailed`。
 
+**公共 read-side**：`verify_check_result_integrity(check_result_id)`——重新 verify
+上游 Report + **重跑确定性 checks**（重算 expected status / findings /
+check_fingerprint），任一 status / findings / fingerprint / schema / report_id 被
+SQL tamper → `ReportCheckIntegrityError`（**不自动 repair**）。status 不在指纹内，
+必须重跑 checks 才能发现 pass/fail 篡改；上游 Report 损坏 → verify_report_integrity
+先行拒绝。
+
+`citation_provenance_closure` 的 `has_provenance` 按 spec D 走**真实 provenance
+闭包**（FK 非空不够）：document_chunk 沿 `source_id → SourceRecord.artifact_id →
+RawArtifact`，macro_observation 沿 `observation → snapshot →（series / provider +
+artifact links）→ RawArtifact`，任一断裂 → finding（不 repair / 不重新 retrieval）。
+
 **不创建 Audit**；不接 LangGraph；不调用 Retrieval / Chroma / LLM / tools / web
 search。check 只检查 closure，不重新 retrieval（spec Q.10）。
 """
@@ -29,7 +41,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.db.models.claim import ClaimModel
 from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.evidence_card import EvidenceCardModel
+from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
+from app.db.models.macro_observation import MacroObservationModel
+from app.db.models.macro_series import MacroSeriesModel
+from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
+from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.report import ReportCheckResultModel
+from app.db.models.source_provider import SourceProviderModel
+from app.db.models.source_record import SourceRecordModel
 from app.report.checks import CheckInput, EvidenceCheckData, run_checks
 from app.report.contracts import (
     CHECK_STATUS_FAIL,
@@ -37,9 +56,14 @@ from app.report.contracts import (
     REPORT_CHECK_SCHEMA_VERSION,
     CheckFinding,
     ReportCheckResult,
+    VerifiedReportCheckResult,
     compute_check_fingerprint,
 )
-from app.report.errors import ReportCheckPersistenceFailed
+from app.report.errors import (
+    ReportCheckIntegrityError,
+    ReportCheckNotFound,
+    ReportCheckPersistenceFailed,
+)
 from app.report.repository import ReportCheckResultRepository
 from app.report.service import ReportService
 
@@ -98,6 +122,65 @@ class ReportCheckService:
             replayed=not was_created,
         )
 
+    async def verify_check_result_integrity(
+        self, check_result_id: UUID
+    ) -> VerifiedReportCheckResult:
+        """公共 read-only 完整性校验（Stage 5D Gate 0，spec A：缺失的 API，本次新增）。
+
+        流程（短 DB session + 纯函数，**0 LLM / 0 写**）：
+        1. 短 session 加载 CheckResult 行；缺失 → `ReportCheckNotFound`；
+        2. `ReportService.verify_report_integrity(report_id)`（read-side 公共 API）
+           → 上游 Report / Outline / DraftSection 任一损坏 → 对应 IntegrityError
+           向上传播（**不 repair**）；
+        3. 短 session 加载 Claims / Evidence → `run_checks` **重跑确定性 checks**
+           → 重算 expected status（无 findings → pass，有 → fail）与 findings；
+        4. 重算 expected check_fingerprint（REPORT_CHECK_SCHEMA_VERSION + verified
+           report_fingerprint + normalized findings）；
+        5. 与 persisted 逐一对比（report_id / check_schema_version / status /
+           findings / check_fingerprint），任一不同 → `ReportCheckIntegrityError`；
+        6. 返回 `VerifiedReportCheckResult`（含 verified_report，供 5D Audit 复用）。
+
+        **不 repair / 不 update**。status 不在 check_fingerprint 内 → 必须重跑
+        checks 才能发现 pass/fail 篡改；上游 Report 被篡改 → verify_report_integrity
+        先行拒绝（不能只重算指纹，否则 tampered report_fingerprint 会自洽）。
+        """
+        async with self._sessionmaker() as session:
+            row = await ReportCheckResultRepository(session).get_by_id(check_result_id)
+            if row is None:
+                raise ReportCheckNotFound()
+
+        verified = await self._report_service.verify_report_integrity(row.report_id)
+        check_input = await self._load_check_input(verified)
+        findings = run_checks(check_input)
+        status = CHECK_STATUS_PASS if not findings else CHECK_STATUS_FAIL
+        normalized_findings = [finding.to_dict() for finding in findings]
+        fingerprint = compute_check_fingerprint(
+            check_schema_version=REPORT_CHECK_SCHEMA_VERSION,
+            report_id=verified.report_id,
+            report_fingerprint=verified.report_fingerprint,
+            findings=normalized_findings,
+        )
+        checks = [
+            (row.report_id, verified.report_id, "report_id"),
+            (row.check_schema_version, REPORT_CHECK_SCHEMA_VERSION, "check_schema_version"),
+            (row.status, status, "status"),
+            (row.findings, normalized_findings, "findings"),
+            (row.check_fingerprint, fingerprint, "check_fingerprint"),
+        ]
+        for actual, want, field in checks:
+            if actual != want:
+                raise ReportCheckIntegrityError(f"report check {field} mismatch")
+
+        return VerifiedReportCheckResult(
+            check_result_id=row.check_result_id,
+            report_id=row.report_id,
+            check_schema_version=row.check_schema_version,
+            status=row.status,
+            findings=tuple(_finding_from_dict(item) for item in row.findings),
+            check_fingerprint=row.check_fingerprint,
+            verified_report=verified,
+        )
+
     # ------------------------------------------------------------------ 内部
 
     async def _load_check_input(self, verified) -> CheckInput:
@@ -143,13 +226,15 @@ class ReportCheckService:
                 bound: dict[UUID, set[UUID]] = {cid: set() for cid in evidence_ids}
                 for claim_id, card_id in links.all():
                     bound[card_id].add(claim_id)
+                # spec D：真实 provenance 闭包（FK 非空不够），同一短 session 批量加载。
+                provenance = await self._load_provenance_closure(session, cards)
             for card_id, card in cards.items():
                 evidence[str(card_id)] = EvidenceCheckData(
                     evidence_card_id=card_id,
                     evidence_statement=card.evidence_statement,
                     quote_text=card.quote_text,
                     origin_type=card.origin_type,
-                    has_provenance=_has_source_provenance(card),
+                    has_provenance=provenance.get(card_id, False),
                     bound_claim_ids=tuple(sorted(bound[card_id], key=str)),
                 )
 
@@ -161,17 +246,148 @@ class ReportCheckService:
             evidence=evidence,
         )
 
+    async def _load_provenance_closure(
+        self, session, cards: dict[UUID, EvidenceCardModel]
+    ) -> dict[UUID, bool]:
+        """按 origin_type 批量验证 Evidence → source → RawArtifact 真实可追溯。
 
-def _has_source_provenance(card: EvidenceCardModel) -> bool:
-    """Evidence → source provenance 是否真实可追溯（只检查 closure，不重新 retrieval）。
+        spec D：FK 非空不够——必须沿完整链走到真实 `raw_artifacts` 行：
+        - document_chunk：`EvidenceCard.source_id → SourceRecord.artifact_id →
+          RawArtifact`；
+        - macro_observation：`EvidenceCard.macro_observation_id →
+          MacroObservation.snapshot_id → MacroDatasetSnapshot →（series /
+          provider + macro_snapshot_artifacts 链接）→ RawArtifact`。
 
-    EvidenceCardModel 的 origin_consistency CHECK 保证 document_chunk 必有
-    source_id、macro_observation 必有 observation_id；这里按 origin_type 校验
-    对应 FK 存在（防 SQL tamper 删掉 FK）。
-    """
-    if card.origin_type == "document_chunk":
-        return card.source_id is not None
-    return card.macro_observation_id is not None
+        任一环节断裂 → `has_provenance=False`（`citation_provenance_closure`
+        check 捕获，**不 repair / 不重新 retrieval**）。同一短 session 内批量
+        IN 查询，避免 N+1。
+        """
+        provenance: dict[UUID, bool] = {}
+        doc_source_by_card: dict[UUID, UUID] = {
+            cid: card.source_id
+            for cid, card in cards.items()
+            if card.origin_type == "document_chunk" and card.source_id is not None
+        }
+        macro_obs_by_card: dict[UUID, UUID] = {
+            cid: card.macro_observation_id
+            for cid, card in cards.items()
+            if card.origin_type == "macro_observation" and card.macro_observation_id is not None
+        }
+        for cid in cards:
+            if cid not in doc_source_by_card and cid not in macro_obs_by_card:
+                provenance[cid] = False
+
+        if doc_source_by_card:
+            provenance.update(await self._document_provenance(session, doc_source_by_card))
+        if macro_obs_by_card:
+            provenance.update(await self._macro_provenance(session, macro_obs_by_card))
+        return provenance
+
+    @staticmethod
+    async def _document_provenance(session, source_by_card: dict[UUID, UUID]) -> dict[UUID, bool]:
+        """document_chunk 闭包：SourceRecord → artifact → RawArtifact。"""
+        source_ids = list(dict.fromkeys(source_by_card.values()))
+        result = await session.execute(
+            select(SourceRecordModel.source_id, SourceRecordModel.artifact_id).where(
+                SourceRecordModel.source_id.in_(source_ids)
+            )
+        )
+        artifact_by_source = {row.source_id: row.artifact_id for row in result.all()}
+        artifact_ids = [aid for aid in artifact_by_source.values() if aid is not None]
+        existing_artifacts: set[UUID] = set()
+        if artifact_ids:
+            result = await session.execute(
+                select(RawArtifactModel.artifact_id).where(
+                    RawArtifactModel.artifact_id.in_(artifact_ids)
+                )
+            )
+            existing_artifacts = {row.artifact_id for row in result.all()}
+        return {
+            cid: (sid in artifact_by_source and artifact_by_source[sid] in existing_artifacts)
+            for cid, sid in source_by_card.items()
+        }
+
+    @staticmethod
+    async def _macro_provenance(session, obs_by_card: dict[UUID, UUID]) -> dict[UUID, bool]:
+        """macro_observation 闭包：Observation → Snapshot →（Series/Provider +
+        artifact links）→ RawArtifact。
+
+        Snapshot 的 artifact links 是可选的（不像 document 链那样被 FK 完整
+        保证）——若链接行被删 / 从未归档，Observation / Snapshot / Series /
+        Provider 仍在而 RawArtifact 不可达 → 判定无 provenance。
+        """
+        obs_ids = list(dict.fromkeys(obs_by_card.values()))
+        result = await session.execute(
+            select(MacroObservationModel.observation_id, MacroObservationModel.snapshot_id).where(
+                MacroObservationModel.observation_id.in_(obs_ids)
+            )
+        )
+        snapshot_by_obs = {row.observation_id: row.snapshot_id for row in result.all()}
+
+        snapshot_ids = [sid for sid in snapshot_by_obs.values() if sid is not None]
+        series_by_snapshot: dict[UUID, UUID] = {}
+        if snapshot_ids:
+            result = await session.execute(
+                select(
+                    MacroDatasetSnapshotModel.snapshot_id,
+                    MacroDatasetSnapshotModel.series_id,
+                ).where(MacroDatasetSnapshotModel.snapshot_id.in_(snapshot_ids))
+            )
+            series_by_snapshot = {row.snapshot_id: row.series_id for row in result.all()}
+
+        series_ids = [sid for sid in series_by_snapshot.values() if sid is not None]
+        provider_by_series: dict[UUID, str] = {}
+        if series_ids:
+            result = await session.execute(
+                select(MacroSeriesModel.series_id, MacroSeriesModel.provider_key).where(
+                    MacroSeriesModel.series_id.in_(series_ids)
+                )
+            )
+            provider_by_series = {row.series_id: row.provider_key for row in result.all()}
+
+        provider_keys = [key for key in provider_by_series.values() if key]
+        existing_providers: set[str] = set()
+        if provider_keys:
+            result = await session.execute(
+                select(SourceProviderModel.provider_key).where(
+                    SourceProviderModel.provider_key.in_(provider_keys)
+                )
+            )
+            existing_providers = {row.provider_key for row in result.all()}
+
+        artifact_ids_by_snapshot: dict[UUID, list[UUID]] = {}
+        if snapshot_ids:
+            result = await session.execute(
+                select(
+                    MacroSnapshotArtifactModel.snapshot_id,
+                    MacroSnapshotArtifactModel.artifact_id,
+                ).where(MacroSnapshotArtifactModel.snapshot_id.in_(snapshot_ids))
+            )
+            for snapshot_id, artifact_id in result.all():
+                artifact_ids_by_snapshot.setdefault(snapshot_id, []).append(artifact_id)
+        all_artifact_ids = [aid for ids in artifact_ids_by_snapshot.values() for aid in ids]
+        existing_artifacts: set[UUID] = set()
+        if all_artifact_ids:
+            result = await session.execute(
+                select(RawArtifactModel.artifact_id).where(
+                    RawArtifactModel.artifact_id.in_(all_artifact_ids)
+                )
+            )
+            existing_artifacts = {row.artifact_id for row in result.all()}
+
+        def snapshot_ok(snapshot_id: UUID) -> bool:
+            series_id = series_by_snapshot.get(snapshot_id)
+            if series_id is None or series_id not in provider_by_series:
+                return False
+            if provider_by_series[series_id] not in existing_providers:
+                return False
+            linked = artifact_ids_by_snapshot.get(snapshot_id, [])
+            return any(aid in existing_artifacts for aid in linked)
+
+        return {
+            cid: (obs_id in snapshot_by_obs and snapshot_ok(snapshot_by_obs[obs_id]))
+            for cid, obs_id in obs_by_card.items()
+        }
 
 
 def _finding_from_dict(data: dict) -> CheckFinding:
