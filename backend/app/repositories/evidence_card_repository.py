@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,35 @@ class EvidenceCardRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_by_ids(
+        self,
+        evidence_card_ids: list[UUID],
+        limit: int,
+        offset: int,
+    ) -> tuple[list[EvidenceCardModel], int]:
+        """按精确 ID 集合分页取卡（任务级 artifact workspace 用）。
+
+        `total` 是 ID 集合中实际存在的行数（非整表计数）。
+        """
+        ids = list(dict.fromkeys(evidence_card_ids))
+        base = EvidenceCardModel.evidence_card_id.in_(ids)
+        total = int(
+            (
+                await self._session.execute(
+                    select(func.count()).select_from(EvidenceCardModel).where(base)
+                )
+            ).scalar_one()
+        )
+        stmt = (
+            select(EvidenceCardModel)
+            .where(base)
+            .order_by(EvidenceCardModel.created_at.asc(), EvidenceCardModel.evidence_card_id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows), total
 
     async def create_or_get(self, card: EvidenceCardModel) -> tuple[EvidenceCardModel, bool]:
         """INSERT ... ON CONFLICT(evidence_fingerprint) DO NOTHING RETURNING。

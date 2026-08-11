@@ -267,6 +267,30 @@ class Stage5WorkflowRunner:
         }
         return await self._run_graph(run_id, thread_id, resume=resume_value)
 
+    # ------------------------------------------------------------------ checkpoint
+
+    @property
+    def dependencies(self) -> Stage5WorkflowDependencies:
+        """只读访问已装配的 Stage 5 deps（artifact workspace 复用 verify 服务）。"""
+        return self._dependencies
+
+    async def read_checkpoint_state(self, run_id: UUID) -> dict:
+        """只读读取已持久化 checkpoint state（research artifact workspace 用）。
+
+        镜像 Stage4WorkflowRunner.read_checkpoint_state：不 claim、不改 run
+        状态；run 不存在 → `WorkflowRunNotFound`。返回 `dict(state.values)`，
+        字段与 `_build_initial_state` 一致（report_id / audit_id /
+        review_action_id …）。
+        """
+        async with self._sessionmaker() as session:
+            run = await WorkflowRunRepository(session).get_by_id(run_id)
+        if run is None:
+            raise WorkflowRunNotFound()
+        checkpointer = await self._checkpoint_manager.get_checkpointer()
+        graph = build_stage5_report_graph(self._dependencies, checkpointer)
+        state = await graph.aget_state({"configurable": {"thread_id": run.thread_id}})
+        return dict(state.values) if state is not None else {}
+
     # ------------------------------------------------------------------ internal
 
     async def _run_graph(

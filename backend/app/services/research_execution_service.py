@@ -73,6 +73,16 @@ class ResearchExecutionService:
         self._chain_state: dict[UUID, dict] = {}
         self._closed = False
 
+    @property
+    def stage4_runner_factory(self):
+        """只读暴露惰性 Stage 4 runner factory（artifact workspace 读 checkpoint 用）。"""
+        return self._stage4_runner_factory
+
+    @property
+    def stage5_runner_factory(self):
+        """只读暴露惰性 Stage 5 runner factory（artifact workspace 读 checkpoint 用）。"""
+        return self._stage5_runner_factory
+
     # ------------------------------------------------------------------ start
 
     async def start(

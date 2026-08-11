@@ -11,6 +11,7 @@ from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.source_ingestion_service import SourceIngestionService
 from app.services.source_registry_service import SourceRegistryService
+from app.services.task_artifact_service import TaskArtifactService
 from app.services.task_service import TaskService
 from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
@@ -40,6 +41,21 @@ def get_research_execution_service(request: Request) -> ResearchExecutionService
     return resources.research_execution
 
 
+def get_task_artifact_service(
+    request: Request,
+    research_execution: Annotated[
+        ResearchExecutionService, Depends(get_research_execution_service)
+    ],
+) -> TaskArtifactService:
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.database is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    return TaskArtifactService(
+        resources.database.session_factory(),
+        research_execution=research_execution,
+    )
+
+
 def get_task_workspace_service(
     request: Request,
     research_execution: Annotated[
@@ -49,9 +65,12 @@ def get_task_workspace_service(
     resources = getattr(request.app.state, "resources", None)
     if resources is None or resources.database is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
+    sessionmaker = resources.database.session_factory()
+    artifact_service = TaskArtifactService(sessionmaker, research_execution=research_execution)
     return TaskWorkspaceService(
-        resources.database.session_factory(),
+        sessionmaker,
         research_execution=research_execution,
+        artifact_service=artifact_service,
     )
 
 

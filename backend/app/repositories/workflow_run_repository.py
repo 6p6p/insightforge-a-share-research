@@ -263,3 +263,28 @@ class WorkflowRunRepository:
         """最近创建的一次 run（workspace current_run 投影）。"""
         rows, _ = await self.list_for_task(task_id, limit=1, offset=0)
         return rows[0] if rows else None
+
+    async def get_latest_for_task_by_graph(
+        self,
+        task_id: UUID,
+        graph_name: str,
+    ) -> WorkflowRunModel | None:
+        """任务最近一条指定 graph 的 run（artifact workspace 的 Stage4/Stage5 锚定）。
+
+        语义与 ResearchExecutionRecoveryCoordinator 一致：取该 task 最近一条
+        Stage4 / Stage5 run 作为当前研究周期链尾。
+        """
+        stmt = (
+            select(WorkflowRunModel)
+            .where(
+                WorkflowRunModel.task_id == task_id,
+                WorkflowRunModel.graph_name == graph_name,
+            )
+            .order_by(
+                WorkflowRunModel.created_at.desc(),
+                WorkflowRunModel.run_id.desc(),
+            )
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().first()

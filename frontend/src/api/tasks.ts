@@ -1,6 +1,13 @@
 /** Research task + workspace + execute 的 API（后端 /app/api/v1/routes/tasks.py）。 */
 
 import { apiRequest } from './client';
+import type {
+  AnalysisArtifactResponse,
+  EvidenceArtifactListResponse,
+  ReportArtifactResponse,
+  ReviewsArtifactResponse,
+  SourceArtifactListResponse,
+} from '../types/artifacts';
 import type { TaskCreateRequest, TaskListResponse, TaskResponse } from '../types/task';
 import type {
   ResearchExecutionRequest,
@@ -15,6 +22,13 @@ export const taskKeys = {
     [...taskKeys.all, 'list', params] as const,
   detail: (taskId: string) => [...taskKeys.all, 'detail', taskId] as const,
   workspace: (taskId: string) => [...taskKeys.all, 'workspace', taskId] as const,
+  sources: (taskId: string, params: { limit: number; offset: number }) =>
+    [...taskKeys.all, 'artifacts', taskId, 'sources', params] as const,
+  evidence: (taskId: string, params: { limit: number; offset: number }) =>
+    [...taskKeys.all, 'artifacts', taskId, 'evidence', params] as const,
+  analysis: (taskId: string) => [...taskKeys.all, 'artifacts', taskId, 'analysis'] as const,
+  report: (taskId: string) => [...taskKeys.all, 'artifacts', taskId, 'report'] as const,
+  reviews: (taskId: string) => [...taskKeys.all, 'artifacts', taskId, 'reviews'] as const,
 };
 
 export async function createTask(payload: TaskCreateRequest): Promise<TaskResponse> {
@@ -42,6 +56,43 @@ export async function getTask(taskId: string): Promise<TaskResponse> {
 
 export async function getTaskWorkspace(taskId: string): Promise<TaskWorkspaceResponse> {
   return apiRequest<TaskWorkspaceResponse>(`/tasks/${taskId}/workspace`);
+}
+
+/** 任务引用的 source 列表（任务级 scoped，分页）。 */
+export async function getTaskSources(
+  taskId: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<SourceArtifactListResponse> {
+  const query = new URLSearchParams();
+  query.set('limit', String(params.limit ?? 20));
+  query.set('offset', String(params.offset ?? 0));
+  return apiRequest<SourceArtifactListResponse>(`/tasks/${taskId}/sources?${query.toString()}`);
+}
+
+/** 任务引用的 evidence card 列表（任务级 scoped，分页）。 */
+export async function getTaskEvidence(
+  taskId: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<EvidenceArtifactListResponse> {
+  const query = new URLSearchParams();
+  query.set('limit', String(params.limit ?? 20));
+  query.set('offset', String(params.offset ?? 0));
+  return apiRequest<EvidenceArtifactListResponse>(`/tasks/${taskId}/evidence?${query.toString()}`);
+}
+
+/** 任务 Stage 4 分析视图：work items + claims + synthesis 摘要。 */
+export async function getTaskAnalysis(taskId: string): Promise<AnalysisArtifactResponse> {
+  return apiRequest<AnalysisArtifactResponse>(`/tasks/${taskId}/analysis`);
+}
+
+/** 任务最新报告投影（verify_report_integrity read-side）。 */
+export async function getTaskReport(taskId: string): Promise<ReportArtifactResponse> {
+  return apiRequest<ReportArtifactResponse>(`/tasks/${taskId}/report`);
+}
+
+/** 任务最新审核视图：audit 摘要 + issues。 */
+export async function getTaskReviews(taskId: string): Promise<ReviewsArtifactResponse> {
+  return apiRequest<ReviewsArtifactResponse>(`/tasks/${taskId}/reviews`);
 }
 
 /** 启动真实研究执行：显式 Stage 4 work plan。返回 Stage 4 run（202）。 */

@@ -10,12 +10,20 @@ from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
     get_research_execution_service,
+    get_task_artifact_service,
     get_task_service,
     get_task_workspace_service,
     get_workflow_service,
 )
 from app.core.errors import InvalidIdempotencyKey
 from app.domain.tasks import TaskStatus
+from app.schemas.artifact import (
+    AnalysisArtifactResponse,
+    EvidenceArtifactListResponse,
+    ReportArtifactResponse,
+    ReviewsArtifactResponse,
+    SourceArtifactListResponse,
+)
 from app.schemas.research_execution import (
     ResearchExecutionRequest,
     TaskWorkspaceResponse,
@@ -24,6 +32,7 @@ from app.schemas.task import TaskCreateRequest, TaskListResponse, TaskResponse
 from app.schemas.workflow import WorkflowRunResponse
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.sse_service import format_sse_event, parse_last_event_id
+from app.services.task_artifact_service import TaskArtifactService
 from app.services.task_service import TaskService
 from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
@@ -88,8 +97,57 @@ async def get_task_workspace(
     task_id: UUID,
     service: Annotated[TaskWorkspaceService, Depends(get_task_workspace_service)],
 ) -> TaskWorkspaceResponse:
-    """Task workspace projection（spec E）：task + 解析公司 + 当前 run + 产物计数。"""
+    """Task workspace projection（spec E）：task + 解析公司 + 当前 run + 任务级产物计数。"""
     return await service.get_workspace(task_id)
+
+
+@router.get("/{task_id}/sources", response_model=SourceArtifactListResponse)
+async def get_task_sources(
+    task_id: UUID,
+    service: Annotated[TaskArtifactService, Depends(get_task_artifact_service)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> SourceArtifactListResponse:
+    """任务引用的 source 列表（任务级 scoped，从 checkpoint 恢复精确 ID 集）。"""
+    return await service.get_sources(task_id, limit=limit, offset=offset)
+
+
+@router.get("/{task_id}/evidence", response_model=EvidenceArtifactListResponse)
+async def get_task_evidence(
+    task_id: UUID,
+    service: Annotated[TaskArtifactService, Depends(get_task_artifact_service)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> EvidenceArtifactListResponse:
+    """任务引用的 evidence card 列表（任务级 scoped，分页）。"""
+    return await service.get_evidence(task_id, limit=limit, offset=offset)
+
+
+@router.get("/{task_id}/analysis", response_model=AnalysisArtifactResponse)
+async def get_task_analysis(
+    task_id: UUID,
+    service: Annotated[TaskArtifactService, Depends(get_task_artifact_service)],
+) -> AnalysisArtifactResponse:
+    """任务 Stage 4 分析视图：work items + claims + synthesis 摘要。"""
+    return await service.get_analysis(task_id)
+
+
+@router.get("/{task_id}/report", response_model=ReportArtifactResponse)
+async def get_task_report(
+    task_id: UUID,
+    service: Annotated[TaskArtifactService, Depends(get_task_artifact_service)],
+) -> ReportArtifactResponse:
+    """任务最新报告投影（verify_report_integrity read-side）。"""
+    return await service.get_report(task_id)
+
+
+@router.get("/{task_id}/reviews", response_model=ReviewsArtifactResponse)
+async def get_task_reviews(
+    task_id: UUID,
+    service: Annotated[TaskArtifactService, Depends(get_task_artifact_service)],
+) -> ReviewsArtifactResponse:
+    """任务最新审核视图：audit 摘要 + issues。"""
+    return await service.get_reviews(task_id)
 
 
 @router.post(

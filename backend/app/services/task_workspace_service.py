@@ -1,7 +1,11 @@
-"""Task workspace projection service (Stage 6A spec E).
+"""Task workspace projection service (Stage 6A spec E / Stage 6B.1).
 
-把 ResearchTask + 解析公司 + 当前 run + 公司级证据链产物计数 组装成
+把 ResearchTask + 解析公司 + 当前 run + **任务级**证据链产物计数 组装成
 `TaskWorkspaceResponse`，供 Web 工作台一次性渲染。只做只读投影，不修改业务数据。
+
+Stage 6B.1 起计数改为任务级：注入 `TaskArtifactService` 时按任务从 checkpoint
+精确恢复 ID 集合计数（source/evidence/claim/report/review issue）。未注入时保留
+公司级 `_count_artifacts` 作兼容回退（deprecated，仅直接构造实例的场景）。
 """
 
 from uuid import UUID
@@ -20,6 +24,7 @@ from app.schemas.research_execution import ArtifactSummary, TaskWorkspaceRespons
 from app.schemas.task import TaskResponse
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
+from app.services.task_artifact_service import TaskArtifactService
 
 
 class TaskWorkspaceService:
@@ -29,10 +34,12 @@ class TaskWorkspaceService:
         self,
         sessionmaker: async_sessionmaker,
         research_execution: ResearchExecutionService | None = None,
+        artifact_service: TaskArtifactService | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._company_identity = CompanyIdentityService(sessionmaker)
         self._research_execution = research_execution
+        self._artifact_service = artifact_service
 
     async def get_workspace(self, task_id: UUID) -> TaskWorkspaceResponse:
         async with self._sessionmaker() as session:
@@ -58,7 +65,10 @@ class TaskWorkspaceService:
 
             current_run = WorkflowRunResponse.model_validate(run_model)
 
-        summary = await self._count_artifacts(company_id)
+        if self._artifact_service is not None:
+            summary = await self._artifact_service.count_artifacts(task_id)
+        else:
+            summary = await self._count_artifacts(company_id)
         research_chain_active = False
         if self._research_execution is not None:
             # 后台研究链（Stage4→Stage5 过渡）仍在执行 → task 尚非真正终态，
@@ -73,6 +83,9 @@ class TaskWorkspaceService:
         )
 
     async def _count_artifacts(self, company_id: UUID | None) -> ArtifactSummary:
+        # Deprecated：Stage 6B.1 起注入 artifact_service 走任务级计数；此处仅作
+        # 兼容回退（直接构造实例而未注入时），语义仍是公司级全集。
+        """（deprecated）公司级产物计数回退；生产路径已由任务级计数取代。"""
         if company_id is None:
             return ArtifactSummary()
         async with self._sessionmaker() as session:

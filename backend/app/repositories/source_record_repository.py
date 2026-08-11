@@ -128,3 +128,36 @@ class SourceRecordRepository:
             stmt = stmt.where(SourceRecordModel.document_type == document_type)
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
+
+    async def list_by_ids(
+        self,
+        source_ids: list[UUID],
+        limit: int,
+        offset: int,
+    ) -> tuple[list[SourceRecordModel], int]:
+        """按精确 ID 集合分页取 source（任务级 artifact workspace 用）。
+
+        `total` 是 ID 集合中实际存在的行数（非整表计数）。
+        """
+        ids = list(dict.fromkeys(source_ids))
+        base = SourceRecordModel.source_id.in_(ids)
+        total = int(
+            (
+                await self._session.execute(
+                    select(func.count()).select_from(SourceRecordModel).where(base)
+                )
+            ).scalar_one()
+        )
+        stmt = (
+            select(SourceRecordModel)
+            .where(base)
+            .order_by(
+                SourceRecordModel.published_at.desc().nulls_last(),
+                SourceRecordModel.created_at.desc(),
+                SourceRecordModel.source_id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows), total
