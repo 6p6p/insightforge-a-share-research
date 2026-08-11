@@ -13,6 +13,7 @@ from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.document_chunk import DocumentChunkModel
 from app.db.models.draft_section import DraftSectionModel
+from app.db.models.draft_section_revision import DraftSectionRevisionModel
 from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.financial_calculation import (
     FinancialCalculationInputModel,
@@ -64,6 +65,7 @@ __all__ = [
     "CompanyModel",
     "DocumentChunkModel",
     "DraftSectionModel",
+    "DraftSectionRevisionModel",
     "EvidenceCardModel",
     "FinancialCalculationInputModel",
     "FinancialCalculationModel",

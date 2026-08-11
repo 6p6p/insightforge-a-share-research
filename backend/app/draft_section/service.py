@@ -110,6 +110,24 @@ class _LoadedSection:
     gaps: list[ResolvedGap]
 
 
+@dataclass(frozen=True)
+class LoadedSectionInput:
+    """`load_section_input` 的 read-side 产物：已验证 draft + 完整 section input。
+
+    供 5E.2 Revision 复用：修订 writer 需要与原始 5B Writer 完全一致的 section
+    scope（C/E/X/G alias）、exact Claim/Evidence fingerprints 与 relation mapping，
+    以计算 revision input fingerprint 并复用同一套 hard validation。
+    """
+
+    verified: VerifiedDraftSection
+    outline: VerifiedReportOutline
+    pack: SectionInputPack
+    claims: list[LoadedClaim]
+    evidence: list[LoadedEvidence]
+    conflicts: list[ResolvedConflict]
+    gaps: list[ResolvedGap]
+
+
 class DraftSectionService:
     def __init__(
         self,
@@ -336,6 +354,55 @@ class DraftSectionService:
             writer_input_fingerprint=row.writer_input_fingerprint,
             section_fingerprint=row.section_fingerprint,
             paragraph_count=len(payload["paragraphs"]),
+        )
+
+    async def load_section_input(self, draft_section_id: UUID) -> LoadedSectionInput:
+        """public read-only：重建并验证一个 **v2 原始 draft** 的完整 section input。
+
+        供 5E.2 Revision 复用：修订 writer 需要与原始 5B Writer 完全一致的 section
+        scope（确定性 C/E/X/G alias）与 exact Claim/Evidence 数据。内部先完整
+        `verify_draft_section_integrity`（replay 语义，确保 draft 未被篡改），再
+        重建 Section Input Pack——重复 verify 只发生在 revision 路径（bounded loop，
+        低频），换取复用**同一套**加载逻辑，避免复制 `_load_section` 细节。
+
+        **只支持 `writer_version == WRITER_VERSION`（v2）的 draft**；修订输出
+        （v1，writer_name=evidence_bound_section_rewriter）无法按原始 section input
+        重建 → `DraftSectionLegacyVersionUnsupported`（由 RevisionService 递归
+        verify 处理）。
+        """
+        # 1. 完整 replay 校验（身份 / 输入指纹 / payload contracts / section 指纹）。
+        verified = await self.verify_draft_section_integrity(draft_section_id)
+
+        # 2. 重建 section input（与 create_or_get_section 第 2-4 步同一套逻辑）。
+        async with self._sessionmaker() as session:
+            row = await DraftSectionRepository(session).get_by_id(draft_section_id)
+        if row is None:
+            raise DraftSectionNotFound(f"draft section {draft_section_id} not found")
+        if row.writer_version != WRITER_VERSION:
+            raise DraftSectionLegacyVersionUnsupported(
+                f"draft section writer_version={row.writer_version} not supported "
+                f"(current WRITER_VERSION={WRITER_VERSION})"
+            )
+        outline = await self._outline_service.verify_outline_integrity(row.outline_id)
+        section = self._find_section(outline, row.section_id)
+        loaded = await self._load_section(outline, section)
+        pack = build_section_input_pack(
+            outline=outline,
+            section=section,
+            company_name=loaded.company_name,
+            claims=loaded.claims,
+            evidence=loaded.evidence,
+            conflicts=loaded.conflicts,
+            gaps=loaded.gaps,
+        )
+        return LoadedSectionInput(
+            verified=verified,
+            outline=outline,
+            pack=pack,
+            claims=loaded.claims,
+            evidence=loaded.evidence,
+            conflicts=loaded.conflicts,
+            gaps=loaded.gaps,
         )
 
     # ------------------------------------------------------------------ 内部

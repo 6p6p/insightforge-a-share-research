@@ -25,6 +25,7 @@ tools / web search。caller 只提供 `outline_id` + 显式 `draft_section_ids`�
 """
 
 import uuid
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select
@@ -34,6 +35,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.db.models.draft_section import DraftSectionModel
 from app.db.models.report import ReportModel
 from app.draft_section.contracts import VerifiedDraftSection
+from app.draft_section.errors import DraftSectionLegacyVersionUnsupported
 from app.draft_section.service import DraftSectionService
 from app.report.assemble import (
     AssembledSectionDraft,
@@ -58,6 +60,9 @@ from app.report.repository import ReportRepository
 from app.report_outline.contracts import VerifiedReportOutline
 from app.report_outline.service import ReportOutlineService
 
+if TYPE_CHECKING:  # 仅类型标注；运行时局部导入避免 report↔revision 循环。
+    from app.revision.service import RevisionService
+
 
 class ReportService:
     """Deterministic Report：verified Outline + explicit DraftSections → Report（0 LLM）。"""
@@ -66,9 +71,16 @@ class ReportService:
         self,
         sessionmaker: async_sessionmaker,
         draft_section_service: DraftSectionService,
+        revision_service: "RevisionService | None" = None,
     ) -> None:
+        """revision_service：装配**含修订输出**（writer_version=1）的 Report 时必需。
+
+        纯 v2 原始 draft 的 Report（既有所有调用方）不需要；Stage5 rewrite 后构造
+        新 Report（spec N）必须注入 RevisionService 以完整验证 v1 修订输出。
+        """
         self._sessionmaker = sessionmaker
         self._draft_section_service = draft_section_service
+        self._revision_service = revision_service
         self._outline_service = ReportOutlineService(sessionmaker)
 
     async def create_or_get_report(self, draft: ReportAssemblyDraft) -> ReportResult:
@@ -206,14 +218,13 @@ class ReportService:
     ) -> list[AssembledSectionDraft]:
         """逐个 verify DraftSection + 加载 section_payload（short DB session）。
 
-        每个 DraftSection 的 outline_id 必须等于 input outline（spec K）。DraftSection
-        完整性 / not-found / legacy 错误由 `DraftSectionService` 原样向上传播。
+        每个 DraftSection 的 outline_id 必须等于 input outline（spec K）。v2 原始
+        draft 走 `DraftSectionService`；v1 修订输出经 `RevisionService` 完整重放
+        （spec N：装配修订后新 Report 的同一入口）。
         """
         verified: list[VerifiedDraftSection] = []
         for draft_section_id in draft_section_ids:
-            item = await self._draft_section_service.verify_draft_section_integrity(
-                draft_section_id
-            )
+            item = await self._verify_one_draft(draft_section_id)
             if item.outline_id != verified_outline.outline_id:
                 raise ReportAssemblyError(
                     f"draft section {draft_section_id} belongs to a different outline "
@@ -228,6 +239,27 @@ class ReportService:
             AssembledSectionDraft(verified=item, section_payload=payloads[item.draft_section_id])
             for item in verified
         ]
+
+    async def _verify_one_draft(self, draft_section_id: UUID) -> VerifiedDraftSection:
+        """verify 单个 DraftSection：v2 原始走 5B，v1 修订输出走 revision service。
+
+        修订输出（writer_version=1）无法按原始 section input 重建 → 5B 抛
+        `DraftSectionLegacyVersionUnsupported`；此时必须经
+        `RevisionService.verify_revised_draft_section` 完整重放（source → trigger →
+        revised）。未注入 revision_service 时装配含修订输出的 Report →
+        `ReportAssemblyError`（明确提示，不静默失败）。
+        """
+        try:
+            return await self._draft_section_service.verify_draft_section_integrity(
+                draft_section_id
+            )
+        except DraftSectionLegacyVersionUnsupported:
+            if self._revision_service is None:
+                raise ReportAssemblyError(
+                    "report contains a revision-output draft but ReportService "
+                    "has no revision_service"
+                ) from None
+            return await self._revision_service.verify_revised_draft_section(draft_section_id)
 
     async def _load_section_payloads(self, draft_section_ids: tuple[UUID, ...]) -> dict:
         """短 DB session：加载 selected DraftSections 的 section_payload（供拼装）。"""
