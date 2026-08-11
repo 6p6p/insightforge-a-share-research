@@ -39,6 +39,11 @@ from app.db.models.report import ReportCheckResultModel, ReportModel
 from app.db.models.report_audit import ReportAuditModel, ReviewIssueModel
 from app.db.models.report_outline import ReportOutlineModel
 from app.db.models.research_task import ResearchTaskModel
+from app.db.models.review_action import (
+    HumanReviewDecisionModel,
+    HumanReviewRequestModel,
+    ReportReviewActionModel,
+)
 from app.db.models.source_provider import SourceProviderModel
 from app.db.models.source_record import SourceRecordModel
 from app.db.models.valuation_metric_observation import ValuationMetricObservationModel
@@ -84,6 +89,9 @@ __all__ = [
     "ReportAuditModel",
     "ReviewIssueModel",
     "ReportOutlineModel",
+    "HumanReviewDecisionModel",
+    "HumanReviewRequestModel",
+    "ReportReviewActionModel",
     "ResearchTaskModel",
     "SourceProviderModel",
     "SourceRecordModel",

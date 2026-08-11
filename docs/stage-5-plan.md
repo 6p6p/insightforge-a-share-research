@@ -33,4 +33,8 @@
 - **范围**：确定性 routing 决定 pass/rewrite/research/human_review；Auditor Pack（只含 alias）+ 结构化输出，模型只输出 issues，不决定路线。**0 tools / 0 web / 0 Chroma / 0 检索**。
 - **模型**：`report_audits` + `review_issues`（migration 0035，FK RESTRICT；downgrade 在有行时拒绝）。
 - **测试**：真实 PG 最小链 E2E + 确定性 routing 单测 + Check Integrity（tamper 拒绝）+ provenance closure（document_chunk / macro_observation）+ migration 0035 downgrade guard；受控 smoke 1 次真实 DeepSeek 通过。
-- **下一阶段**：5E Retry / Human confirmation（未开工，不提前实现）。
+
+## 5E：Retry / Human confirmation
+
+- **5E.1 = FINAL（Review Routing + Human Confirmation Foundation，`REVIEW_ACTION_SCHEMA_VERSION=1`、`HUMAN_REVIEW_REQUEST_SCHEMA_VERSION=1`、`HUMAN_REVIEW_DECISION_SCHEMA_VERSION=1`、migration 0036，Gate 验收完成）**：VerifiedReportAudit → 确定性 review routing → ReviewActionPlan →（若 human_review）HumanReviewRequest → HumanReviewDecision 正式持久化；0 LLM / 0 Chroma / 0 Retrieval；三层逐层 verify integrity（不 repair）；downgrade 有行时拒绝。
+- **下一阶段**：5E.2（Rewrite / Research 执行，会引入模型调用），未开工不提前实现。
