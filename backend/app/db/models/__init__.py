@@ -36,6 +36,7 @@ from app.db.models.relative_valuation_claim_profile import RelativeValuationClai
 from app.db.models.relative_valuation_comparison import RelativeValuationComparisonModel
 from app.db.models.relative_valuation_comparison_peer import RelativeValuationComparisonPeerModel
 from app.db.models.report import ReportCheckResultModel, ReportModel
+from app.db.models.report_audit import ReportAuditModel, ReviewIssueModel
 from app.db.models.report_outline import ReportOutlineModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.source_provider import SourceProviderModel
@@ -80,6 +81,8 @@ __all__ = [
     "RelativeValuationComparisonPeerModel",
     "ReportCheckResultModel",
     "ReportModel",
+    "ReportAuditModel",
+    "ReviewIssueModel",
     "ReportOutlineModel",
     "ResearchTaskModel",
     "SourceProviderModel",

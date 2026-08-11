@@ -2,7 +2,7 @@
 
 > 阶段 5 目标：把 Stage 4 已确认的 **SynthesisResult** 推进为**确定性、可追溯的报告产物**——ReportOutline（5A）→ DraftSection / Report（5B Writer）→ Deterministic Check（5C）→ Agent Audit（5D）→ Retry / Human confirmation（5E）。顶层证据链：**Source → Evidence → Claim → Report → Audit**；Report 生成与 Agent Audit 属于 Stage 5，**不写 5A=Writer、5B=Audit**。
 >
-> 总进度：**5A = FINAL（Deterministic ReportOutline Foundation，`REPORT_OUTLINE_SCHEMA_VERSION=1`、migration 0032，Gate 验收完成）**；**5B = FINAL（Evidence-bound DraftSection Writer，`DRAFT_SECTION_SCHEMA_VERSION=1`、migration 0033，Gate 验收完成）**；**5C = completed（Deterministic Report Assembly + Check，`REPORT_SCHEMA_VERSION=1`、`REPORT_CHECK_SCHEMA_VERSION=1`、migration 0034）**；5D / 5E 未到验收门槛，不提前开工。
+> 总进度：**5A = FINAL（Deterministic ReportOutline Foundation，`REPORT_OUTLINE_SCHEMA_VERSION=1`、migration 0032，Gate 验收完成）**；**5B = FINAL（Evidence-bound DraftSection Writer，`DRAFT_SECTION_SCHEMA_VERSION=1`、migration 0033，Gate 验收完成）**；**5C = FINAL（Deterministic Report Assembly + Check，`REPORT_SCHEMA_VERSION=1`、`REPORT_CHECK_SCHEMA_VERSION=1`、migration 0034，Gate 验收完成）**；**5D = completed（Evidence-bound Agent Audit，`REPORT_AUDIT_SCHEMA_VERSION=1`、migration 0035）**；5E（Retry / Human confirmation）为下一阶段，未开工不提前实现。
 
 ## 5A：Deterministic ReportOutline Foundation（completed，FINAL）
 
@@ -27,4 +27,10 @@
 - **范围**：`ReportAssemblyDraft(outline_id, draft_section_ids)` 显式精确选择 → 逐 DraftSection verify → 机械拼装 v1 Report payload（coverage/identity 硬边界）→ 10 项确定性 Check（report_fingerprint = canonical JSON SHA-256）。**0 LLM / 0 Chroma / 0 Retrieval**。
 - **模型**：`reports` + `report_check_results`（migration 0034，FK RESTRICT；downgrade 在有行时拒绝）；`REPORT_SCHEMA_VERSION=1`、`REPORT_CHECK_SCHEMA_VERSION=1`。Check finding 只含 code/section_id/paragraph_index/related refs；status pass/fail。
 - **测试**：真实 PG E2E（Fake Writer 全 draft → Report → Check pass）+ replay/并发/拒绝路径/tamper + migration 0034 downgrade guard；全程 0 真实 DeepSeek。
-- **下一阶段**：5D Agent Audit（未开工，不提前实现）。
+
+## 5D：Evidence-bound Agent Audit（completed）
+
+- **范围**：确定性 routing 决定 pass/rewrite/research/human_review；Auditor Pack（只含 alias）+ 结构化输出，模型只输出 issues，不决定路线。**0 tools / 0 web / 0 Chroma / 0 检索**。
+- **模型**：`report_audits` + `review_issues`（migration 0035，FK RESTRICT；downgrade 在有行时拒绝）。
+- **测试**：真实 PG 最小链 E2E + 确定性 routing 单测 + Check Integrity（tamper 拒绝）+ provenance closure（document_chunk / macro_observation）+ migration 0035 downgrade guard；受控 smoke 1 次真实 DeepSeek 通过。
+- **下一阶段**：5E Retry / Human confirmation（未开工，不提前实现）。
