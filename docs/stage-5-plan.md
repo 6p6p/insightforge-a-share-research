@@ -2,7 +2,7 @@
 
 > 阶段 5 目标：把 Stage 4 已确认的 **SynthesisResult** 推进为**确定性、可追溯的报告产物**——ReportOutline（5A）→ DraftSection / Report（5B Writer）→ Deterministic Check（5C）→ Agent Audit（5D）→ Retry / Human confirmation（5E）。顶层证据链：**Source → Evidence → Claim → Report → Audit**；Report 生成与 Agent Audit 属于 Stage 5，**不写 5A=Writer、5B=Audit**。
 >
-> 总进度：**5A = FINAL（Deterministic ReportOutline Foundation，`REPORT_OUTLINE_SCHEMA_VERSION=1`、migration 0032，Gate 验收完成）**；**5B = FINAL（Evidence-bound DraftSection Writer，`DRAFT_SECTION_SCHEMA_VERSION=1`、migration 0033，Gate 验收完成）**；**5C = FINAL（Deterministic Report Assembly + Check，`REPORT_SCHEMA_VERSION=1`、`REPORT_CHECK_SCHEMA_VERSION=1`、migration 0034，Gate 验收完成）**；**5D = completed（Evidence-bound Agent Audit，`REPORT_AUDIT_SCHEMA_VERSION=1`、migration 0035）**；5E（Retry / Human confirmation）为下一阶段，未开工不提前实现。
+> 总进度：**5A = FINAL（Deterministic ReportOutline Foundation，`REPORT_OUTLINE_SCHEMA_VERSION=1`、migration 0032，Gate 验收完成）**；**5B = FINAL（Evidence-bound DraftSection Writer，`DRAFT_SECTION_SCHEMA_VERSION=1`、migration 0033，Gate 验收完成）**；**5C = FINAL（Deterministic Report Assembly + Check，`REPORT_SCHEMA_VERSION=1`、`REPORT_CHECK_SCHEMA_VERSION=1`、migration 0034，Gate 验收完成）**；**5D = completed（Evidence-bound Agent Audit，`REPORT_AUDIT_SCHEMA_VERSION=1`、migration 0035）**；**5E = FINAL（Rewrite / Human confirmation / Research backflow，`REVISION_SCHEMA_VERSION=1`、`RESEARCH_BACKFLOW_REQUEST_SCHEMA_VERSION=1`、migration 0036–0038，Gate 验收完成）**。
 
 ## 5A：Deterministic ReportOutline Foundation（completed，FINAL）
 
@@ -34,7 +34,9 @@
 - **模型**：`report_audits` + `review_issues`（migration 0035，FK RESTRICT；downgrade 在有行时拒绝）。
 - **测试**：真实 PG 最小链 E2E + 确定性 routing 单测 + Check Integrity（tamper 拒绝）+ provenance closure（document_chunk / macro_observation）+ migration 0035 downgrade guard；受控 smoke 1 次真实 DeepSeek 通过。
 
-## 5E：Retry / Human confirmation
+## 5E：Retry / Human confirmation / Rewrite / Research backflow（FINAL）
 
 - **5E.1 = FINAL（Review Routing + Human Confirmation Foundation，`REVIEW_ACTION_SCHEMA_VERSION=1`、`HUMAN_REVIEW_REQUEST_SCHEMA_VERSION=1`、`HUMAN_REVIEW_DECISION_SCHEMA_VERSION=1`、migration 0036，Gate 验收完成）**：VerifiedReportAudit → 确定性 review routing → ReviewActionPlan →（若 human_review）HumanReviewRequest → HumanReviewDecision 正式持久化；0 LLM / 0 Chroma / 0 Retrieval；三层逐层 verify integrity（不 repair）；downgrade 有行时拒绝。
-- **下一阶段**：5E.2（Rewrite / Research 执行，会引入模型调用），未开工不提前实现。
+- **5E.2A = FINAL（Rewrite + Human control loop，`REVISION_SCHEMA_VERSION=1`、migration 0037，Gate 验收完成）**：rewrite 路线确定性写入 DraftSectionRevision；rewrite / research / human 三路线由 LangGraph 统一调度闭环；Stage5 不越过 Stage2/3/4。
+- **5E.2B = completed（Research Backflow Contract + Continuation，`RESEARCH_BACKFLOW_REQUEST_SCHEMA_VERSION=1`、`RESEARCH_BACKFLOW_FULFILLMENT_SCHEMA_VERSION=1`、migration 0038）**：research request / fulfillment 两张 immutable 表；从 Stage5 final checkpoint 恢复身份 → request/fulfillment fingerprint + 确定性 replay；continuation identity（company/question/cutoff 全等）+ no-progress 政策（新 result 与新 run fingerprint 双不等）；`build_stage5_continuation_request` 让新 Stage5 run 以 pass audit finalize。**Stage5 不执行 Stage2/3/4 research**——只做可验证 handoff 并消费 upstream 新 SynthesisResult。
+- **Stage 5 总体 = FINAL**：报告主线 **Source → Evidence → Claim → Report → Audit → ReviewAction → Revision / ResearchBackflow** 全链路闭环。

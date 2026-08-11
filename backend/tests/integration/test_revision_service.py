@@ -105,8 +105,14 @@ async def connection_uri() -> str:
 
 
 async def _cleanup_with_revisions(sessionmaker) -> None:
-    """先删 revision 层（FK 引用 draft_sections + check/action/decision），再走公共 _cleanup。"""
+    """先删 revision 层（FK 引用 draft_sections + check/action/decision），再走公共 _cleanup。
+
+    5E.2B：research_backflow_fulfillments/requests 以 RESTRICT 引用 workflow_runs /
+    reports / review_actions——必须先删，否则后续 DELETE 会被 FK 拒绝。
+    """
     async with sessionmaker() as session:
+        await session.execute(text("DELETE FROM research_backflow_fulfillments"))
+        await session.execute(text("DELETE FROM research_backflow_requests"))
         await session.execute(text("DELETE FROM draft_section_revisions"))
         await session.execute(text("DELETE FROM human_review_decisions"))
         await session.execute(text("DELETE FROM human_review_requests"))

@@ -47,11 +47,16 @@ from app.stage5.contracts import (
     STAGE5_GRAPH_NAME,
     STAGE5_GRAPH_VERSION,
     STAGE5_TERMINAL_CANCELLED,
+    STAGE5_TERMINAL_RESEARCH_REQUIRED,
     STAGE5_TERMINAL_REVISION_LIMIT_EXCEEDED,
     Stage5WorkflowRequest,
 )
 from app.stage5.dependencies import Stage5WorkflowDependencies
-from app.stage5.errors import Stage5NoPendingHumanReview, Stage5ResearchTaskNotFound
+from app.stage5.errors import (
+    Stage5InvalidState,
+    Stage5NoPendingHumanReview,
+    Stage5ResearchTaskNotFound,
+)
 from app.stage5.graph import build_stage5_report_graph
 from app.workflows.checkpoint import LangGraphCheckpointManager
 
@@ -65,6 +70,7 @@ _ALLOWED_NODES = {
     "rewrite_sections",
     "wait_human",
     "finalize_on_approve",
+    "create_research_backflow_request",
 }
 _NODE_STAGE = {
     "build_report_draft": TaskStage.WRITING,
@@ -75,6 +81,7 @@ _NODE_STAGE = {
     "rewrite_sections": TaskStage.WRITING,
     "wait_human": TaskStage.AUDITING,
     "finalize_on_approve": TaskStage.AUDITING,
+    "create_research_backflow_request": TaskStage.AUDITING,
 }
 _ERROR_CODE = "workflow_execution_failed"
 _MAX_ERROR_MESSAGE_LENGTH = 200
@@ -101,6 +108,9 @@ class Stage5WorkflowRunner:
         self._sessionmaker = sessionmaker
         self._checkpoint_manager = checkpoint_manager
         self._dependencies = dependencies
+        # research backflow 只能由 runner 注入 Stage5 checkpoint + deps（service
+        # 内部 `_recover_final_state` 需要读 checkpoint；未绑定 → 明确拒绝）。
+        dependencies.research_backflow_service.bind_stage5(checkpoint_manager, dependencies)
 
     # ------------------------------------------------------------------ create
 
@@ -184,7 +194,7 @@ class Stage5WorkflowRunner:
             )
             await session.commit()
 
-        initial_state = self._build_initial_state(request)
+        initial_state = self._build_initial_state(request, run_id)
         return await self._run_graph(run_id, thread_id, initial_state=initial_state)
 
     # ------------------------------------------------------------------ human resume
@@ -288,14 +298,19 @@ class Stage5WorkflowRunner:
         return await self._finalize(run_id, final_state)
 
     @staticmethod
-    def _build_initial_state(request: Stage5WorkflowRequest) -> dict:
-        """把 request 投影成 checkpoint-safe initial state（UUID 统一 string）。"""
+    def _build_initial_state(request: Stage5WorkflowRequest, run_id: UUID) -> dict:
+        """把 request 投影成 checkpoint-safe initial state（UUID 统一 string）。
+
+        `source_stage5_run_id` 由 runner 注入（research_required terminal 时
+        create_research_backflow_request 节点用它创建 research 交接请求）。
+        """
         return {
             "task_id": str(request.task_id),
             "company_id": str(request.company_id),
             "research_question": request.research_question,
             "analysis_as_of": request.analysis_as_of.isoformat(),
             "synthesis_result_id": str(request.synthesis_result_id),
+            "source_stage5_run_id": str(run_id),
             "outline_id": None,
             "sections": [],
             "report_id": None,
@@ -321,6 +336,22 @@ class Stage5WorkflowRunner:
             await self._mark_waiting_human(run_id)
             return result
         terminal = result.get("terminal")
+        if terminal == STAGE5_TERMINAL_RESEARCH_REQUIRED:
+            # 终态不变式（spec Q）：research_required 必带 research_request_id +
+            # review_action_id + report_id（+ human_decision_id 由 create node 保证）。
+            missing = [
+                key
+                for key in ("research_request_id", "review_action_id", "report_id")
+                if not result.get(key)
+            ]
+            if missing:
+                await self._mark_failed(
+                    run_id, Stage5InvalidState(f"research_required terminal missing {missing}")
+                )
+                raise Stage5InvalidState(
+                    "research_required terminal must carry research_request_id, "
+                    "review_action_id and report_id"
+                )
         if terminal == STAGE5_TERMINAL_REVISION_LIMIT_EXCEEDED:
             await self._mark_revision_limit_exceeded(run_id)
         elif terminal == STAGE5_TERMINAL_CANCELLED:
@@ -384,6 +415,8 @@ class Stage5WorkflowRunner:
             }
         if node_name == "finalize_on_approve":
             return {"terminal": node_update.get("terminal")}
+        if node_name == "create_research_backflow_request":
+            return {"research_request_id": node_update.get("research_request_id")}
         return {}
 
     async def _mark_completed(self, run_id: UUID, terminal: str | None) -> None:

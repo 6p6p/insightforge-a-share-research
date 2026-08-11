@@ -90,6 +90,7 @@ from app.repositories.document_chunk_repository import DocumentChunkRepository
 from app.repositories.raw_artifact_repository import RawArtifactRepository
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.source_record_repository import SourceRecordRepository
+from app.research_backflow.service import ResearchBackflowService
 from app.review.service import ReviewActionService
 from app.revision.factory import create_revision_writer_model
 from app.revision.service import RevisionService
@@ -586,6 +587,9 @@ def _stage5_deps(sessionmaker, settings, revision_model) -> Stage5WorkflowDepend
         report_audit_service=audit_service,
         review_action_service=review_service,
         revision_service=revision_service,
+        research_backflow_service=ResearchBackflowService(
+            sessionmaker, review_service, report_service
+        ),
     )
 
 

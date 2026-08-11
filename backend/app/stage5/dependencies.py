@@ -29,6 +29,7 @@ from app.draft_section.service import DraftSectionService
 from app.report.check_service import ReportCheckService
 from app.report.service import ReportService
 from app.report_outline.service import ReportOutlineService
+from app.research_backflow.service import ResearchBackflowService
 from app.review.service import ReviewActionService
 from app.revision.service import RevisionService
 
@@ -45,6 +46,7 @@ class Stage5WorkflowDependencies:
     report_audit_service: ReportAuditService
     review_action_service: ReviewActionService
     revision_service: RevisionService
+    research_backflow_service: ResearchBackflowService
 
 
 def create_stage5_dependencies(
@@ -75,6 +77,9 @@ def create_stage5_dependencies(
         review_action_service=review_action_service,
     )
     report_service._revision_service = revision_service  # noqa: SLF001 — DI 断环
+    research_backflow_service = ResearchBackflowService(
+        sessionmaker, review_action_service, report_service
+    )
 
     return Stage5WorkflowDependencies(
         sessionmaker=sessionmaker,
@@ -85,4 +90,5 @@ def create_stage5_dependencies(
         report_audit_service=audit_service,
         review_action_service=review_action_service,
         revision_service=revision_service,
+        research_backflow_service=research_backflow_service,
     )

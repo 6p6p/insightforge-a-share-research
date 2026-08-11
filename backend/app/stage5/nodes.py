@@ -384,13 +384,37 @@ def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
     return finalize_on_approve
 
 
+def make_create_research_backflow_request_node(deps: Stage5WorkflowDependencies):
+    """create_research_backflow_request：research_required terminal → 持久化可验证
+    research 交接请求（spec Q，5E.2B）。
+
+    只由 route_action（research action）或 wait_human（human decision=research）
+    路由到本节点；节点调 `ResearchBackflowService.create_or_get_request`（幂等
+    create_or_get + replay，0 LLM / 0 检索 / 0 Chroma）。terminal 不是
+    research_required / 非法 trigger / 状态缺失 → run FAILED，不静默改道。
+    """
+
+    async def create_research_backflow_request(state) -> dict:
+        source_run_id = state.get("source_stage5_run_id")
+        if not source_run_id:
+            raise Stage5InvalidState("create_research_backflow_request 需要 source_stage5_run_id")
+        result = await deps.research_backflow_service.create_or_get_request(UUID(source_run_id))
+        return {"research_request_id": str(result.research_request_id)}
+
+    return create_research_backflow_request
+
+
 # ------------------------------------------------------------------ conditional edges
 
 
 def route_after_action(state) -> str:
-    """route_action 后的分支：terminal（finalize/research/limit）→ END；rewrite /
+    """route_action 后的分支：research_required → create_research_backflow_request；
+    其他 terminal（finalize / revision_limit_exceeded）→ END；rewrite /
     human_review → 对应节点。"""
-    if state.get("terminal") is not None:
+    terminal = state.get("terminal")
+    if terminal is not None:
+        if terminal == STAGE5_TERMINAL_RESEARCH_REQUIRED:
+            return "create_research_backflow_request"
         return "END"
     route = state.get("route")
     if route == ACTION_TYPE_REWRITE:
@@ -402,10 +426,13 @@ def route_after_action(state) -> str:
 
 def route_after_human(state) -> str:
     """wait_human resume 后的分支：approve → finalize_on_approve；rewrite →
-    rewrite_sections；research / cancel → END（terminal 已由 wait_human 设置）。"""
+    rewrite_sections；research → create_research_backflow_request（terminal 已由
+    wait_human 设置）；cancel → END。"""
     decision = state.get("human_decision")
     if decision == HUMAN_DECISION_REWRITE:
         return "rewrite_sections"
     if decision == HUMAN_DECISION_APPROVE:
         return "finalize_on_approve"
+    if decision == HUMAN_DECISION_RESEARCH:
+        return "create_research_backflow_request"
     return "END"

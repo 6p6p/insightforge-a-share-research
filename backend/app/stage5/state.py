@@ -46,6 +46,9 @@ class Stage5WorkflowState(TypedDict, total=False):
     research_question: str
     analysis_as_of: str
     synthesis_result_id: str
+    # 当前 Stage 5 WorkflowRun（research_required terminal 时用于创建 research
+    # backflow request；由 runner 在首次执行时注入）。
+    source_stage5_run_id: str | None
 
     # 报告装配（5A Outline → 5B sections → 5C Report）。
     outline_id: str | None
@@ -73,3 +76,5 @@ class Stage5WorkflowState(TypedDict, total=False):
 
     # 终态投影（runner 映射为 run status）。
     terminal: str | None
+    # research_required 终态必带：research backflow 交接请求 id（5E.2B）。
+    research_request_id: str | None

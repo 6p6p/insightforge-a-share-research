@@ -38,6 +38,7 @@ from app.report.check_service import ReportCheckService
 from app.report.contracts import ReportAssemblyDraft
 from app.report.service import ReportService
 from app.report_outline.service import ReportOutlineService
+from app.research_backflow.service import ResearchBackflowService
 from app.review.service import ReviewActionService
 from app.revision.service import RevisionService
 from app.services.source_registry_service import SourceRegistryService
@@ -155,6 +156,9 @@ def _stage5_deps(sessionmaker, *, draft_model, audit_model, revision_model):
         report_audit_service=audit_service,
         review_action_service=review_service,
         revision_service=revision_service,
+        research_backflow_service=ResearchBackflowService(
+            sessionmaker, review_service, report_service
+        ),
     )
 
 

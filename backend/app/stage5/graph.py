@@ -26,6 +26,7 @@ from app.stage5.nodes import (
     make_audit_report_node,
     make_build_report_draft_node,
     make_check_report_node,
+    make_create_research_backflow_request_node,
     make_finalize_on_approve_node,
     make_rewrite_sections_node,
     make_route_action_node,
@@ -57,6 +58,10 @@ def build_stage5_report_graph(
     builder.add_node("rewrite_sections", make_rewrite_sections_node(dependencies))
     builder.add_node("wait_human", make_wait_human_node())
     builder.add_node("finalize_on_approve", make_finalize_on_approve_node(dependencies))
+    builder.add_node(
+        "create_research_backflow_request",
+        make_create_research_backflow_request_node(dependencies),
+    )
 
     builder.add_edge(START, "validate_stage5_request")
     builder.add_edge("validate_stage5_request", "build_report_draft")
@@ -70,6 +75,7 @@ def build_stage5_report_graph(
         {
             "rewrite_sections": "rewrite_sections",
             "wait_human": "wait_human",
+            "create_research_backflow_request": "create_research_backflow_request",
             "END": END,
         },
     )
@@ -81,8 +87,11 @@ def build_stage5_report_graph(
         {
             "rewrite_sections": "rewrite_sections",
             "finalize_on_approve": "finalize_on_approve",
+            "create_research_backflow_request": "create_research_backflow_request",
             "END": END,
         },
     )
     builder.add_edge("finalize_on_approve", END)
+    # research_required terminal：先持久化 research backflow 交接请求再 END。
+    builder.add_edge("create_research_backflow_request", END)
     return builder.compile(checkpointer=checkpointer)
