@@ -62,20 +62,31 @@ _CANDIDATES_SQL = text(
     """
 )
 
-# Stage 5 候选：每个 task 最近一条 FAILED(worker_restarted) 的 stage5 run。
-# status='failed' + error_code=worker_restarted 双重限定 → WAITING_HUMAN /
-# 业务失败（LLM、校验、终态错误）一律不在该路径。DISTINCT ON 保证每 task 只
-# 恢复最近一条（与 Stage4 锚定语义一致）。
+# Stage 5 候选：**先取每个 task 最近一条 Stage5 overall**（rn=1），只有该 latest
+# run 本身 status='failed' + error_code=worker_restarted 才是 candidate。
+# 不能先按 failed(worker_restarted) 过滤再 DISTINCT ON——那样会把「旧
+# worker_restarted run + 新 completed / waiting_human / cancelled / 新业务失败 /
+# 新 running Stage5」里的旧 run 错误选为候选。WAITING_HUMAN / 业务失败（LLM、
+# 校验、终态错误）一律不在该路径。
 _STAGE5_CANDIDATES_SQL = text(
     """
-    SELECT DISTINCT ON (task_id)
-           task_id::text AS task_id,
-           run_id::text  AS stage5_run_id
-    FROM workflow_runs
-    WHERE graph_name = :stage5_graph
+    WITH ranked AS (
+        SELECT task_id::text        AS task_id,
+               run_id::text         AS stage5_run_id,
+               status,
+               error_code,
+               row_number() OVER (
+                   PARTITION BY task_id
+                   ORDER BY created_at DESC, run_id DESC
+               ) AS rn
+        FROM workflow_runs
+        WHERE graph_name = :stage5_graph
+    )
+    SELECT task_id, stage5_run_id
+    FROM ranked
+    WHERE rn = 1
       AND status = 'failed'
       AND error_code = :error_code
-    ORDER BY task_id, created_at DESC, run_id DESC
     """
 )
 

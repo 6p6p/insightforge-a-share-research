@@ -101,15 +101,24 @@ from app.workflows.checkpoint import LangGraphCheckpointManager
 logger = get_logger("app.task_artifact")
 
 # verify 调用可能向上传播的域错误树（各自上游独立异常树，见各 errors.py）。
-_REPORT_VERIFY_ERRORS = (ReportError, ReportOutlineError, DraftSectionError)
-_AUDIT_VERIFY_ERRORS = (ReportAuditError, ReportError, ReportOutlineError, DraftSectionError)
+# synthesis 的两条独立异常树（`SynthesisAnalysisError` + `SynthesisError`）也会
+# 经 outline verify → `verify_result_integrity` 原样向上传播（Gate0-E：canonical
+# SynthesisResult / SynthesisRun tamper → 下游 report / reviews 同样 409，**不
+# 允许原始异常泄漏为 500**）。
+_SYNTHESIS_VERIFY_ERRORS = (SynthesisAnalysisError, SynthesisError)
+_REPORT_VERIFY_ERRORS = (ReportError, ReportOutlineError, DraftSectionError) + (
+    _SYNTHESIS_VERIFY_ERRORS
+)
+_AUDIT_VERIFY_ERRORS = (ReportAuditError, ReportError, ReportOutlineError, DraftSectionError) + (
+    _SYNTHESIS_VERIFY_ERRORS
+)
 _REVIEW_VERIFY_ERRORS = (
     ReviewError,
     ReportAuditError,
     ReportError,
     ReportOutlineError,
     DraftSectionError,
-)
+) + _SYNTHESIS_VERIFY_ERRORS
 _BACKFLOW_VERIFY_ERRORS = (
     ResearchBackflowError,
     ReviewError,
@@ -118,7 +127,7 @@ _BACKFLOW_VERIFY_ERRORS = (
     ReportOutlineError,
     DraftSectionError,
     SynthesisAnalysisError,
-)
+) + _SYNTHESIS_VERIFY_ERRORS
 
 # Stage 4 work item 的输入证据 ID checkpoint keys（spec C：evidence scope 的
 # work-item 侧闭包；只在 matched_stage4 存在时使用）。
@@ -515,7 +524,7 @@ class TaskArtifactService:
             return None, None
         verified_result = await _guarded(
             self._synthesis_analysis_service.verify_result_integrity(canonical),
-            (SynthesisAnalysisError,),
+            _SYNTHESIS_VERIFY_ERRORS,
             "synthesis_result",
         )
         verified_run = await _guarded(
@@ -597,47 +606,77 @@ class TaskArtifactService:
         )
 
     async def _resolve_research_backflow(self, anchor: _Anchor) -> ResearchBackflowArtifact | None:
+        """Research Backflow 层投影（Gate0-C/D）。
+
+        - checkpoint 有 `research_request_id`（research 路由 run）→ 按 request
+          查 fulfillment；存在则 verify request + fulfillment，投影来自 verified；
+        - checkpoint 无 `research_request_id`（finalize continuation run）→
+          canonical synthesis 就是 fulfillment 的 `new_synthesis_result_id` →
+          **task-scoped** 反查：0 行 → 无 backflow；>1 行 → `TaskArtifactIntegrityError`
+          （绝不静默选一行）；1 行 → verify request + fulfillment 后投影。
+
+        两条路径都不允许「直接 repo 读 → 投影」：产物行必须经
+        `verify_*_integrity` 重建一致，tamper → `TaskArtifactIntegrityError`。
+        """
         research_request_id = self._state_uuid(anchor.stage5_state, "research_request_id")
         if research_request_id is None:
-            # finalize 后的 continuation run：checkpoint 无 research_request_id（该
-            # channel 只在 research 路由时写入），但 canonical synthesis 就是
-            # fulfillment 的 new_synthesis_result_id → 由此反查 request+fulfillment。
             canonical = anchor.canonical_synthesis_result_id
             if canonical is None:
                 return None
             async with self._sessionmaker() as session:
+                fulfillments = await ResearchBackflowRepository(
+                    session
+                ).list_fulfillments_by_new_synthesis_result_for_task(canonical, anchor.task.task_id)
+            if not fulfillments:
+                return None
+            if len(fulfillments) > 1:
+                logger.warning(
+                    "artifact_backflow_ambiguous",
+                    task_id=str(anchor.task.task_id),
+                    new_synthesis_result_id=str(canonical),
+                    count=len(fulfillments),
+                )
+                raise TaskArtifactIntegrityError()
+            fulfillment = fulfillments[0]
+            await _guarded(
+                self._research_backflow_service.verify_research_request_integrity(
+                    fulfillment.research_request_id
+                ),
+                _BACKFLOW_VERIFY_ERRORS,
+                "research_request",
+            )
+        else:
+            await _guarded(
+                self._research_backflow_service.verify_research_request_integrity(
+                    research_request_id
+                ),
+                _BACKFLOW_VERIFY_ERRORS,
+                "research_request",
+            )
+            async with self._sessionmaker() as session:
                 fulfillment = await ResearchBackflowRepository(
                     session
-                ).get_fulfillment_by_new_synthesis_result_id(canonical)
+                ).get_fulfillment_by_request_id(research_request_id)
             if fulfillment is None:
-                return None
-            return ResearchBackflowArtifact(
-                research_request_id=fulfillment.research_request_id,
-                fulfilled=True,
-                fulfillment_id=fulfillment.fulfillment_id,
-                new_synthesis_result_id=fulfillment.new_synthesis_result_id,
-            )
-        await _guarded(
-            self._research_backflow_service.verify_research_request_integrity(research_request_id),
+                return ResearchBackflowArtifact(
+                    research_request_id=research_request_id,
+                    fulfilled=False,
+                    fulfillment_id=None,
+                    new_synthesis_result_id=None,
+                )
+
+        verified_fulfillment = await _guarded(
+            self._research_backflow_service.verify_research_fulfillment_integrity(
+                fulfillment.fulfillment_id
+            ),
             _BACKFLOW_VERIFY_ERRORS,
-            "research_request",
+            "research_fulfillment",
         )
-        fulfillment_id = None
-        new_synthesis_result_id = None
-        fulfilled = False
-        async with self._sessionmaker() as session:
-            fulfillment = await ResearchBackflowRepository(session).get_fulfillment_by_request_id(
-                research_request_id
-            )
-        if fulfillment is not None:
-            fulfilled = True
-            fulfillment_id = fulfillment.fulfillment_id
-            new_synthesis_result_id = fulfillment.new_synthesis_result_id
         return ResearchBackflowArtifact(
-            research_request_id=research_request_id,
-            fulfilled=fulfilled,
-            fulfillment_id=fulfillment_id,
-            new_synthesis_result_id=new_synthesis_result_id,
+            research_request_id=verified_fulfillment.research_request_id,
+            fulfilled=True,
+            fulfillment_id=verified_fulfillment.fulfillment_id,
+            new_synthesis_result_id=verified_fulfillment.new_synthesis_result_id,
         )
 
     # ------------------------------------------------------------------ ID 推导

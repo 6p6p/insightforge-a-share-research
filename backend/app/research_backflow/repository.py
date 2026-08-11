@@ -21,6 +21,7 @@ from app.db.models.research_backflow import (
     ResearchBackflowFulfillmentModel,
     ResearchBackflowRequestModel,
 )
+from app.db.models.workflow_run import WorkflowRunModel
 
 
 class ResearchBackflowRepository:
@@ -96,22 +97,40 @@ class ResearchBackflowRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_fulfillment_by_new_synthesis_result_id(
-        self, new_synthesis_result_id: UUID
-    ) -> ResearchBackflowFulfillmentModel | None:
-        """按新综合 result 反查 fulfillment（finalize 后的 continuation run 用）。
+    async def list_fulfillments_by_new_synthesis_result_for_task(
+        self,
+        new_synthesis_result_id: UUID,
+        task_id: UUID,
+    ) -> list[ResearchBackflowFulfillmentModel]:
+        """**task-scoped** 按新综合 result 反查 fulfillment（finalize 后的
+        continuation run 用，Gate0-C）。
 
         Stage 6B.1 spec K：finalize run 的 checkpoint 无 `research_request_id`
         （该 channel 只在 research 路由时写入），但 canonical synthesis 就是
-        fulfillment 的 `new_synthesis_result_id` → 由此反查 request+fulfillment，
-        仍能投影 ResearchBackflow 层。
+        fulfillment 的 `new_synthesis_result_id` → 由此反查 request+fulfillment。
+
+        `new_synthesis_result_id` 全表**不唯一**，不能做全局命中：必须经
+        fulfillment → request（`source_stage5_run_id`）→ `workflow_runs.task_id`
+        回到当前任务域再匹配。0 行 → 无 backflow；>1 行 → 调用方报完整性失败
+        （投影口径不唯一，绝不静默选一行）。
         """
         result = await self._session.execute(
-            select(ResearchBackflowFulfillmentModel).where(
-                ResearchBackflowFulfillmentModel.new_synthesis_result_id == new_synthesis_result_id
+            select(ResearchBackflowFulfillmentModel)
+            .join(
+                ResearchBackflowRequestModel,
+                ResearchBackflowRequestModel.research_request_id
+                == ResearchBackflowFulfillmentModel.research_request_id,
+            )
+            .join(
+                WorkflowRunModel,
+                WorkflowRunModel.run_id == ResearchBackflowRequestModel.source_stage5_run_id,
+            )
+            .where(
+                ResearchBackflowFulfillmentModel.new_synthesis_result_id == new_synthesis_result_id,
+                WorkflowRunModel.task_id == task_id,
             )
         )
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
     async def create_or_get_fulfillment(
         self, fulfillment: ResearchBackflowFulfillmentModel

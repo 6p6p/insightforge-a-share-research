@@ -85,6 +85,8 @@ class WorkflowRunRepository:
         run_id / thread_id 从最后 checkpoint 继续。仅允许 FAILED → RUNNING。
         **不是**用户 retry：Stage 1 用户 retry 走 create_simulation_run → 新
         run / 新 thread；本方法只服务 Stage 4 内部 recovery，复用同 run/thread。
+        恢复后清空 terminal failure 字段（error_code / error_message /
+        completed_at），不得残留失败的元数据（Gate0-B 共享修复）。
         """
         stmt = (
             update(WorkflowRunModel)
@@ -95,6 +97,9 @@ class WorkflowRunRepository:
             .values(
                 status=WorkflowRunStatus.RUNNING.value,
                 started_at=started_at,
+                error_code=None,
+                error_message=None,
+                completed_at=None,
                 updated_at=datetime.now(UTC),
             )
             .returning(WorkflowRunModel)
@@ -118,6 +123,9 @@ class WorkflowRunRepository:
         在该路径——WAITING_HUMAN 人工裁决走 `claim_waiting_human`。
         gate 常量由调用方注入（Stage 5 runner 传 STAGE5_GRAPH_NAME +
         WORKER_RESTARTED_ERROR_CODE），避免 repository 反向依赖 services/stage5。
+        恢复后清空 terminal failure 字段（error_code / error_message /
+        completed_at），不得残留失败的元数据（Gate0-B 共享修复，与 Stage4
+        `claim_failed_for_recovery` 一致）。
         """
         stmt = (
             update(WorkflowRunModel)
@@ -130,6 +138,9 @@ class WorkflowRunRepository:
             .values(
                 status=WorkflowRunStatus.RUNNING.value,
                 started_at=started_at,
+                error_code=None,
+                error_message=None,
+                completed_at=None,
                 updated_at=datetime.now(UTC),
             )
             .returning(WorkflowRunModel)

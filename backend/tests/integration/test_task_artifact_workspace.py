@@ -540,6 +540,245 @@ async def test_research_backflow_lineage_anchors_new_synthesis(
     assert summary.source_count == sources.total
 
 
+# ----------------------------------------- Gate0-C/D：backflow 反查 task-scoped + verify
+
+
+async def _seed_backflow_chain(
+    env,
+    monkeypatch,
+    connection_uri,
+    *,
+    second_fulfillment: bool = False,
+    with_continuation: bool = True,
+) -> dict:
+    """S1(task1) → S2(task2) → Stage5 run B(research) → request → fulfill(s2) →
+    可选 continuation run C(finalize)。
+
+    `second_fulfillment=True` 时额外创建第二个 research run B2 → request → 也用
+    s2 完成 fulfillment（同 task 内两条 fulfillment 共享 new_synthesis_result_id，
+    供 Gate0-C 歧义测试）。`with_continuation=False` 时不做 run C，run B 即 latest
+    Stage5 run（checkpoint 携带 research_request_id → request_id 路径，供 Gate0-D）。
+    返回句柄；调用方负责 `await handle["manager_artifact"].close()`。
+    """
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    # ---- S1（task1）----
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    request_a = _stage4_request(env, ids)
+    s1_result_id = await _run_stage4_graph(env, connection_uri, request_a, _good_models())
+
+    # ---- S2（task2，同 company/question/cutoff，biz 卡换新）→ 本任务无匹配 Stage4 ----
+    task2_id = await _seed_research_task(sessionmaker)
+    extra = await _seed_claim_doc_card(
+        env,
+        statement="2024年公司经营现金流净额同比增长20%。",
+        source_url="https://www.xinhuanet.com/2026/0809/s2cash.htm",
+    )
+    items = []
+    for item in request_a.analysis_work_items:
+        if item.item_id == "biz":
+            items.append(item.model_copy(update={"evidence_card_ids": [extra["evidence_card_id"]]}))
+        else:
+            items.append(item)
+    request_s2 = Stage4WorkflowRequest(
+        task_id=task2_id,
+        company_id=env["company_id"],
+        research_question=_QUESTION,
+        analysis_as_of=_AS_OF,
+        analysis_work_items=items,
+    )
+    env2 = {**env, "task_id": task2_id}
+    s2_result_id = await _run_stage4_graph(env2, connection_uri, request_s2, _two_theme_models())
+
+    def _research_runner(manager):
+        deps = _stage5_deps(
+            sessionmaker,
+            draft_model=FakeDraftSectionModel(decision_factory=valid_decision_for),
+            audit_model=FakeAuditModel(decision_factory=research_decision),
+            revision_model=FakeRevisionWriterModel(),
+        )
+        return Stage5WorkflowRunner(sessionmaker, manager, deps), deps
+
+    async def _run_research_stage5(manager) -> tuple[UUID, object]:
+        runner, deps = _research_runner(manager)
+        run = await runner.create_stage5_run(_stage5_request(env, s1_result_id))
+        await runner.execute_stage5(run.run_id, _stage5_request(env, s1_result_id))
+        return run.run_id, deps
+
+    # ---- run B（research 路由）：execute 时 create_research_backflow_request 节点
+    #      已写 research_request_id 到 checkpoint + 创建 request B ----
+    manager_b = LangGraphCheckpointManager(connection_uri)
+    await manager_b.setup()
+    try:
+        run_b_id, deps_b = await _run_research_stage5(manager_b)
+    finally:
+        await manager_b.close()
+    backflow_b = deps_b.research_backflow_service
+    request_b = await backflow_b.create_or_get_request(run_b_id)  # replay
+    fulfillment_b = await backflow_b.fulfill_request(request_b.research_request_id, s2_result_id)
+    assert fulfillment_b.replayed is False
+
+    second_fulfillment_id = None
+    if second_fulfillment:
+        manager_b2 = LangGraphCheckpointManager(connection_uri)
+        await manager_b2.setup()
+        try:
+            run_b2_id, deps_b2 = await _run_research_stage5(manager_b2)
+        finally:
+            await manager_b2.close()
+        backflow_b2 = deps_b2.research_backflow_service
+        request_b2 = await backflow_b2.create_or_get_request(run_b2_id)
+        fulfillment_b2 = await backflow_b2.fulfill_request(
+            request_b2.research_request_id, s2_result_id
+        )
+        assert fulfillment_b2.replayed is False
+        second_fulfillment_id = fulfillment_b2.fulfillment_id
+
+    run_c_id = None
+    if with_continuation:
+        cont = await backflow_b.build_stage5_continuation_request(fulfillment_b.fulfillment_id)
+        assert cont.task_id == task_id
+        assert cont.synthesis_result_id == s2_result_id
+        deps_c = _stage5_deps(
+            sessionmaker,
+            draft_model=FakeDraftSectionModel(decision_factory=valid_decision_for),
+            audit_model=FakeAuditModel(decision_factory=pass_decision),
+            revision_model=FakeRevisionWriterModel(),
+        )
+        manager_c = LangGraphCheckpointManager(connection_uri)
+        await manager_c.setup()
+        runner_c = Stage5WorkflowRunner(sessionmaker, manager_c, deps_c)
+        run_c = await runner_c.create_stage5_run(cont)
+        try:
+            await runner_c.execute_stage5(run_c.run_id, cont)
+        except BaseException:
+            await manager_c.close()
+            raise
+        run_c_id = run_c.run_id
+
+    manager_artifact = LangGraphCheckpointManager(connection_uri)
+    await manager_artifact.setup()
+    artifact = _make_artifact_service(sessionmaker, manager_artifact)
+    return {
+        "sessionmaker": sessionmaker,
+        "task_id": task_id,
+        "task2_id": task2_id,
+        "env2": env2,
+        "s1_result_id": s1_result_id,
+        "s2_result_id": s2_result_id,
+        "request_b_id": request_b.research_request_id,
+        "fulfillment_b_id": fulfillment_b.fulfillment_id,
+        "second_fulfillment_id": second_fulfillment_id,
+        "run_c_id": run_c_id,
+        "manager_artifact": manager_artifact,
+        "artifact": artifact,
+    }
+
+
+async def test_backflow_reverse_lookup_task_scoped(env, monkeypatch, connection_uri) -> None:
+    """Gate0-C：canonical-synthesis 反查必须 task-scoped。
+
+    task1（有 fulfillment）→ fulfilled 投影；task2 用同一 S2 跑 finalize Stage5
+    （canonical=s2）但无 fulfillment → 反查 0 行 → None，绝不跨任务命中。
+    """
+    handle = await _seed_backflow_chain(env, monkeypatch, connection_uri)
+    sessionmaker = handle["sessionmaker"]
+    task1_id = handle["task_id"]
+    task2_id = handle["task2_id"]
+    env2 = handle["env2"]
+    try:
+        reviews1 = await handle["artifact"].get_reviews(task1_id)
+        assert reviews1.research_backflow is not None
+        assert reviews1.research_backflow.fulfilled is True
+        assert reviews1.research_backflow.new_synthesis_result_id == handle["s2_result_id"]
+
+        deps2 = _stage5_deps(
+            sessionmaker,
+            draft_model=FakeDraftSectionModel(decision_factory=valid_decision_for),
+            audit_model=FakeAuditModel(decision_factory=pass_decision),
+            revision_model=FakeRevisionWriterModel(),
+        )
+        manager2 = LangGraphCheckpointManager(connection_uri)
+        await manager2.setup()
+        artifact2 = _make_artifact_service(sessionmaker, manager2)
+        try:
+            runner2 = Stage5WorkflowRunner(sessionmaker, manager2, deps2)
+            run2 = await runner2.create_stage5_run(_stage5_request(env2, handle["s2_result_id"]))
+            await runner2.execute_stage5(run2.run_id, _stage5_request(env2, handle["s2_result_id"]))
+            reviews2 = await artifact2.get_reviews(task2_id)
+            assert reviews2.research_backflow is None
+        finally:
+            await manager2.close()
+    finally:
+        await handle["manager_artifact"].close()
+
+
+async def test_backflow_reverse_lookup_ambiguous_fulfillment_fails(
+    env, monkeypatch, connection_uri
+) -> None:
+    """Gate0-C：同 task 内多条 fulfillment 共享同一 new_synthesis_result_id →
+    TaskArtifactIntegrityError（绝不静默选一行）。"""
+    handle = await _seed_backflow_chain(env, monkeypatch, connection_uri, second_fulfillment=True)
+    try:
+        with pytest.raises(TaskArtifactIntegrityError):
+            await handle["artifact"].get_reviews(handle["task_id"])
+    finally:
+        await handle["manager_artifact"].close()
+
+
+async def test_backflow_fulfillment_tamper_yields_integrity_error(
+    env, monkeypatch, connection_uri
+) -> None:
+    """Gate0-D：canonical 反查路径必须 verify fulfillment——SQL tamper fulfillment
+    fingerprint → get_reviews → TaskArtifactIntegrityError（不 repair）。"""
+    handle = await _seed_backflow_chain(env, monkeypatch, connection_uri)
+    sessionmaker = handle["sessionmaker"]
+    try:
+        assert (
+            await handle["artifact"].get_reviews(handle["task_id"])
+        ).research_backflow is not None
+        async with sessionmaker() as session:
+            await session.execute(
+                text(
+                    "UPDATE research_backflow_fulfillments SET fulfillment_fingerprint = "
+                    "repeat('0', 64) WHERE fulfillment_id = :fid"
+                ).bindparams(fid=handle["fulfillment_b_id"])
+            )
+            await session.commit()
+        with pytest.raises(TaskArtifactIntegrityError):
+            await handle["artifact"].get_reviews(handle["task_id"])
+    finally:
+        await handle["manager_artifact"].close()
+
+
+async def test_backflow_request_id_path_fulfillment_verify(
+    env, monkeypatch, connection_uri
+) -> None:
+    """Gate0-D：checkpoint 携带 research_request_id 的路径也必须 verify
+    fulfillment（不再直接 repo 读 → 投影）——tamper → get_reviews →
+    TaskArtifactIntegrityError。"""
+    handle = await _seed_backflow_chain(env, monkeypatch, connection_uri, with_continuation=False)
+    sessionmaker = handle["sessionmaker"]
+    try:
+        reviews = await handle["artifact"].get_reviews(handle["task_id"])
+        assert reviews.research_backflow is not None
+        assert reviews.research_backflow.fulfilled is True
+        assert reviews.research_backflow.new_synthesis_result_id == handle["s2_result_id"]
+        async with sessionmaker() as session:
+            await session.execute(
+                text(
+                    "UPDATE research_backflow_fulfillments SET fulfillment_fingerprint = "
+                    "repeat('0', 64) WHERE fulfillment_id = :fid"
+                ).bindparams(fid=handle["fulfillment_b_id"])
+            )
+            await session.commit()
+        with pytest.raises(TaskArtifactIntegrityError):
+            await handle["artifact"].get_reviews(handle["task_id"])
+    finally:
+        await handle["manager_artifact"].close()
+
+
 # ---------------------------------------------------------------- chapter L：macro evidence/source
 
 
