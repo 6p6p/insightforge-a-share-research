@@ -15,6 +15,7 @@ from app.services.task_artifact_service import TaskArtifactService
 from app.services.task_service import TaskService
 from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
+from app.stage5.dependencies import create_stage5_dependencies
 from app.storage.raw_store import LocalRawArtifactStore
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from app.workflows.execution_manager import WorkflowExecutionManager
@@ -41,19 +42,20 @@ def get_research_execution_service(request: Request) -> ResearchExecutionService
     return resources.research_execution
 
 
-def get_task_artifact_service(
-    request: Request,
-    research_execution: Annotated[
-        ResearchExecutionService, Depends(get_research_execution_service)
-    ],
-) -> TaskArtifactService:
+def get_task_artifact_service(request: Request) -> TaskArtifactService:
+    """任务级 artifact workspace（Stage 6B.1）。
+
+    复用 `create_stage5_dependencies` 装配的同一批 Services（verify 链共享），
+    经 `from_dependencies` 注入 TaskArtifactService——只读路径 **0 LLM**，不依赖
+    DEEPSEEK_API_KEY。checkpoint 读取用裸 `LangGraphCheckpointManager`。
+    """
     resources = getattr(request.app.state, "resources", None)
-    if resources is None or resources.database is None:
+    if resources is None or resources.database is None or resources.langgraph is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
-    return TaskArtifactService(
-        resources.database.session_factory(),
-        research_execution=research_execution,
-    )
+    settings = request.app.state.settings
+    sessionmaker = resources.database.session_factory()
+    deps = create_stage5_dependencies(settings, sessionmaker)
+    return TaskArtifactService.from_dependencies(sessionmaker, resources.langgraph, deps)
 
 
 def get_task_workspace_service(
@@ -63,10 +65,14 @@ def get_task_workspace_service(
     ],
 ) -> TaskWorkspaceService:
     resources = getattr(request.app.state, "resources", None)
-    if resources is None or resources.database is None:
+    if resources is None or resources.database is None or resources.langgraph is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
     sessionmaker = resources.database.session_factory()
-    artifact_service = TaskArtifactService(sessionmaker, research_execution=research_execution)
+    settings = request.app.state.settings
+    deps = create_stage5_dependencies(settings, sessionmaker)
+    artifact_service = TaskArtifactService.from_dependencies(
+        sessionmaker, resources.langgraph, deps
+    )
     return TaskWorkspaceService(
         sessionmaker,
         research_execution=research_execution,

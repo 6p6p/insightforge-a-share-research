@@ -1,11 +1,21 @@
-/** 任务最新审核视图：audit 摘要 + issues。 */
+/** 任务最新审核视图（stage 6B.1 spec J 分层投影）。
+
+Agent Audit 摘要保留在顶层（audit_status / recommended_route / issues）；
+Deterministic Check / ReviewAction / Human Review / Research Backflow 各自
+独立 layer，缺失为 null。所有层只读，绝不展示 prompt / raw provider response。
+ */
 
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Card, Descriptions, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import { getTaskReviews, taskKeys } from '../../api/tasks';
-import type { ReviewIssueArtifactResponse, ReviewsArtifactResponse } from '../../types/artifacts';
+import type {
+  CheckFindingArtifact,
+  ReviewIssueArtifactResponse,
+  ReviewsArtifactResponse,
+} from '../../types/artifacts';
+import { artifactErrorMessage } from './integrity';
 
 const { Text } = Typography;
 
@@ -17,9 +27,27 @@ const SEVERITY_COLOR: Record<string, string> = {
 };
 
 const ROUTE_LABEL: Record<string, string> = {
+  pass: '通过',
   approve: '批准',
   human_review: '人工审核',
   rewrite: '重写',
+  research: '补充研究',
+};
+
+const CHECK_STATUS_COLOR: Record<string, string> = {
+  pass: 'green',
+  fail: 'red',
+};
+
+const ACTION_TYPE_COLOR: Record<string, string> = {
+  rewrite: 'orange',
+  request_human_review: 'blue',
+  research: 'purple',
+};
+
+const HUMAN_DECISION_COLOR: Record<string, string> = {
+  approve: 'green',
+  reject: 'red',
 };
 
 interface Props {
@@ -27,14 +55,14 @@ interface Props {
 }
 
 export function ReviewsTab({ taskId }: Props): React.JSX.Element {
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: taskKeys.reviews(taskId),
     queryFn: () => getTaskReviews(taskId),
     refetchInterval: 5000,
   });
 
   if (isError) {
-    return <Alert type="error" showIcon message="加载审核视图失败" />;
+    return <Alert type="error" showIcon message={artifactErrorMessage(error, '加载审核视图失败')} />;
   }
   if (isLoading || !data) {
     return <Alert type="info" showIcon message="正在加载审核视图…" />;
@@ -46,7 +74,7 @@ export function ReviewsTab({ taskId }: Props): React.JSX.Element {
 }
 
 function ReviewsContent({ data }: { data: ReviewsArtifactResponse }): React.JSX.Element {
-  const columns: ColumnsType<ReviewIssueArtifactResponse> = [
+  const issueColumns: ColumnsType<ReviewIssueArtifactResponse> = [
     { title: '序号', dataIndex: 'ordinal', width: 64 },
     {
       title: '严重度',
@@ -58,6 +86,14 @@ function ReviewsContent({ data }: { data: ReviewsArtifactResponse }): React.JSX.
     { title: '章节', dataIndex: 'section_id', width: 120 },
     { title: '段落', dataIndex: 'paragraph_index', width: 64, render: (v: number | null) => v ?? '—' },
     { title: '问题描述', dataIndex: 'message', ellipsis: true },
+  ];
+
+  const checkColumns: ColumnsType<CheckFindingArtifact> = [
+    { title: '代码', dataIndex: 'code', width: 160, render: (v: string) => <Text code>{v}</Text> },
+    { title: '章节', dataIndex: 'section_id', width: 100, render: (v: string | null) => v ?? '—' },
+    { title: '段落', dataIndex: 'paragraph_index', width: 64, render: (v: number | null) => v ?? '—' },
+    { title: '关联观点', dataIndex: 'related_claim_ids', render: (v: string[]) => v.length },
+    { title: '关联证据', dataIndex: 'related_evidence_card_ids', render: (v: string[]) => v.length },
   ];
 
   return (
@@ -86,11 +122,96 @@ function ReviewsContent({ data }: { data: ReviewsArtifactResponse }): React.JSX.
         <Table<ReviewIssueArtifactResponse>
           rowKey="review_issue_id"
           dataSource={data.issues}
-          columns={columns}
+          columns={issueColumns}
           pagination={false}
           locale={{ emptyText: '无审核问题' }}
           size="small"
         />
+      </Card>
+      <Card title="确定性检查（Deterministic Check）">
+        {data.check ? (
+          <Space direction="vertical" style={{ width: '100%' }} size="small">
+            <Space>
+              <Tag color={CHECK_STATUS_COLOR[data.check.status] ?? 'default'}>{data.check.status}</Tag>
+              <Text type="secondary">检查结果 {data.check.check_result_id.slice(0, 8)}</Text>
+            </Space>
+            <Table<CheckFindingArtifact>
+              rowKey="code"
+              dataSource={data.check.findings}
+              columns={checkColumns}
+              pagination={false}
+              locale={{ emptyText: '无检查发现' }}
+              size="small"
+            />
+          </Space>
+        ) : (
+          <Text type="secondary">该审核无确定性检查记录。</Text>
+        )}
+      </Card>
+      <Card title="审核动作（ReviewAction）">
+        {data.review_action ? (
+          <Descriptions size="small" column={2}>
+            <Descriptions.Item label="动作类型">
+              <Tag color={ACTION_TYPE_COLOR[data.review_action.action_type] ?? 'default'}>
+                {data.review_action.action_type}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="问题数">{data.review_action.issue_count}</Descriptions.Item>
+            <Descriptions.Item label="目标章节" span={2}>
+              {data.review_action.target_section_ids.length > 0
+                ? data.review_action.target_section_ids.join('、')
+                : '—'}
+            </Descriptions.Item>
+          </Descriptions>
+        ) : (
+          <Text type="secondary">无审核动作记录。</Text>
+        )}
+      </Card>
+      <Card title="人工审核（Human Review）">
+        {data.human_review ? (
+          <Descriptions size="small" column={2}>
+            <Descriptions.Item label="决策">
+              {data.human_review.decision ? (
+                <Tag color={HUMAN_DECISION_COLOR[data.human_review.decision] ?? 'default'}>
+                  {data.human_review.decision}
+                </Tag>
+              ) : (
+                '待处理'
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="决策时间">{data.human_review.decided_at ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="意见" span={2}>
+              {data.human_review.comment_exists ? (data.human_review.comment ?? '—') : '—'}
+            </Descriptions.Item>
+          </Descriptions>
+        ) : (
+          <Text type="secondary">无人工审核请求。</Text>
+        )}
+      </Card>
+      <Card title="研究回流（Research Backflow）">
+        {data.research_backflow ? (
+          <Descriptions size="small" column={2}>
+            <Descriptions.Item label="状态">
+              {data.research_backflow.fulfilled ? (
+                <Tag color="green">已回填</Tag>
+              ) : (
+                <Tag color="orange">待回填</Tag>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="请求 ID">
+              <Text code>{data.research_backflow.research_request_id}</Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="新综合结果 ID">
+              {data.research_backflow.new_synthesis_result_id ? (
+                <Text code>{data.research_backflow.new_synthesis_result_id}</Text>
+              ) : (
+                '—'
+              )}
+            </Descriptions.Item>
+          </Descriptions>
+        ) : (
+          <Text type="secondary">无研究回流记录。</Text>
+        )}
       </Card>
     </Space>
   );

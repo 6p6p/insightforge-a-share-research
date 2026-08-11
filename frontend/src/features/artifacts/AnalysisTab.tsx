@@ -1,10 +1,22 @@
-/** 任务 Stage 4 分析视图：work items + claims + synthesis 摘要。 */
+/** 任务 Stage 4 分析视图：work items + claims + synthesis 摘要 + 结构化综合。
+
+stage 6B.1 spec B/H：`synthesis_result_id` 是 canonical synthesis；`work_items`
+只在匹配到同一 synthesis 的 Stage4 run 时暴露（`work_items_available=false`
+时显示提示，绝不混用旧工作项）；themes / conflicts / evidence_gaps 按真实
+SynthesisResult v1 contract 投影（alias refs 已解析为真实 claim_ids）。
+ */
 
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Card, Descriptions, List, Space, Tag, Typography } from 'antd';
 
 import { getTaskAnalysis, taskKeys } from '../../api/tasks';
-import type { AnalysisArtifactResponse, ClaimArtifactResponse, WorkItemSummary } from '../../types/artifacts';
+import type {
+  AnalysisArtifactResponse,
+  ClaimArtifactResponse,
+  SynthesisEvidenceGapArtifact,
+  WorkItemSummary,
+} from '../../types/artifacts';
+import { artifactErrorMessage } from './integrity';
 
 const { Text } = Typography;
 
@@ -28,19 +40,32 @@ const DOMAIN_COLOR: Record<string, string> = {
   valuation: 'purple',
 };
 
+const CONFLICT_SEVERITY_COLOR: Record<string, string> = {
+  critical: 'red',
+  major: 'orange',
+  minor: 'blue',
+  info: 'default',
+};
+
+const GAP_PRIORITY_COLOR: Record<string, string> = {
+  high: 'volcano',
+  medium: 'orange',
+  low: 'default',
+};
+
 interface Props {
   taskId: string;
 }
 
 export function AnalysisTab({ taskId }: Props): React.JSX.Element {
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: taskKeys.analysis(taskId),
     queryFn: () => getTaskAnalysis(taskId),
     refetchInterval: 5000,
   });
 
   if (isError) {
-    return <Alert type="error" showIcon message="加载分析视图失败" />;
+    return <Alert type="error" showIcon message={artifactErrorMessage(error, '加载分析视图失败')} />;
   }
   if (isLoading || !data) {
     return <Alert type="info" showIcon message="正在加载分析视图…" />;
@@ -56,9 +81,17 @@ function AnalysisContent({ data }: { data: AnalysisArtifactResponse }): React.JS
         <Descriptions size="small" column={2}>
           <Descriptions.Item label="研究问题">{data.research_question ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="分析基准日">{data.analysis_as_of ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="合成运行 ID">{data.synthesis_id ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="合成指纹">
+          <Descriptions.Item label="综合运行 ID">
+            <Text code>{data.synthesis_id ?? '—'}</Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="综合结果 ID">
+            {data.synthesis_result_id ? <Text code>{data.synthesis_result_id}</Text> : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="综合指纹">
             {data.synthesis_fingerprint ? <Text code>{data.synthesis_fingerprint}</Text> : '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="结果指纹">
+            {data.result_fingerprint ? <Text code>{data.result_fingerprint}</Text> : '—'}
           </Descriptions.Item>
         </Descriptions>
       </Card>
@@ -94,6 +127,61 @@ function AnalysisContent({ data }: { data: AnalysisArtifactResponse }): React.JS
           />
         </Card>
       ) : null}
+      {data.themes.length > 0 ? (
+        <Card title={`综合主题（${data.themes.length}）`}>
+          <List
+            dataSource={data.themes}
+            renderItem={(theme) => (
+              <List.Item>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <Space>
+                    <Text strong>{theme.title}</Text>
+                    <Text type="secondary">关联观点 {theme.claim_ids.length}</Text>
+                  </Space>
+                  <Text>{theme.summary}</Text>
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : null}
+      {data.conflicts.length > 0 ? (
+        <Card title={`观点冲突（${data.conflicts.length}）`}>
+          <List
+            dataSource={data.conflicts}
+            renderItem={(conflict) => (
+              <List.Item>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <Space>
+                    <Tag color={CONFLICT_SEVERITY_COLOR[conflict.severity] ?? 'default'}>
+                      {conflict.severity}
+                    </Tag>
+                    <Text type="secondary">关联观点 {conflict.claim_ids.length}</Text>
+                  </Space>
+                  <Text>{conflict.description}</Text>
+                  <Text type="secondary">解决方向：{conflict.resolution_direction}</Text>
+                </Space>
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : null}
+      {data.evidence_gaps.length > 0 ? (
+        <Card title={`证据缺口（${data.evidence_gaps.length}）`}>
+          <List
+            dataSource={data.evidence_gaps}
+            renderItem={(gap) => <EvidenceGapRow gap={gap} />}
+          />
+        </Card>
+      ) : null}
+      {data.work_items.length === 0 && !data.work_items_available ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="未匹配到可用的分析工作项"
+          description="当前综合结果未匹配到同一 Synthesis 的 Stage 4 工作项（例如经由研究回流的全新综合）。为保持证据链一致性，不展示旧任务的工作项。"
+        />
+      ) : null}
     </Space>
   );
 }
@@ -112,6 +200,23 @@ function ClaimRow({ claim }: { claim: ClaimArtifactResponse }): React.JSX.Elemen
           <Text type="secondary">证据 {claim.evidence_card_ids.length} 条</Text>
         </Space>
         <Text>{claim.statement}</Text>
+      </Space>
+    </List.Item>
+  );
+}
+
+function EvidenceGapRow({ gap }: { gap: SynthesisEvidenceGapArtifact }): React.JSX.Element {
+  return (
+    <List.Item>
+      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+        <Space>
+          <Tag color={GAP_PRIORITY_COLOR[gap.priority] ?? 'default'}>优先级 {gap.priority}</Tag>
+          <Text type="secondary">关联观点 {gap.claim_ids.length}</Text>
+        </Space>
+        <Text>{gap.description}</Text>
+        {gap.suggested_evidence ? (
+          <Text type="secondary">建议补充：{gap.suggested_evidence}</Text>
+        ) : null}
       </Space>
     </List.Item>
   );

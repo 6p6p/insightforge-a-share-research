@@ -96,6 +96,23 @@ class ResearchBackflowRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_fulfillment_by_new_synthesis_result_id(
+        self, new_synthesis_result_id: UUID
+    ) -> ResearchBackflowFulfillmentModel | None:
+        """按新综合 result 反查 fulfillment（finalize 后的 continuation run 用）。
+
+        Stage 6B.1 spec K：finalize run 的 checkpoint 无 `research_request_id`
+        （该 channel 只在 research 路由时写入），但 canonical synthesis 就是
+        fulfillment 的 `new_synthesis_result_id` → 由此反查 request+fulfillment，
+        仍能投影 ResearchBackflow 层。
+        """
+        result = await self._session.execute(
+            select(ResearchBackflowFulfillmentModel).where(
+                ResearchBackflowFulfillmentModel.new_synthesis_result_id == new_synthesis_result_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def create_or_get_fulfillment(
         self, fulfillment: ResearchBackflowFulfillmentModel
     ) -> tuple[ResearchBackflowFulfillmentModel, bool]:

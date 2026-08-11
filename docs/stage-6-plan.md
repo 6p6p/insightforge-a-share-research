@@ -2,7 +2,7 @@
 
 > 阶段 6 目标：**Web 工作台**——把已 FINAL 的证据链（Source → Evidence → Claim → Report → Audit → ReviewAction → Revision / ResearchBackflow）暴露为真实可操作的前端界面，供分析师创建研究任务、观察 LangGraph 执行进度并完成人工确认。**Stage 6 不做 LLM 功能开发、不做 Stage 7 evaluation**；本轮（6A）只做**工作台基础 + Task/Progress 垂直切片**。
 >
-> 总进度：**6A = completed（Web Workbench Task Foundation，后端 API + 前端脚手架 + Task/Progress 垂直切片，Gate 验收完成）**；**6B = next（工作台增强，见下）**。
+> 总进度：**6A = completed（FINAL）**；**6B.1 = completed（FINAL，Research Artifact Workspace）**；**6B.2 = next（工作台增强，见下）**。
 
 ## 6A：Web Workbench Task Foundation（completed，FINAL）
 
@@ -39,7 +39,16 @@
 - **前端**：`tsc --noEmit` 干净；`vite build` 成功（antd 体积 chunk 警告为既有，非回归）。
 - **回归**：Stage 2–5 集成测试不因本轮 API 扩展而破坏（复用既有 `POST /tasks` 契约）。
 
-## 6B（next）：工作台增强
+## 6B.1：Research Artifact Workspace（completed，FINAL）
+
+- **任务级只读 artifact workspace**：`GET /tasks/{id}/sources|evidence|analysis|report|reviews` 从 LangGraph PG Checkpointer 精确恢复产物 ID 集合（sources / evidence 分页信封 `{items,total,limit,offset}`），`GET /tasks/{id}/workspace` 的产物计数改为任务级（与各 tab 共用同一 helper，保证一致）。
+- **canonical synthesis lineage anchor**：canonical synthesis = 最新 Stage5 checkpoint 的 `synthesis_result_id`；只有 `synthesis_result_id` 与之匹配的 Stage4 run 才成为 `matched_stage4_run` 暴露 `work_items`。研究回流（ResearchBackflow）的新 Synthesis 无匹配 Stage4 → `work_items=[]` 且 `work_items_available=false`，**绝不混用旧 Stage4 工作项**；无 Stage5 时 canonical analysis anchor = 最新 Stage4。
+- **完整性语义**：artifact 缺失 → 200 空 / null；artifact ID 存在但 `verify_*_integrity` 重建失败 → `TaskArtifactIntegrityError`（HTTP 409，统一 `{error:{code,message,request_id}}` 信封，不泄漏 SQL / stack，不 repair）。只读路径 **0 LLM / 0 网络**，缺 `DEEPSEEK_API_KEY` 不失败。
+- **dual-origin sources**：document（Evidence→SourceRecord→RawArtifact）与 macro（Evidence→MacroObservation→Snapshot→Series→SourceProvider→RawArtifact，source_id=NULL），投影含 source_identity / origin_type / source_type / provider_key / title / label / fetched_at / authority_tier / locator_summary。
+- **evidence relations**：`used_by_claim_ids`（必填）+ `claim_relations:[{claim_id,relation}]`；analysis 投影含 themes / conflicts / evidence_gaps（alias refs 解析为真实 claim_ids）；report 投影含真实 body（sections[].paragraphs[]）；reviews 分层投影（Deterministic Check + Agent Audit + ReviewAction + Human Review + Research Backflow，缺失层=null）。
+- 前端：工作台 antd Tabs（概览 / 来源 / 证据 / 分析 / 报告 / 审核），惰性挂载，5 个 artifact tab 组件渲染新字段；完整性错误显示「产物完整性校验失败」。后端回归 1891 非集成 + 834 集成；前端 typecheck + 35 tests + build 全绿；alembic 保持 0038（0 新迁移）。
+
+## 6B.2（next）：工作台增强
 
 - Task 列表分页 / 搜索 / 状态筛选。
 - workspace 产物卡片按 Stage 4/5 类型细化（evidence cards / calculations / comparisons / outline / draft sections / report）。

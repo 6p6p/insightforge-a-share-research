@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import { createTestQueryClient } from '../test/render';
 import type { AnalysisArtifactResponse } from '../types/artifacts';
+import { ApiError } from '../types/api';
 import type { TaskWorkspaceResponse } from '../types/workspace';
 import { TaskWorkspacePage } from './TaskWorkspacePage';
 
@@ -137,6 +138,13 @@ describe('TaskWorkspacePage artifact tabs（Stage 6B.1）', () => {
           source_url: 'https://example.com/news',
           status: 'available',
           created_at: '2026-08-01T00:00:00Z',
+          source_identity: 'xinhuanet:https://example.com/news',
+          origin_type: 'document_chunk',
+          source_type: null,
+          label: null,
+          fetched_at: null,
+          authority_tier: 3,
+          locator_summary: 'https://example.com/news',
         },
       ],
       total: 1,
@@ -183,7 +191,15 @@ describe('TaskWorkspacePage artifact tabs（Stage 6B.1）', () => {
         },
       ],
       synthesis_id: 'sy-1',
+      synthesis_result_id: 'sy-result-1',
       synthesis_fingerprint: 'fp-1',
+      result_fingerprint: 'rf-1',
+      themes: [
+        { title: '增长动力', summary: '营收增长与行业均值相符。', claim_ids: ['cl-1'] },
+      ],
+      conflicts: [],
+      evidence_gaps: [],
+      work_items_available: true,
     };
     mocks.getTaskAnalysis.mockResolvedValue(analysis);
     renderPage();
@@ -192,5 +208,16 @@ describe('TaskWorkspacePage artifact tabs（Stage 6B.1）', () => {
     fireEvent.click(screen.getByRole('tab', { name: '分析' }));
     await waitFor(() => expect(mocks.getTaskAnalysis).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByText('营收增长与行业均值相符')).toBeInTheDocument();
+  });
+
+  it('分析 tab 遇到完整性错误 → 显示「产物完整性校验失败」', async () => {
+    mocks.getTaskAnalysis.mockRejectedValue(
+      new ApiError(409, 'task_artifact_integrity', '任务产物完整性校验失败', 'req-1'),
+    );
+    renderPage();
+    await screen.findByText('任务概要');
+
+    fireEvent.click(screen.getByRole('tab', { name: '分析' }));
+    expect(await screen.findByText('产物完整性校验失败')).toBeInTheDocument();
   });
 });
