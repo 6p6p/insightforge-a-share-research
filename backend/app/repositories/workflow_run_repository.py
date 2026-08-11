@@ -258,3 +258,8 @@ class WorkflowRunRepository:
         )
         rows = (await self._session.execute(query)).scalars().all()
         return list(rows), total
+
+    async def get_latest_for_task(self, task_id: UUID) -> WorkflowRunModel | None:
+        """最近创建的一次 run（workspace current_run 投影）。"""
+        rows, _ = await self.list_for_task(task_id, limit=1, offset=0)
+        return rows[0] if rows else None

@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     app_port: int = 8001
     log_level: str = "INFO"
     api_v1_prefix: str = "/api/v1"
+    # CORS 放行来源（逗号分隔）。默认开发用 Vite frontend origin；
+    # 显式来源 + allow_credentials，**禁止** allow_origins=["*"] + credentials=true。
+    cors_allow_origins: str = "http://localhost:5173"
 
     # database_url 不进入 repr，避免密码泄露
     database_url: str = Field(..., repr=False)

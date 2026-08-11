@@ -29,7 +29,15 @@ class WorkflowRunResponse(BaseModel):
 
 
 class WorkflowActionRequest(BaseModel):
-    action_type: Literal["approve_plan", "cancel", "retry"]
+    """统一 human action 入口（Stage 6A spec G）。
+
+    - Stage 1 simulation run：approve_plan / cancel / retry；
+    - Stage 5 真实研究 run：approve / rewrite / research / cancel；
+    - comment 仅 Stage 5 human review 使用。
+    """
+
+    action_type: Literal["approve_plan", "cancel", "retry", "approve", "rewrite", "research"]
+    comment: str | None = Field(default=None, max_length=500)
 
 
 class WorkflowActionResponse(BaseModel):

@@ -7,6 +7,7 @@ import pytest
 
 from app.api.dependencies import (
     get_langgraph_checkpoint_manager,
+    get_research_execution_service,
     get_workflow_execution_manager,
     get_workflow_service,
 )
@@ -15,6 +16,7 @@ from app.db.dependencies import get_database
 from app.domain.tasks import WorkflowEventType
 from app.main import create_app
 from app.schemas.workflow import WorkflowEventResponse, WorkflowRunResponse
+from app.stage5.contracts import STAGE5_GRAPH_NAME
 from app.vectorstore.dependencies import get_chroma
 
 
@@ -114,6 +116,36 @@ class FakeWorkflowService:
         return self.terminal
 
 
+class FakeResearchExecutionService:
+    """Stage 5 真实研究 run 的 human action 假实现（仅 actions 路由用到）。"""
+
+    def __init__(self) -> None:
+        self.resume_result: WorkflowRunResponse | None = None
+        self.resume_error: Exception | None = None
+        self.resume_calls: list[tuple[UUID, str, str | None]] = []
+        self.cancel_result: WorkflowRunResponse | None = None
+        self.cancel_error: Exception | None = None
+        self.cancel_calls: list[UUID] = []
+
+    async def resume_human(
+        self, run_id: UUID, decision: str, comment: str | None = None
+    ) -> WorkflowRunResponse:
+        self.resume_calls.append((run_id, decision, comment))
+        if self.resume_error is not None:
+            raise self.resume_error
+        if self.resume_result is not None:
+            return self.resume_result
+        return _run_response(run_id=run_id, graph_name=STAGE5_GRAPH_NAME, status="running")
+
+    async def cancel(self, run_id: UUID) -> WorkflowRunResponse:
+        self.cancel_calls.append(run_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        if self.cancel_result is not None:
+            return self.cancel_result
+        return _run_response(run_id=run_id, graph_name=STAGE5_GRAPH_NAME, status="cancelled")
+
+
 @pytest.fixture
 def fake_execution_manager() -> FakeExecutionManager:
     return FakeExecutionManager()
@@ -125,6 +157,11 @@ def fake_workflow_service() -> FakeWorkflowService:
 
 
 @pytest.fixture
+def fake_research_execution() -> FakeResearchExecutionService:
+    return FakeResearchExecutionService()
+
+
+@pytest.fixture
 def app(
     test_settings,
     fake_database,
@@ -132,6 +169,7 @@ def app(
     fake_langgraph,
     fake_execution_manager,
     fake_workflow_service,
+    fake_research_execution,
 ):
     application = create_app(test_settings)
     application.dependency_overrides[get_database] = lambda: fake_database
@@ -141,6 +179,9 @@ def app(
         fake_execution_manager
     )
     application.dependency_overrides[get_workflow_service] = lambda: fake_workflow_service
+    application.dependency_overrides[get_research_execution_service] = lambda: (
+        fake_research_execution
+    )
     return application
 
 
@@ -295,6 +336,90 @@ def test_action_terminal_rejected_returns_409(client, fake_execution_manager) ->
     response = client.post(
         f"/api/v1/workflow-runs/{uuid4()}/actions",
         json={"action_type": "cancel"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workflow_run_already_finished"
+
+
+def _stage5_run(**overrides: object) -> WorkflowRunResponse:
+    return _run_response(graph_name=STAGE5_GRAPH_NAME, **overrides)
+
+
+def test_stage5_approve_dispatches_resume_human(
+    client, fake_workflow_service, fake_research_execution
+) -> None:
+    run = _stage5_run(status="running")
+    fake_workflow_service.run = run
+    fake_research_execution.resume_result = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "approve"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run"]["status"] == "running"
+    assert fake_research_execution.resume_calls == [(run.run_id, "approve", None)]
+
+
+def test_stage5_rewrite_forwards_comment(
+    client, fake_workflow_service, fake_research_execution
+) -> None:
+    run = _stage5_run(status="running")
+    fake_workflow_service.run = run
+    fake_research_execution.resume_result = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "rewrite", "comment": "细化估值假设"},
+    )
+
+    assert response.status_code == 202
+    assert fake_research_execution.resume_calls == [(run.run_id, "rewrite", "细化估值假设")]
+
+
+def test_stage5_cancel_dispatches_research_cancel(
+    client, fake_workflow_service, fake_research_execution
+) -> None:
+    run = _stage5_run(status="running")
+    fake_workflow_service.run = run
+    fake_research_execution.cancel_result = _stage5_run(status="cancelled")
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "cancel"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run"]["status"] == "cancelled"
+    assert fake_research_execution.cancel_calls == [run.run_id]
+    assert fake_research_execution.resume_calls == []
+
+
+def test_stage5_rejects_simulation_only_action(client, fake_workflow_service) -> None:
+    run = _stage5_run(status="running")
+    fake_workflow_service.run = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "approve_plan"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workflow_action_invalid"
+
+
+def test_stage5_resume_terminal_rejected(
+    client, fake_workflow_service, fake_research_execution
+) -> None:
+    run = _stage5_run(status="completed")
+    fake_workflow_service.run = run
+    fake_research_execution.resume_error = WorkflowRunAlreadyFinished()
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "approve"},
     )
 
     assert response.status_code == 409

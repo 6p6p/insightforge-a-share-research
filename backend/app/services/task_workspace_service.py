@@ -1,0 +1,94 @@
+"""Task workspace projection service (Stage 6A spec E).
+
+把 ResearchTask + 解析公司 + 当前 run + 公司级证据链产物计数 组装成
+`TaskWorkspaceResponse`，供 Web 工作台一次性渲染。只做只读投影，不修改业务数据。
+"""
+
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.core.errors import (
+    CompanyIdentityAmbiguous,
+    CompanyIdentityNotFound,
+    TaskNotFound,
+)
+from app.repositories.research_task_repository import ResearchTaskRepository
+from app.repositories.workflow_run_repository import WorkflowRunRepository
+from app.schemas.research_execution import ArtifactSummary, TaskWorkspaceResponse
+from app.schemas.task import TaskResponse
+from app.services.company_identity_service import CompanyIdentityService
+
+
+class TaskWorkspaceService:
+    """只读 workspace 投影；每个方法使用短生命周期 session。"""
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+        self._company_identity = CompanyIdentityService(sessionmaker)
+
+    async def get_workspace(self, task_id: UUID) -> TaskWorkspaceResponse:
+        async with self._sessionmaker() as session:
+            task_model = await ResearchTaskRepository(session).get_by_id(task_id)
+            run_model = await WorkflowRunRepository(session).get_latest_for_task(task_id)
+        if task_model is None:
+            raise TaskNotFound()
+        task = TaskResponse.model_validate(task_model)
+
+        resolved_company = None
+        company_id: UUID | None = None
+        try:
+            resolution = await self._company_identity.resolve(task.company_query)
+            resolved_company = resolution.company
+            company_id = resolution.company.company_id
+        except (CompanyIdentityNotFound, CompanyIdentityAmbiguous):
+            # 公司身份未解析时仍返回 workspace，只是无计数与公司信息。
+            resolved_company = None
+
+        current_run = None
+        if run_model is not None:
+            from app.schemas.workflow import WorkflowRunResponse
+
+            current_run = WorkflowRunResponse.model_validate(run_model)
+
+        summary = await self._count_artifacts(company_id)
+        return TaskWorkspaceResponse(
+            task=task,
+            resolved_company=resolved_company,
+            current_run=current_run,
+            artifact_summary=summary,
+        )
+
+    async def _count_artifacts(self, company_id: UUID | None) -> ArtifactSummary:
+        if company_id is None:
+            return ArtifactSummary()
+        async with self._sessionmaker() as session:
+            source_count = await self._count(session, "source_records", company_id, None)
+            evidence_count = await self._count(session, "evidence_cards", company_id, None)
+            claim_count = await self._count(session, "claims", company_id, None)
+            report_count = await self._count(session, "reports", company_id, None)
+            review_issue_count = await self._count(
+                session,
+                "review_issues",
+                company_id,
+                "ri JOIN report_audits a ON ri.audit_id = a.audit_id "
+                "JOIN reports r ON a.report_id = r.report_id",
+            )
+        return ArtifactSummary(
+            source_count=source_count,
+            evidence_count=evidence_count,
+            claim_count=claim_count,
+            report_count=report_count,
+            review_issue_count=review_issue_count,
+        )
+
+    @staticmethod
+    async def _count(session, table: str, company_id: UUID, alias: str | None) -> int:
+        """按 company_id 计数一张表；`alias` 传入时对别名表做 join（如 review_issues）。"""
+        if alias is not None:
+            sql = f"SELECT count(*) FROM {table} {alias} WHERE r.company_id = :cid"
+        else:
+            sql = f"SELECT count(*) FROM {table} WHERE company_id = :cid"
+        result = await session.execute(text(sql).bindparams(cid=company_id))
+        return int(result.scalar_one())

@@ -174,3 +174,23 @@ class NewsArticleIngestionNotAllowed(DomainError):
     code = "news_article_ingestion_not_allowed"
     http_status = 400
     message = "news_article 只能通过原创发布者验证流程创建"
+
+
+class MissingResearchQuestion(DomainError):
+    """启动真实研究时任务未提供研究问题（questions 为空）。
+
+    Stage 6A 以 ResearchTask 为研究问题来源：execute 请求只携带 work plan，
+    research_question 派生自 task.questions[0]；为空时不能假装自动生成。
+    """
+
+    code = "missing_research_question"
+    http_status = 422
+    message = "任务未提供研究问题（questions 为空），无法启动真实研究"
+
+
+class WorkflowActionInvalid(DomainError):
+    """该 action 对当前 run 的图/状态不合法（graph_name 不匹配等）。"""
+
+    code = "workflow_action_invalid"
+    http_status = 409
+    message = "该操作对当前工作流运行不适用"

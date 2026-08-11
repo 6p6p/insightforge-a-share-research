@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.dependencies import get_db_session
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.services.company_identity_service import CompanyIdentityService
+from app.services.research_execution_service import ResearchExecutionService
 from app.services.source_ingestion_service import SourceIngestionService
 from app.services.source_registry_service import SourceRegistryService
 from app.services.task_service import TaskService
+from app.services.task_workspace_service import TaskWorkspaceService
 from app.services.workflow_service import WorkflowService
 from app.storage.raw_store import LocalRawArtifactStore
 from app.workflows.checkpoint import LangGraphCheckpointManager
@@ -29,6 +31,20 @@ def get_workflow_execution_manager(request: Request) -> WorkflowExecutionManager
     if resources is None or resources.workflow_execution is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
     return resources.workflow_execution
+
+
+def get_research_execution_service(request: Request) -> ResearchExecutionService:
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.research_execution is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    return resources.research_execution
+
+
+def get_task_workspace_service(request: Request) -> TaskWorkspaceService:
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.database is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    return TaskWorkspaceService(resources.database.session_factory())
 
 
 def get_workflow_service(request: Request) -> WorkflowService:
