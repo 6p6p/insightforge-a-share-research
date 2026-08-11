@@ -16,6 +16,7 @@ from app.db.dependencies import get_database
 from app.domain.tasks import WorkflowEventType
 from app.main import create_app
 from app.schemas.workflow import WorkflowEventResponse, WorkflowRunResponse
+from app.stage4.graph import STAGE4_GRAPH_NAME
 from app.stage5.contracts import STAGE5_GRAPH_NAME
 from app.vectorstore.dependencies import get_chroma
 
@@ -144,6 +145,9 @@ class FakeResearchExecutionService:
         if self.cancel_result is not None:
             return self.cancel_result
         return _run_response(run_id=run_id, graph_name=STAGE5_GRAPH_NAME, status="cancelled")
+
+    async def has_persisted_plan(self, run_id: UUID) -> bool:
+        return False
 
 
 @pytest.fixture
@@ -424,3 +428,84 @@ def test_stage5_resume_terminal_rejected(
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "workflow_run_already_finished"
+
+
+# --------------------------------------------------------------------------- Stage 4
+
+
+def _stage4_run(**overrides: object) -> WorkflowRunResponse:
+    return _run_response(graph_name=STAGE4_GRAPH_NAME, **overrides)
+
+
+def test_stage4_cancel_dispatches_research_cancel(
+    client, fake_workflow_service, fake_research_execution
+) -> None:
+    run = _stage4_run(status="running")
+    fake_workflow_service.run = run
+    fake_research_execution.cancel_result = _stage4_run(status="cancelled")
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "cancel"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["run"]["status"] == "cancelled"
+    assert fake_research_execution.cancel_calls == [run.run_id]
+    assert fake_research_execution.resume_calls == []
+
+
+def test_stage4_rejects_approve_plan(client, fake_workflow_service) -> None:
+    run = _stage4_run(status="running")
+    fake_workflow_service.run = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "approve_plan"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workflow_action_invalid"
+
+
+def test_stage4_rejects_rewrite(client, fake_workflow_service) -> None:
+    run = _stage4_run(status="waiting_human")
+    fake_workflow_service.run = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "rewrite", "comment": "补充分析"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workflow_action_invalid"
+
+
+def test_stage4_rejects_retry(client, fake_workflow_service, fake_research_execution) -> None:
+    run = _stage4_run(status="failed")
+    fake_workflow_service.run = run
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "retry"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workflow_action_invalid"
+
+
+def test_stage4_cancel_does_not_touch_stage1_manager(
+    client, fake_workflow_service, fake_research_execution, fake_execution_manager
+) -> None:
+    """Stage 4 cancel 必须走 ResearchExecutionService，不落到 Stage 1 manager。"""
+    run = _stage4_run(status="pending")
+    fake_workflow_service.run = run
+    fake_research_execution.cancel_result = _stage4_run(status="cancelled")
+
+    response = client.post(
+        f"/api/v1/workflow-runs/{run.run_id}/actions",
+        json={"action_type": "cancel"},
+    )
+
+    assert response.status_code == 202
+    assert fake_research_execution.cancel_calls == [run.run_id]

@@ -202,6 +202,24 @@ class Stage4WorkflowRunner:
 
         return await self._run_graph(run_id, thread_id, None)
 
+    # ------------------------------------------------------------------ checkpoint
+
+    async def read_checkpoint_state(self, run_id: UUID) -> dict:
+        """只读读取已持久化 checkpoint state（恢复协调器续接 Stage5 用）。
+
+        不 claim、不改 run 状态；run 不存在 → `WorkflowRunNotFound`。返回
+        `dict(state.values)`，字段与 `_build_initial_state` 一致（company_id /
+        research_question / analysis_as_of / synthesis_result_id …）。
+        """
+        async with self._sessionmaker() as session:
+            run = await WorkflowRunRepository(session).get_by_id(run_id)
+        if run is None:
+            raise WorkflowRunNotFound()
+        checkpointer = await self._checkpoint_manager.get_checkpointer()
+        graph = build_stage4_analysis_graph(self._dependencies, checkpointer)
+        state = await graph.aget_state({"configurable": {"thread_id": run.thread_id}})
+        return dict(state.values) if state is not None else {}
+
     # ------------------------------------------------------------------ internal
 
     async def _run_graph(

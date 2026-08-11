@@ -12,7 +12,9 @@ from app.repositories.workflow_run_repository import WorkflowRunRepository
 
 logger = get_logger("app.recovery")
 
-_ERROR_CODE = "worker_restarted"
+# 公开常量：恢复协调器据此识别「因重启中断」的 run（区别于真实业务失败）。
+WORKER_RESTARTED_ERROR_CODE = "worker_restarted"
+_ERROR_CODE = WORKER_RESTARTED_ERROR_CODE
 _ERROR_MESSAGE = "后台进程重启，原运行已中断"
 
 

@@ -60,9 +60,15 @@ class ArtifactSummary(BaseModel):
 
 
 class TaskWorkspaceResponse(BaseModel):
-    """Task workspace projection（spec E）：task + 解析公司 + 当前 run + 产物计数。"""
+    """Task workspace projection（spec E）：task + 解析公司 + 当前 run + 产物计数。
+
+    `research_chain_active`：后台研究链（Stage4→Synthesis→Stage5）是否仍在进程内
+    执行。task 级 SSE 的客户端据此判断「真正终态」：`current_run` 已是 terminal
+    但链仍在 Stage4→Stage5 过渡时**不能**关闭事件流（spec D）。
+    """
 
     task: TaskResponse
     resolved_company: CompanyIdentityResponse | None = None
     current_run: WorkflowRunResponse | None = None
     artifact_summary: ArtifactSummary = Field(default_factory=ArtifactSummary)
+    research_chain_active: bool = False

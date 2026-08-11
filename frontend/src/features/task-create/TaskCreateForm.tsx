@@ -60,10 +60,8 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
         research_start_date: start.format('YYYY-MM-DD'),
         research_end_date: end.format('YYYY-MM-DD'),
         modules: values.modules,
-        questions: (values.questions ?? '')
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean),
+        // Stage 6A 只支持单个研究问题（后端 execute 要求 len==1，多问题 422）。
+        questions: values.questions?.trim() ? [values.questions.trim()] : [],
         include_relative_valuation: values.include_relative_valuation,
         require_plan_approval: true,
       };
@@ -122,10 +120,10 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
 
         <Form.Item
           name="questions"
-          label="研究问题（每行一个）"
-          tooltip="执行真实研究时以第一个问题为研究问题来源。"
+          label="研究问题"
+          tooltip="Stage 6A 只支持单个研究问题；多个问题会被后端以 422 拒绝。"
         >
-          <Input.TextArea rows={4} placeholder="例如：\n贵州茅台 2026 年营收与估值是否合理？" />
+          <Input placeholder="例如：贵州茅台 2026 年营收与估值是否合理？" />
         </Form.Item>
 
         <Form.Item name="include_relative_valuation" label="包含相对估值" valuePropName="checked">

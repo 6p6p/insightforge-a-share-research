@@ -11,6 +11,7 @@ from app.core.resources import ApplicationResources
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
 from app.services.company_identity_service import CompanyIdentityService
+from app.services.research_execution_recovery import ResearchExecutionRecoveryCoordinator
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.workflow_recovery_service import WorkflowRecoveryService
 from app.storage.raw_store import LocalRawArtifactStore
@@ -104,6 +105,19 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.warning(
             "orphaned_runs_reconcile_failed",
+            error_type=type(exc).__name__,
+        )
+    # best-effort 恢复研究链（spec E）：reconcile 之后、接受新执行之前，把
+    # 「Stage4 已完成但 Stage5 未创建」的 task 重新调度 Stage5 续接；失败不阻止启动。
+    try:
+        coordinator = ResearchExecutionRecoveryCoordinator(sessionmaker, research_execution)
+        await asyncio.wait_for(
+            coordinator.recover_interrupted_chains(),
+            timeout=settings.workflow_reconcile_timeout_seconds,
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_chains_recover_failed",
             error_type=type(exc).__name__,
         )
     try:

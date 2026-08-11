@@ -25,6 +25,9 @@ export interface TaskWorkspaceResponse {
   resolved_company: CompanyIdentityResponse | null;
   current_run: WorkflowRunResponse | null;
   artifact_summary: ArtifactSummary;
+  /** 后台研究链（Stage4→Stage5 过渡）是否仍在执行：true 时即使 current_run
+   * 已是 terminal 也不能关闭 task 级 SSE（spec D）。 */
+  research_chain_active: boolean;
 }
 
 /** Stage 4 work plan：显式 work item（discriminated union，与后端 stage4.contracts 对齐）。 */

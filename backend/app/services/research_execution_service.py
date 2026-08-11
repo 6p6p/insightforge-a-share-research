@@ -18,13 +18,14 @@ scheduler 模式；**不是**分布式任务队列）。
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.errors import (
     MissingResearchQuestion,
+    ResearchExecutionRequiresSingleQuestion,
     TaskNotFound,
     WorkflowActionInvalid,
     WorkflowRunAlreadyFinished,
@@ -96,6 +97,9 @@ class ResearchExecutionService:
             raise TaskNotFound()
 
         questions = list(task.questions or [])
+        if len(questions) > 1:
+            # 不能静默只取第一条：多问题编排尚未实现，明确 422 拒绝。
+            raise ResearchExecutionRequiresSingleQuestion()
         research_question = questions[0] if questions else None
         if not research_question:
             raise MissingResearchQuestion()
@@ -154,10 +158,7 @@ class ResearchExecutionService:
                 analysis_as_of=stage4_request.analysis_as_of,
                 synthesis_result_id=UUID(synthesis_result_id),
             )
-            stage5_runner = self._stage5_runner_factory()
-            stage5_run = await stage5_runner.create_stage5_run(stage5_request)
-            self._chain_state[task_id]["stage5_run_id"] = stage5_run.run_id
-            await stage5_runner.execute_stage5(stage5_run.run_id, stage5_request)
+            await self._continue_to_stage5(task_id, stage5_request)
         except Exception as exc:
             # runner 已标记对应 run 终态（fail/cancel）；这里只记录，不重抛
             # 到调用方（后台任务异常由 _on_task_done 消费）。
@@ -168,6 +169,88 @@ class ResearchExecutionService:
             )
         finally:
             self._chain_state.pop(task_id, None)
+
+    async def _continue_to_stage5(
+        self,
+        task_id: UUID,
+        stage5_request: Stage5WorkflowRequest,
+    ) -> None:
+        """Stage 4 完成后的 Stage 5 续接：create → execute。
+
+        首启（`start`）与恢复（`_recover_chain`）共用；调用前
+        `_chain_state[task_id]` 必须已存在（记录 stage5_run_id）。
+        """
+        stage5_runner = self._stage5_runner_factory()
+        stage5_run = await stage5_runner.create_stage5_run(stage5_request)
+        self._chain_state[task_id]["stage5_run_id"] = stage5_run.run_id
+        await stage5_runner.execute_stage5(stage5_run.run_id, stage5_request)
+
+    # ------------------------------------------------------------------ recovery
+
+    async def _recover_chain(self, task_id: UUID) -> None:
+        """启动恢复路径（spec E）：Stage 4 durable → Stage 5 续接。
+
+        - `resume_stage4=True`（run FAILED(worker_restarted)）：同 run/thread
+          从 checkpoint 恢复 Stage 4（synthesis 幂等 → 无重复产物）；
+        - 否则（run COMPLETED）：直接读 checkpoint 的 synthesis_result_id，
+          不再重跑 Stage 4。
+        两者都投影出 Stage5WorkflowRequest 后走 `_continue_to_stage5`。
+        """
+        try:
+            state = self._chain_state.get(task_id)
+            if state is None:
+                return
+            stage4_runner = self._stage4_runner_factory()
+            if state.get("resume_stage4"):
+                result = await stage4_runner.resume_stage4(state["stage4_run_id"])
+            else:
+                result = await stage4_runner.read_checkpoint_state(state["stage4_run_id"])
+            synthesis_result_id = result.get("synthesis_result_id")
+            if not synthesis_result_id:
+                logger.warning(
+                    "stage4_recovery_no_synthesis_result",
+                    task_id=str(task_id),
+                    stage4_run_id=str(state["stage4_run_id"]),
+                )
+                return
+            stage5_request = Stage5WorkflowRequest(
+                task_id=task_id,
+                company_id=UUID(result["company_id"]),
+                research_question=result["research_question"],
+                analysis_as_of=date.fromisoformat(result["analysis_as_of"]),
+                synthesis_result_id=UUID(synthesis_result_id),
+            )
+            await self._continue_to_stage5(task_id, stage5_request)
+        except Exception as exc:
+            logger.warning(
+                "research_chain_recovery_failed",
+                task_id=str(task_id),
+                error_type=type(exc).__name__,
+            )
+        finally:
+            self._chain_state.pop(task_id, None)
+
+    def schedule_recovery(
+        self,
+        task_id: UUID,
+        stage4_run_id: UUID,
+        *,
+        resume_stage4: bool,
+    ) -> bool:
+        """启动恢复入口（sync）：为已中断 task 调度 Stage 5 续接。
+
+        幂等：该 task 已有后台链或服务已关闭 → 不调度、返回 False。由
+        ResearchExecutionRecoveryCoordinator 在 reconcile 之后、服务正式对外前
+        调用。
+        """
+        if self._closed or task_id in self._tasks:
+            return False
+        self._chain_state[task_id] = {
+            "stage4_run_id": stage4_run_id,
+            "resume_stage4": resume_stage4,
+        }
+        self._schedule(task_id, self._recover_chain(task_id))
+        return True
 
     # ------------------------------------------------------------------ actions
 
@@ -236,6 +319,15 @@ class ResearchExecutionService:
         """该 task 是否有仍在执行的后台研究链（task 级 SSE 判 terminal 用）。"""
         task = self._tasks.get(task_id)
         return task is not None and not task.done()
+
+    async def has_persisted_plan(self, run_id: UUID) -> bool:
+        """真实 Stage 4 Web retry 前提：是否有完整持久化的 execution request 可重建。
+
+        Stage 6A v1 只在内存 chain state 保存 work plan（进程重启即丢失），
+        没有一等公民的持久化 request → 恒为 False；actions 路由据此对
+        Stage 4 retry 返回稳定 409 workflow_action_invalid，不假装支持。
+        """
+        return False
 
     # ------------------------------------------------------------------ internal
 

@@ -188,6 +188,18 @@ class MissingResearchQuestion(DomainError):
     message = "任务未提供研究问题（questions 为空），无法启动真实研究"
 
 
+class ResearchExecutionRequiresSingleQuestion(DomainError):
+    """任务提供多个研究问题时不能启动真实研究（Stage 6A 不实现 multi-question 编排）。
+
+    execute 只消费 task.questions[0]；若存在多个 question，静默忽略会丢失
+    用户意图 → 明确 422 拒绝，要求调用方收敛为单个问题。
+    """
+
+    code = "research_execution_requires_single_question"
+    http_status = 422
+    message = "任务当前不支持多个研究问题，请收敛为单个问题后再启动真实研究"
+
+
 class WorkflowActionInvalid(DomainError):
     """该 action 对当前 run 的图/状态不合法（graph_name 不匹配等）。"""
 

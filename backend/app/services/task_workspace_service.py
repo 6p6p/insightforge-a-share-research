@@ -19,14 +19,20 @@ from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.schemas.research_execution import ArtifactSummary, TaskWorkspaceResponse
 from app.schemas.task import TaskResponse
 from app.services.company_identity_service import CompanyIdentityService
+from app.services.research_execution_service import ResearchExecutionService
 
 
 class TaskWorkspaceService:
     """只读 workspace 投影；每个方法使用短生命周期 session。"""
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker,
+        research_execution: ResearchExecutionService | None = None,
+    ) -> None:
         self._sessionmaker = sessionmaker
         self._company_identity = CompanyIdentityService(sessionmaker)
+        self._research_execution = research_execution
 
     async def get_workspace(self, task_id: UUID) -> TaskWorkspaceResponse:
         async with self._sessionmaker() as session:
@@ -53,11 +59,17 @@ class TaskWorkspaceService:
             current_run = WorkflowRunResponse.model_validate(run_model)
 
         summary = await self._count_artifacts(company_id)
+        research_chain_active = False
+        if self._research_execution is not None:
+            # 后台研究链（Stage4→Stage5 过渡）仍在执行 → task 尚非真正终态，
+            # task 级 SSE 客户端据此暂不关闭事件流（spec D）。
+            research_chain_active = self._research_execution.is_running(task_id)
         return TaskWorkspaceResponse(
             task=task,
             resolved_company=resolved_company,
             current_run=current_run,
             artifact_summary=summary,
+            research_chain_active=research_chain_active,
         )
 
     async def _count_artifacts(self, company_id: UUID | None) -> ArtifactSummary:

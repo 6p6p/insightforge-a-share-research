@@ -230,6 +230,8 @@ async def test_vertical_slice_happy_path(app_ctx, monkeypatch) -> None:
     assert workspace["artifact_summary"]["evidence_count"] >= 1
     assert workspace["artifact_summary"]["claim_count"] >= 1
     assert workspace["artifact_summary"]["report_count"] >= 1
+    # 最终终态：后台研究链已退出（spec D 的 research_chain_active 信号）。
+    assert workspace["research_chain_active"] is False
 
     # 4. task 级 SSE：run completed 后自然终止，且包含关键事件。
     response = await client.get(f"/api/v1/tasks/{task_id}/events")
@@ -282,3 +284,46 @@ async def test_workspace_available_before_any_run(app_ctx) -> None:
     assert body["current_run"] is None
     assert body["resolved_company"]["security_code"] == "600519"
     assert body["artifact_summary"]["source_count"] == 0
+
+
+async def _create_task_with_questions(app_ctx: dict, questions: list[str]) -> dict:
+    payload = {**_TASK_PAYLOAD, "questions": questions}
+    response = await app_ctx["client"].post("/api/v1/tasks", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _minimal_work_item() -> dict:
+    return {
+        "item_id": "biz",
+        "analysis_type": "business",
+        "evidence_card_ids": [str(uuid4())],
+    }
+
+
+async def test_execute_missing_question_422(app_ctx, monkeypatch) -> None:
+    """0 questions：不能静默用空问题启动 → MissingResearchQuestion 422。"""
+    client = app_ctx["client"]
+    task = await _create_task_with_questions(app_ctx, [])
+
+    response = await client.post(
+        f"/api/v1/tasks/{task['task_id']}/execute",
+        json=_execute_payload([_minimal_work_item()]),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "missing_research_question"
+
+
+async def test_execute_multiple_questions_422(app_ctx, monkeypatch) -> None:
+    """>1 questions：不能静默只取第一条 → ResearchExecutionRequiresSingleQuestion 422。"""
+    client = app_ctx["client"]
+    task = await _create_task_with_questions(app_ctx, ["问题一：营收？", "问题二：估值？"])
+
+    response = await client.post(
+        f"/api/v1/tasks/{task['task_id']}/execute",
+        json=_execute_payload([_minimal_work_item()]),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "research_execution_requires_single_question"

@@ -40,11 +40,19 @@ def get_research_execution_service(request: Request) -> ResearchExecutionService
     return resources.research_execution
 
 
-def get_task_workspace_service(request: Request) -> TaskWorkspaceService:
+def get_task_workspace_service(
+    request: Request,
+    research_execution: Annotated[
+        ResearchExecutionService, Depends(get_research_execution_service)
+    ],
+) -> TaskWorkspaceService:
     resources = getattr(request.app.state, "resources", None)
     if resources is None or resources.database is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
-    return TaskWorkspaceService(resources.database.session_factory())
+    return TaskWorkspaceService(
+        resources.database.session_factory(),
+        research_execution=research_execution,
+    )
 
 
 def get_workflow_service(request: Request) -> WorkflowService:

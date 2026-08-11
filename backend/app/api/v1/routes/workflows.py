@@ -23,6 +23,7 @@ from app.schemas.workflow import (
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.sse_service import format_sse_event, parse_last_event_id
 from app.services.workflow_service import WorkflowService
+from app.stage4.graph import STAGE4_GRAPH_NAME
 from app.stage5.contracts import STAGE5_GRAPH_NAME
 from app.workflows.execution_manager import WorkflowExecutionManager
 
@@ -74,6 +75,10 @@ async def run_action(
     """Submit a human action for a workflow run.
 
     - Stage 1 simulation run：approve_plan / cancel / retry（既有语义不变）；
+    - Stage 4 真实研究 run：仅 cancel 合法（经 ResearchExecutionService.cancel）；
+      approve_plan / approve / rewrite / research / retry 一律 409
+      workflow_action_invalid——Stage 6A v1 不假装支持真实 Stage 4 Web
+      retry（无完整持久化 execution request）；
     - Stage 5 真实研究 run：approve / rewrite / research / cancel（经
       ResearchExecutionService.resume_human，复用 Stage5WorkflowRunner）。
     """
@@ -89,6 +94,18 @@ async def run_action(
             )
         response.status_code = 202
         return WorkflowActionResponse(run=resolved)
+    if run.graph_name == STAGE4_GRAPH_NAME:
+        if payload.action_type == "cancel":
+            resolved = await research_execution.cancel(run_id)
+            response.status_code = 202
+            return WorkflowActionResponse(run=resolved)
+        if payload.action_type == "retry" and not await research_execution.has_persisted_plan(
+            run_id
+        ):
+            # 无完整持久化 execution request → 稳定 409，不假装支持 retry。
+            raise WorkflowActionInvalid()
+        # approve_plan / approve / rewrite / research / retry（无持久化计划）均不适用。
+        raise WorkflowActionInvalid()
     if payload.action_type == "approve_plan":
         resolved = await manager.resume_simulation(run_id, HumanActionType.APPROVE_PLAN)
         response.status_code = 202

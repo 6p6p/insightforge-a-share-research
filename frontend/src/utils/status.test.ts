@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TaskStatus } from '../types/task';
-import { WORKFLOW_RUN_STATUS, type WorkflowRunStatus } from '../types/workflow';
+import { WORKFLOW_RUN_STATUS } from '../types/workflow';
 import {
   RUN_STATUS_LABEL,
   TASK_STATUS_LABEL,

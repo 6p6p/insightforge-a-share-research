@@ -66,7 +66,7 @@ describe('TaskCreateForm（spec J）', () => {
     await screen.findByText('财务');
     await userEvent.click(screen.getByText('财务'));
 
-    await userEvent.type(screen.getByLabelText('研究问题（每行一个）'), '2026年营收是否合理？');
+    await userEvent.type(screen.getByLabelText('研究问题'), '2026年营收是否合理？');
 
     await userEvent.click(screen.getByRole('button', { name: '创建任务' }));
 

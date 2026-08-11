@@ -1,14 +1,17 @@
 /** 集中式 API client（spec I）。组件不直接散落 fetch URL。
 
-- `VITE_API_BASE_URL` 来自 env（默认 http://localhost:8000/api/v1）。
+- `VITE_API_BASE_URL` 来自 env（默认 http://localhost:8001/api/v1，与后端
+  Settings.app_port=8001 对齐）。
 - 统一处理：JSON 错误信封、request_id、409、422（FastAPI validation）。
  */
 
 import { ApiError, type ErrorEnvelope, type ValidationDetail } from '../types/api';
 
+/** 开发默认后端地址：必须与 backend/app/core/config.py `app_port=8001` 对齐。 */
+export const DEFAULT_API_BASE_URL = 'http://localhost:8001/api/v1';
+
 export const API_BASE_URL: string =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-  'http://localhost:8000/api/v1';
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? DEFAULT_API_BASE_URL;
 
 export interface RequestOptions {
   method?: string;
