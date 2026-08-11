@@ -197,6 +197,28 @@ class ResearchExecutionService:
 
     # ------------------------------------------------------------------ recovery
 
+    async def _recover_stage5_chain(self, task_id: UUID) -> None:
+        """Stage 5 worker 重启恢复：同 run/thread 从最后 checkpoint 续跑。
+
+        runner 自行 claim(worker_restarted) + 短事务 finalize；本方法只负责
+        顺序编排与日志，不持有 DB session。Stage 5 恢复后到达 WAITING_HUMAN
+        时链自然结束（graph interrupt），人工 action 走 `resume_human`。
+        """
+        try:
+            state = self._chain_state.get(task_id)
+            if state is None:
+                return
+            runner = self._stage5_runner_factory()
+            await runner.resume_stage5_for_recovery(state["stage5_run_id"])
+        except Exception as exc:
+            logger.warning(
+                "research_stage5_recovery_failed",
+                task_id=str(task_id),
+                error_type=type(exc).__name__,
+            )
+        finally:
+            self._chain_state.pop(task_id, None)
+
     async def _recover_chain(self, task_id: UUID) -> None:
         """启动恢复路径（spec E）：Stage 4 durable → Stage 5 续接。
 
@@ -260,6 +282,20 @@ class ResearchExecutionService:
             "resume_stage4": resume_stage4,
         }
         self._schedule(task_id, self._recover_chain(task_id))
+        return True
+
+    def schedule_stage5_recovery(self, task_id: UUID, stage5_run_id: UUID) -> bool:
+        """启动 Stage 5 恢复入口（sync）：为 worker 重启中断的 Stage5 run 调度恢复。
+
+        幂等：该 task 已有后台链或服务已关闭 → 不调度、返回 False。由
+        ResearchExecutionRecoveryCoordinator 在 reconcile 之后、服务正式对外前
+        调用。恢复复用同 run / thread（`resume_stage5_for_recovery`），不新建
+        WorkflowRun。
+        """
+        if self._closed or task_id in self._tasks:
+            return False
+        self._chain_state[task_id] = {"stage5_run_id": stage5_run_id}
+        self._schedule(task_id, self._recover_stage5_chain(task_id))
         return True
 
     # ------------------------------------------------------------------ actions

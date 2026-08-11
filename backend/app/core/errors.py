@@ -206,3 +206,18 @@ class WorkflowActionInvalid(DomainError):
     code = "workflow_action_invalid"
     http_status = 409
     message = "该操作对当前工作流运行不适用"
+
+
+class TaskArtifactIntegrityError(DomainError):
+    """任务产物完整性校验失败（Stage 6B.1 spec D）。
+
+    锚定 checkpoint 引用了某个 artifact ID（synthesis / report / check / audit /
+    review action / human review / research backflow），但对应
+    `verify_*_integrity` 无法完整重建（行缺失 / 指纹不一致 / 上游损坏）。**不
+    repair / 不降级为空**——读路径必须暴露损坏，而不是静默返回空。HTTP 409，
+    统一 `{error:{code,message,request_id}}` 信封，不泄漏 SQL / stack / 原始异常。
+    """
+
+    code = "task_artifact_integrity"
+    http_status = 409
+    message = "任务产物完整性校验失败"

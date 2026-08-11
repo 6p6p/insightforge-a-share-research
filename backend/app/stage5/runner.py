@@ -43,6 +43,7 @@ from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.workflow_event_repository import WorkflowEventRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.schemas.workflow import WorkflowRunResponse
+from app.services.workflow_recovery_service import WORKER_RESTARTED_ERROR_CODE
 from app.stage5.contracts import (
     STAGE5_GRAPH_NAME,
     STAGE5_GRAPH_VERSION,
@@ -266,6 +267,48 @@ class Stage5WorkflowRunner:
             "comment": dec.comment,
         }
         return await self._run_graph(run_id, thread_id, resume=resume_value)
+
+    async def resume_stage5_for_recovery(self, run_id: UUID) -> dict:
+        """失败后内部 durable recovery：FAILED(worker_restarted) → RUNNING，同 run/thread 恢复。
+
+        **recovery ≠ retry**：仅用于 Stage 5 worker 重启中断恢复（镜像 Stage 4
+        `resume_stage4`）。claim 只匹配 `stage5_report` + `failed` +
+        `error_code=worker_restarted`（`claim_failed_for_recovery_gated`）——业务
+        失败（LLM / 校验 / 终态错误）不在该路径，WAITING_HUMAN 人工裁决走
+        `resume_stage5_human`。graph 从最后 checkpoint 继续（无 initial_state），
+        `_finalize` 统一处理 interrupt（→ waiting_human）与 terminal。
+        """
+        started_at = datetime.now(UTC)
+        async with self._sessionmaker() as session:
+            run_repo = WorkflowRunRepository(session)
+            event_repo = WorkflowEventRepository(session)
+            claimed = await run_repo.claim_failed_for_recovery_gated(
+                run_id,
+                started_at,
+                graph_name=STAGE5_GRAPH_NAME,
+                error_code=WORKER_RESTARTED_ERROR_CODE,
+            )
+            if claimed is None:
+                run = await run_repo.get_by_id(run_id)
+                if run is None:
+                    raise WorkflowRunNotFound()
+                if run.status in _TERMINAL_VALUES:
+                    raise WorkflowRunAlreadyFinished()
+                raise WorkflowRunAlreadyStarted()
+            thread_id = claimed.thread_id
+            await event_repo.create(
+                WorkflowEventModel(
+                    run_id=run_id,
+                    event_type=WorkflowEventType.RUN_RESUMED.value,
+                    stage=TaskStage.WRITING.value,
+                    progress=0,
+                    message="Stage 5 报告控制流恢复执行（worker 重启恢复）",
+                    payload={},
+                )
+            )
+            await session.commit()
+
+        return await self._run_graph(run_id, thread_id)
 
     # ------------------------------------------------------------------ checkpoint
 

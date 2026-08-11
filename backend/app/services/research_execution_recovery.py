@@ -18,7 +18,11 @@ Stage 4 runs 是 durable 的（PG Checkpointer / AsyncPostgresSaver）；进程�
 execute → 周期 2 Stage4 崩溃）因此安全：周期 1 的 Stage5 早于周期 2 的 Stage4
 创建，不影响候选判断。
 
-不做 Q2（Stage5 RUNNING 中断恢复）——超出最小范围，见代码注释与报告。
+Stage 5 路径（Stage6A Final Gate）：每个 task 最近一条
+FAILED(worker_restarted) 的 Stage5 run → 同 run / thread 从最后 checkpoint
+恢复（`resume_stage5_for_recovery`）。**WAITING_HUMAN 永不自动恢复**——重启后
+仍停留在等待 Web 人工 action 的状态，由 `resume_stage5_human` 处理；业务失败
+（LLM / 校验 / 终态错误）也不在候选。
 
 无消息队列：复用 WorkflowRun 状态机 + PG Checkpointer + 既有 runner。
 """
@@ -58,6 +62,23 @@ _CANDIDATES_SQL = text(
     """
 )
 
+# Stage 5 候选：每个 task 最近一条 FAILED(worker_restarted) 的 stage5 run。
+# status='failed' + error_code=worker_restarted 双重限定 → WAITING_HUMAN /
+# 业务失败（LLM、校验、终态错误）一律不在该路径。DISTINCT ON 保证每 task 只
+# 恢复最近一条（与 Stage4 锚定语义一致）。
+_STAGE5_CANDIDATES_SQL = text(
+    """
+    SELECT DISTINCT ON (task_id)
+           task_id::text AS task_id,
+           run_id::text  AS stage5_run_id
+    FROM workflow_runs
+    WHERE graph_name = :stage5_graph
+      AND status = 'failed'
+      AND error_code = :error_code
+    ORDER BY task_id, created_at DESC, run_id DESC
+    """
+)
+
 
 class ResearchExecutionRecoveryCoordinator:
     """Best-effort startup coordinator：为已中断研究链重新调度 Stage 5 续接。"""
@@ -71,8 +92,16 @@ class ResearchExecutionRecoveryCoordinator:
         self._research_execution = research_execution
 
     async def recover_interrupted_chains(self) -> int:
-        """扫描候选 → 逐个调度 Stage 5 续接；返回成功调度数量（幂等可重跑）。"""
+        """扫描候选 → 逐个调度恢复；返回成功调度数量（幂等可重跑）。
+
+        Stage 4 路径（`_find_candidates`）：COMPLETED 或 FAILED(worker_restarted)
+        且该周期无更新 Stage5 → 续接 / 恢复 Stage 5；
+        Stage 5 路径（`_find_stage5_candidates`）：FAILED(worker_restarted) →
+        同 run / thread 从 checkpoint 恢复（`resume_stage5_for_recovery`）。
+        **WAITING_HUMAN 永不自动恢复**（等 Web 人工 action）；业务失败不在候选。
+        """
         candidates = await self._find_candidates()
+        stage5_candidates = await self._find_stage5_candidates()
         scheduled = 0
         for task_id, stage4_run_id, resume_stage4 in candidates:
             ok = self._research_execution.schedule_recovery(
@@ -81,9 +110,16 @@ class ResearchExecutionRecoveryCoordinator:
                 resume_stage4=resume_stage4,
             )
             scheduled += 1 if ok else 0
+        for task_id, stage5_run_id in stage5_candidates:
+            ok = self._research_execution.schedule_stage5_recovery(
+                task_id=UUID(task_id),
+                stage5_run_id=UUID(stage5_run_id),
+            )
+            scheduled += 1 if ok else 0
         logger.info(
             "research_chains_recovered",
-            candidates=len(candidates),
+            stage4_candidates=len(candidates),
+            stage5_candidates=len(stage5_candidates),
             scheduled=scheduled,
         )
         return scheduled
@@ -101,3 +137,16 @@ class ResearchExecutionRecoveryCoordinator:
             )
             rows = result.all()
         return [(str(r[0]), str(r[1]), bool(r[2])) for r in rows]
+
+    async def _find_stage5_candidates(self) -> list[tuple[str, str]]:
+        """每个 task 取最近一条 Stage5 run：FAILED(worker_restarted)。"""
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                _STAGE5_CANDIDATES_SQL,
+                {
+                    "stage5_graph": STAGE5_GRAPH_NAME,
+                    "error_code": WORKER_RESTARTED_ERROR_CODE,
+                },
+            )
+            rows = result.all()
+        return [(str(r[0]), str(r[1])) for r in rows]

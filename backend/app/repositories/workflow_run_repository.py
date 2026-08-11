@@ -102,6 +102,41 @@ class WorkflowRunRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def claim_failed_for_recovery_gated(
+        self,
+        run_id: UUID,
+        started_at: datetime,
+        *,
+        graph_name: str,
+        error_code: str,
+    ) -> WorkflowRunModel | None:
+        """Atomically reclaim a failed run for worker-restart recovery, gated.
+
+        仅允许 `graph_name` + `status=failed` + `error_code`（worker_restarted）
+        → RUNNING，复用同 run_id / thread_id 从最后 checkpoint 继续。**不是**
+        用户 retry；业务失败（LLM / 校验 / 终态错误）与 WAITING_HUMAN 一律不
+        在该路径——WAITING_HUMAN 人工裁决走 `claim_waiting_human`。
+        gate 常量由调用方注入（Stage 5 runner 传 STAGE5_GRAPH_NAME +
+        WORKER_RESTARTED_ERROR_CODE），避免 repository 反向依赖 services/stage5。
+        """
+        stmt = (
+            update(WorkflowRunModel)
+            .where(
+                WorkflowRunModel.run_id == run_id,
+                WorkflowRunModel.graph_name == graph_name,
+                WorkflowRunModel.status == WorkflowRunStatus.FAILED.value,
+                WorkflowRunModel.error_code == error_code,
+            )
+            .values(
+                status=WorkflowRunStatus.RUNNING.value,
+                started_at=started_at,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(WorkflowRunModel)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def claim_waiting_human(
         self,
         run_id: UUID,
@@ -288,3 +323,31 @@ class WorkflowRunRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalars().first()
+
+    async def list_for_task_by_graph(
+        self,
+        task_id: UUID,
+        graph_name: str,
+        limit: int = 50,
+    ) -> list[WorkflowRunModel]:
+        """任务按 graph 倒序枚举 run（canonical lineage 的 Stage4 匹配用）。
+
+        Stage 6B.1 spec B：canonical synthesis = 最新 Stage5 checkpoint 的
+        `synthesis_result_id`；`matched_stage4_run` 从该 task 的全部 Stage4 run
+        中选 checkpoint `.synthesis_result_id == canonical` 的那一条（research
+        backflow 的新 Synthesis 没有对应 Stage4 run → 合法无匹配）。
+        """
+        stmt = (
+            select(WorkflowRunModel)
+            .where(
+                WorkflowRunModel.task_id == task_id,
+                WorkflowRunModel.graph_name == graph_name,
+            )
+            .order_by(
+                WorkflowRunModel.created_at.desc(),
+                WorkflowRunModel.run_id.desc(),
+            )
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
