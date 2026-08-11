@@ -31,10 +31,15 @@ from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.draft_section.service import DraftSectionService
+from app.report.check_service import ReportCheckService
+from app.report.contracts import CHECK_STATUS_FAIL, ReportAssemblyDraft
+from app.report.service import ReportService
 from app.review.errors import (
     HumanReviewAlreadyResolved,
     HumanReviewDecisionIntegrityError,
     HumanReviewRequestIntegrityError,
+    ReviewActionCheckNotPass,
     ReviewActionIntegrityError,
     ReviewInputError,
     ReviewRequestNotHumanReview,
@@ -43,6 +48,8 @@ from app.review.service import ReviewActionService
 from app.services.source_registry_service import SourceRegistryService
 from app.storage.raw_store import LocalRawArtifactStore
 from tests.audit.fakes import FakeAuditModel
+from tests.draft_section.fakes import FakeDraftSectionModel
+from tests.integration.test_draft_section_service import _create_outline, _two_theme_models
 from tests.integration.test_report_audit_service import (
     _audit_service,
     _build_minimal_chain,
@@ -50,6 +57,10 @@ from tests.integration.test_report_audit_service import (
     pass_decision,
     research_decision,
     wording_overclaim_decision,
+)
+from tests.integration.test_report_check_integrity import (
+    _draft_mixed_sections,
+    _risks_gap_omitted_decision,
 )
 from tests.integration.test_report_service import _seed_research_task
 from tests.integration.test_stage4_workflow import _cleanup
@@ -233,6 +244,45 @@ async def test_action_pass_routes_to_finalize(env, monkeypatch, connection_uri) 
     assert len(result.action_fingerprint) == 64
     assert not result.replayed
     assert await _action_count(env["sessionmaker"]) == 1
+
+
+async def test_action_finalize_rejects_check_fail_audit_pass(
+    env, monkeypatch, connection_uri
+) -> None:
+    """Gate 0：deterministic Check=fail + Audit 人为/fixture=pass → 拒绝 finalize。
+
+    用 risks_and_gaps 遗漏 outline 要求的 evidence_gap_index 构造**真实** status=fail
+    的 CheckResult（draft 期合法，非 SQL tamper）→ Fake Auditor 返回 0 issues →
+    Audit=pass/route=pass。`create_or_get_action` 必须因 deterministic Check failure
+    reject finalize（0 ReviewAction write）——Agent Audit 不得覆盖 Check 失败。
+    """
+    outline_id = await _create_outline(env, monkeypatch, connection_uri, _two_theme_models())
+    s3_fake = FakeDraftSectionModel(decision_factory=_risks_gap_omitted_decision)
+    draft_ids = await _draft_mixed_sections(env, outline_id, s3_fake)
+    report_service = ReportService(
+        env["sessionmaker"], DraftSectionService(env["sessionmaker"], s3_fake)
+    )
+    report = await report_service.create_or_get_report(
+        ReportAssemblyDraft(outline_id=outline_id, draft_section_ids=tuple(draft_ids.values()))
+    )
+    check_service = ReportCheckService(env["sessionmaker"], report_service)
+    check = await check_service.run_report_checks(report.report_id)
+    assert check.status == CHECK_STATUS_FAIL
+    # check fail 可被 read-side verify 接受（合法 fail），Audit 也能在其上创建。
+    await check_service.verify_check_result_integrity(check.check_result_id)
+
+    fake = FakeAuditModel(decision_factory=pass_decision)
+    audit_service = _audit_service(env, fake, check_service)
+    audit = await audit_service.create_or_get_audit(
+        ReportAuditRequest(report_id=report.report_id, check_result_id=check.check_result_id)
+    )
+    assert audit.audit_status == "pass"
+    assert audit.recommended_route == "pass"
+
+    service = _review_service(env, audit_service)
+    with pytest.raises(ReviewActionCheckNotPass):
+        await service.create_or_get_action(audit.audit_id)
+    assert await _action_count(env["sessionmaker"]) == 0
 
 
 async def test_action_rewrite_routes_to_rewrite(env, monkeypatch, connection_uri) -> None:

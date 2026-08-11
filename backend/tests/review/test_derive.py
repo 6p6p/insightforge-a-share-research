@@ -28,6 +28,7 @@ from app.audit.contracts import (
     ReviewIssue,
     VerifiedReportAudit,
 )
+from app.report.contracts import CHECK_STATUS_FAIL, CHECK_STATUS_PASS
 from app.review.contracts import (
     ACTION_TYPE_FINALIZE,
     ACTION_TYPE_HUMAN_REVIEW,
@@ -44,7 +45,11 @@ from app.review.derive import (
     derive_human_request_payload,
     normalize_comment,
 )
-from app.review.errors import ReviewActionAuditInvalid, ReviewInputError
+from app.review.errors import (
+    ReviewActionAuditInvalid,
+    ReviewActionCheckNotPass,
+    ReviewInputError,
+)
 
 
 def _issue(
@@ -70,7 +75,20 @@ def _issue(
     )
 
 
-def _audit(*, issues: list[ReviewIssue], status: str, route: str) -> VerifiedReportAudit:
+class _CheckStub:
+    """最小 deterministic CheckResult 投影（derive 只读 `.status`，Gate 0 门禁）。"""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+
+def _audit(
+    *,
+    issues: list[ReviewIssue],
+    status: str,
+    route: str,
+    check_status: str = CHECK_STATUS_PASS,
+) -> VerifiedReportAudit:
     """构造最小 `VerifiedReportAudit`（只填 derive 用到的字段；verified 链留空）。"""
     audit = object.__new__(VerifiedReportAudit)
     for field, value in {
@@ -88,7 +106,7 @@ def _audit(*, issues: list[ReviewIssue], status: str, route: str) -> VerifiedRep
         "audit_fingerprint": "0" * 64,
         "issues": tuple(issues),
         "verified_report": None,
-        "verified_check": None,
+        "verified_check": _CheckStub(check_status),
     }.items():
         object.__setattr__(audit, field, value)
     return audit
@@ -108,6 +126,29 @@ def _rewrite_audit(*issues: ReviewIssue) -> VerifiedReportAudit:
 def test_action_type_finalize() -> None:
     audit = _audit(issues=[], status=AUDIT_STATUS_PASS, route=AUDIT_ROUTE_PASS)
     assert derive_action_type(audit) == ACTION_TYPE_FINALIZE
+
+
+def test_action_type_finalize_requires_check_pass() -> None:
+    """Gate 0：Check=fail + Audit=pass → 拒绝 finalize（Agent 不得覆盖确定性失败）。"""
+    audit = _audit(
+        issues=[],
+        status=AUDIT_STATUS_PASS,
+        route=AUDIT_ROUTE_PASS,
+        check_status=CHECK_STATUS_FAIL,
+    )
+    with pytest.raises(ReviewActionCheckNotPass):
+        derive_action_type(audit)
+
+
+def test_action_type_non_finalize_ignores_check_status() -> None:
+    """非 finalize（fail 路线）不受 check 门禁影响——check fail 时 rewrite 仍合法。"""
+    audit = _audit(
+        issues=[_issue(issue_type="wording_overclaim")],
+        status=AUDIT_STATUS_FAIL,
+        route=AUDIT_ROUTE_REWRITE,
+        check_status=CHECK_STATUS_FAIL,
+    )
+    assert derive_action_type(audit) == ACTION_TYPE_REWRITE
 
 
 def test_action_type_rewrite() -> None:

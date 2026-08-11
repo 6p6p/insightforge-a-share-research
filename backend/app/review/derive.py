@@ -36,6 +36,7 @@ from app.audit.contracts import (
     ReviewIssue,
     VerifiedReportAudit,
 )
+from app.report.contracts import CHECK_STATUS_PASS
 from app.review.contracts import (
     ACTION_TYPE_FINALIZE,
     ACTION_TYPE_HUMAN_REVIEW,
@@ -44,7 +45,7 @@ from app.review.contracts import (
     MAX_COMMENT_LENGTH,
     RESEARCH_NEED_CODE_BY_ISSUE_TYPE,
 )
-from app.review.errors import ReviewActionAuditInvalid, ReviewInputError
+from app.review.errors import ReviewActionAuditInvalid, ReviewActionCheckNotPass, ReviewInputError
 
 # issue_type 常量（与 app/audit/contracts.AUDIT_ISSUE_TYPES 同步维护）。
 _ISSUE_UNRESOLVED_CONFLICT = "unresolved_conflict"
@@ -80,10 +81,20 @@ def _issue_in_action_class(issue: ReviewIssue, action_type: str) -> bool:
 
 
 def derive_action_type(verified_audit: VerifiedReportAudit) -> str:
-    """spec F：audit status / recommended_route → action_type（严格确定性）。"""
+    """spec F + Gate 0：audit status / recommended_route → action_type（严格确定性）。
+
+    **finalize 安全门禁（spec A Gate 0）**：finalize 必须同时通过 Check + Audit——
+    除 audit_status=pass + recommended_route=pass 外，deterministic CheckResult
+    必须也是 `pass`（Agent Audit 不得覆盖 deterministic Check failure）。直接复用
+    `VerifiedReportAudit.verified_check.status`（`verify_audit_integrity` 已 verified
+    的 CheckResult，不复制 ReportCheckService replay 逻辑）；Check=fail →
+    `ReviewActionCheckNotPass`（0 write）。
+    """
     status = verified_audit.audit_status
     route = verified_audit.recommended_route
     if status == AUDIT_STATUS_PASS and route == AUDIT_ROUTE_PASS:
+        if verified_audit.verified_check.status != CHECK_STATUS_PASS:
+            raise ReviewActionCheckNotPass()
         return ACTION_TYPE_FINALIZE
     if status == AUDIT_STATUS_FAIL and route == AUDIT_ROUTE_REWRITE:
         return ACTION_TYPE_REWRITE

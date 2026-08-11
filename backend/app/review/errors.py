@@ -36,6 +36,19 @@ class ReviewActionAuditInvalid(ReviewError):
     message = "review action audit status/route invalid"
 
 
+class ReviewActionCheckNotPass(ReviewError):
+    """finalize 安全门禁（spec A Gate 0）：deterministic CheckResult 未通过。
+
+    finalize 必须同时通过 Check + Audit：除 audit_status=pass +
+    recommended_route=pass 外，`VerifiedReportAudit.verified_check.status` 必须也是
+    `pass`。Agent Audit 不得覆盖 deterministic Check failure——Check=fail 时即使
+    Audit 人为/fixture=pass 也必须拒绝 finalize（0 ReviewAction write）。
+    """
+
+    code = "review_action_check_not_pass"
+    message = "review action finalize requires deterministic check to pass"
+
+
 class ReviewActionNotFound(ReviewError):
     """review_action_id 不存在。"""
 
