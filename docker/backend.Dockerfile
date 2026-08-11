@@ -30,9 +30,11 @@ RUN find /usr/local/lib/python3.12 /app -type f -name '*.pyc' -delete \
 # 非 root 用户运行
 RUN useradd --create-home --uid 10001 appuser
 
-# 原始归档挂载点：预创建并授予 appuser。
+# 原始归档 + 导出归档挂载点：预创建并授予 appuser。
 # named volume 首次挂载时复制目录内容并继承所有权，否则 volume 归 root，应用无写权限。
-RUN mkdir -p /app/data/raw && chown -R appuser:appuser /app/data
+# `/app/data/exports`（stage 6C 内容寻址导出存储）必须同步预创建，否则新 volume
+# 以 root 初始化 → appuser 写导出时 PermissionError（ready 的 export_storage 探针失败）。
+RUN mkdir -p /app/data/raw /app/data/exports && chown -R appuser:appuser /app/data
 
 USER appuser
 

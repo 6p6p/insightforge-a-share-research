@@ -47,7 +47,10 @@ RENDERER_NAME_BY_FORMAT = {
 }
 RENDERER_VERSION_BY_FORMAT = {
     EXPORT_FORMAT_MARKDOWN: 1,
-    EXPORT_FORMAT_DOCX: 1,
+    # docx v2：确定性 OOXML ZIP normalize（固定 ZipInfo date_time/metadata +
+    # entry 排序重写）——v1 输出随保存时刻漂移；bump → 新 renderer 身份 →
+    # 新 input fingerprint → 新 Export 行（旧行按 v1 原样保留）。
+    EXPORT_FORMAT_DOCX: 2,
     EXPORT_FORMAT_PDF: 1,
 }
 

@@ -13,6 +13,8 @@
 """
 
 import hashlib
+import time
+import zipfile
 from datetime import date, datetime
 from io import BytesIO
 from uuid import UUID, uuid4
@@ -160,6 +162,11 @@ def _fingerprint_args(
     }
     args.update(overrides)
     return args
+
+
+# ZIP 时间戳固定值：合法 DOS 时间最小值（1980-01-01 00:00:00），与 renderer 内
+# `_ZIP_FIXED_TIMESTAMP` 同步（ZIP normalize 后所有 entry date_time == 该值）。
+_ZIP_FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 # ---------------------------------------------------------------- pack numbering (spec J)
@@ -334,6 +341,45 @@ def test_render_docx_deterministic_and_reopenable() -> None:
     assert any("公司经营现金流净额同比增长20%。[1][2]" in t for t in texts)
     assert "证据附录" in texts
     assert any(AUDIT_NOTE_HUMAN_APPROVED in t for t in texts)
+
+
+def test_render_docx_zip_timestamp_boundary_determinism() -> None:
+    """A1/A3：同 pack 跨 ZIP 秒级时间边界 → 字节必须精确一致。
+
+    当前实现只固定 core_properties.created/modified，python-docx 保存时
+    ZipInfo.date_time 取**保存时刻**（秒级）——连续两次立即 render 落在同一秒
+    会“脆弱通过”；跨过秒级边界 → 字节漂移，sha256 不等。本测试强制跨边界，
+    同时校验每个 ZIP entry 的 date_time 固定为合法 ZIP 最小值（1980-01-01）。
+    """
+    pack = _sample_pack(audit_note=AUDIT_NOTE_HUMAN_APPROVED)
+
+    first = render_docx(pack)
+    with zipfile.ZipFile(BytesIO(first)) as zf:
+        infos = zf.infolist()
+    assert len(infos) >= 4, "OOXML 容器至少应有核心 XML part"
+    # 所有 entry 的 ZIP timestamp 必须固定，不允许随保存时刻漂移。
+    assert all(info.date_time == _ZIP_FIXED_TIMESTAMP for info in infos)
+
+    # 跨过可见的秒级时间边界再渲染同一 pack → 必须得到完全相同的字节。
+    now = time.monotonic()
+    time.sleep(1.05 - (now % 1.0))
+    second = render_docx(pack)
+    assert second == first, "同 pack 跨时间边界 → 字节必须精确一致"
+
+    # 重写不改 entry content：python-docx 重开成功，中文标题/正文/附录保留。
+    document = Document(BytesIO(second))
+    texts = [p.text for p in document.paragraphs]
+    assert "贵州茅台 基本面研究报告（600519）" in texts
+    assert any("公司经营现金流净额同比增长20%。[1][2]" in t for t in texts)
+    assert "证据附录" in texts
+    assert any(AUDIT_NOTE_HUMAN_APPROVED in t for t in texts)
+
+
+def test_render_docx_different_pack_different_bytes() -> None:
+    """不同 pack（正文/引用不同）→ docx 字节必须不同（normalize 不破坏区分度）。"""
+    pack_a = _sample_pack()
+    pack_b = _sample_pack(audit_note=AUDIT_NOTE_HUMAN_APPROVED)
+    assert render_docx(pack_b) != render_docx(pack_a)
 
 
 def test_render_pdf_deterministic_and_chinese_readable() -> None:

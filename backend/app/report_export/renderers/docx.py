@@ -4,13 +4,19 @@
 （E1..En）+ audit_note。段落 `text` 原样（**不改写句子**），编号标记由
 citation_numbers 追加。输出为内存 bytes（reopen-able）。
 
-**字节确定性**：显式写死 core properties（created/modified 用固定值），
-避免默认模板的时间戳导致两次渲染字节不同（verify_export_integrity 按
-content_sha256 比对归档字节）。
+**字节确定性（v2）**：
+1. core properties：显式写死 created/modified（固定值，与真实创建时间无关）；
+2. **OOXML ZIP normalize**：python-docx 保存时 `ZipInfo.date_time` 取保存时刻
+   （秒级），同一 pack 在不同 wall-clock 时间渲染会得到不同字节（sha256 不等）
+   ——只固定 core properties 不够。`_normalize_docx_zip` 把容器重写为规范形式：
+   entry 按 filename 稳定排序 + 每个 ZipInfo 固定 date_time / compress_type /
+   create_system / external_attr / extra / comment（等元数据），**不改 entry
+   content 字节**。输出仍是合法 DOCX（python-docx 重开只依赖 XML part 内容）。
 """
 
 from datetime import datetime
 from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 from zoneinfo import ZoneInfo
 
 from docx import Document
@@ -21,6 +27,13 @@ from app.report_export.contracts import ExportReportPack
 
 # 固定 core properties（字节确定性；与真实创建时间无关）。
 _FIXED_CREATED = datetime(1970, 1, 1, tzinfo=ZoneInfo("UTC"))
+
+# 合法 ZIP（DOS）时间戳最小值：所有 entry date_time 固定为该值（字节确定性，
+# 不依赖系统时区 / 保存时刻）。
+_ZIP_FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+# entry 固定 unix mode（regular file 0600）。create_system=3（Unix）时外部属性
+# 高 16 位为 mode 位——统一固定，消除跨系统 DOS/Unix 与 mtime 位漂移。
+_ZIP_FIXED_EXTERNAL_ATTR = 0o100600 << 16
 
 # 中文正文西文字体 + East Asian 字体（Word 渲染时按名称解析，text 提取不受影响）。
 _LATIN_FONT = "Calibri"
@@ -64,7 +77,44 @@ def render_docx(pack: ExportReportPack) -> bytes:
 
     buffer = BytesIO()
     document.save(buffer)
-    return buffer.getvalue()
+    return _normalize_docx_zip(buffer.getvalue())
+
+
+def _normalize_docx_zip(data: bytes) -> bytes:
+    """确定性 OOXML ZIP normalize（spec A2；renderer v2）。
+
+    python-docx 保存时 `ZipInfo.date_time` 取保存时刻（秒级），同一 pack 在
+    不同 wall-clock 时间渲染会得到不同字节——只固定 core properties 不够。
+    这里把 OOXML 容器重写为规范形式：
+
+    - entry 按 filename 稳定排序（容器内顺序与 python-docx 内部次序解耦）；
+    - 每个 ZipInfo 固定 date_time / compress_type / create_system /
+      external_attr / extra / comment（及 create/extract version、
+      internal_attr）——任何会导致 byte drift 的 metadata 全部钉死；
+    - **不改变 entry content 字节**：同内容 deflate 在同一 zlib 实现下字节
+      确定（`verify_export_integrity` 按 content_sha256 比对归档字节）。
+
+    输出仍是合法 DOCX：python-docx 打开只依赖 [Content_Types].xml 与
+    word/document.xml 的 content，不受 metadata / entry 顺序影响。
+    """
+    output = BytesIO()
+    with ZipFile(BytesIO(data), "r") as zipped:
+        infos = sorted(zipped.infolist(), key=lambda item: item.filename)
+        with ZipFile(output, "w", compression=ZIP_DEFLATED) as out:
+            for info in infos:
+                content = zipped.read(info.filename)
+                fixed = ZipInfo(info.filename)
+                fixed.date_time = _ZIP_FIXED_TIMESTAMP
+                fixed.compress_type = ZIP_DEFLATED
+                fixed.comment = b""
+                fixed.extra = b""
+                fixed.create_system = 3
+                fixed.create_version = 20
+                fixed.extract_version = 20
+                fixed.internal_attr = 0
+                fixed.external_attr = _ZIP_FIXED_EXTERNAL_ATTR
+                out.writestr(fixed, content)
+    return output.getvalue()
 
 
 def _set_default_east_asian(document: Document) -> None:
