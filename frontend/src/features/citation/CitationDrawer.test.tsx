@@ -99,6 +99,38 @@ const htmlEvidence: EvidenceCitationResponse = {
   },
 };
 
+/** text/html 且无可用外部 URL（source_url 为空）→ 原文按钮禁用。 */
+const noUrlHtmlEvidence: EvidenceCitationResponse = {
+  ...htmlEvidence,
+  provenance: {
+    ...(htmlEvidence.provenance as DocumentProvenance),
+    source_url: '',
+  },
+};
+
+/** application/pdf 且 locator.page_number 缺失 → PDF 正常打开，不带 #page。 */
+const pdfNoPageEvidence: EvidenceCitationResponse = {
+  ...documentEvidence,
+  provenance: {
+    ...documentProvenance,
+    locator: {
+      locator_type: 'pdf_page',
+      block_ordinal: null,
+      char_start: null,
+      char_end: null,
+      ordinal: null,
+      tag: null,
+      xpath: null,
+      element_id: null,
+      page_number: null,
+      line_index: 5,
+      bbox: null,
+      page_width: null,
+      page_height: null,
+    },
+  },
+};
+
 const macroEvidence: EvidenceCitationResponse = {
   evidence: {
     evidence_card_id: 'ev-macro-1',
@@ -162,7 +194,7 @@ beforeEach(() => {
 });
 
 describe('CitationDrawer（Stage 6B.2 spec K/L/N）', () => {
-  it('evidence citation：渲染证据头 + claim relations + Document provenance + PDF 按钮', async () => {
+  it('evidence citation：渲染证据头 + claim relations + Document provenance + PDF 按钮（#page）', async () => {
     mocks.getEvidenceCitation.mockResolvedValue(documentEvidence);
     renderDrawer({ kind: 'evidence', evidenceCardId: 'ev-doc-1' });
 
@@ -173,23 +205,63 @@ describe('CitationDrawer（Stage 6B.2 spec K/L/N）', () => {
     expect(screen.getByText('来源追溯（Document）')).toBeInTheDocument();
     expect(mocks.getEvidenceCitation).toHaveBeenCalledWith('t1', 'ev-doc-1');
 
-    // PDF → 可点 anchor，href 指向后端 content 端点（antd icon 的 aria-label 会混入
-    // accessible name，故用文本 + closest 定位 anchor 而非 getByRole）
+    // PDF → 可点 anchor，href 指向后端 content 端点并带 #page=<locator.page_number>
+    //（antd icon 的 aria-label 会混入 accessible name，故用文本 + closest 定位）
     const pdfButton = screen.getByText('打开原文 PDF').closest('a');
     expect(pdfButton).not.toBeNull();
-    expect(pdfButton).toHaveAttribute('href', `${API_BASE_URL}/source-records/src-1/content`);
+    expect(pdfButton).toHaveAttribute(
+      'href',
+      `${API_BASE_URL}/source-records/src-1/content#page=2`,
+    );
+    expect(pdfButton).toHaveAttribute('target', '_blank');
+    expect(pdfButton?.getAttribute('rel')).toContain('noopener');
+    expect(pdfButton?.getAttribute('rel')).toContain('noreferrer');
   });
 
-  it('non-PDF 媒体类型 → 原文按钮禁用（spec N）', async () => {
+  it('PDF 且 locator.page_number 缺失 → 正常打开，不伪造 #page（Gate B）', async () => {
+    mocks.getEvidenceCitation.mockResolvedValue(pdfNoPageEvidence);
+    renderDrawer({ kind: 'evidence', evidenceCardId: 'ev-doc-1' });
+
+    await screen.findByText('来源追溯（Document）');
+    const pdfButton = screen.getByText('打开原文 PDF').closest('a');
+    expect(pdfButton).toHaveAttribute('href', `${API_BASE_URL}/source-records/src-1/content`);
+    expect(pdfButton?.getAttribute('href')).not.toContain('#page=');
+  });
+
+  it('HTML citation：context text / xpath 正常 + 「打开原始网页」= source_url（Gate A）', async () => {
     mocks.getEvidenceCitation.mockResolvedValue(htmlEvidence);
+    renderDrawer({ kind: 'evidence', evidenceCardId: 'ev-doc-1' });
+
+    await screen.findByText('来源追溯（Document）');
+    // 引用上下文纯文本正常显示
+    expect(screen.getByText(/…营收增长 12%…/)).toBeInTheDocument();
+    // html_dom locator 包含 tag / ordinal / xpath
+    expect(screen.getByText('HTML 节点 <p> #3 /html/body/p[3]')).toBeInTheDocument();
+    // 「打开原始网页」指向外部 source_url，target/rel 安全
+    const webButton = screen.getByText('打开原始网页').closest('a');
+    expect(webButton).not.toBeNull();
+    expect(webButton).toHaveAttribute('href', 'https://example.com/report');
+    expect(webButton).toHaveAttribute('target', '_blank');
+    expect(webButton?.getAttribute('rel')).toContain('noopener');
+    expect(webButton?.getAttribute('rel')).toContain('noreferrer');
+    // 不应有 PDF 链接 / 禁用按钮
+    expect(screen.queryByText('打开原文 PDF')).not.toBeInTheDocument();
+    expect(screen.queryByText('原文预览不可用')).not.toBeInTheDocument();
+  });
+
+  it('non-PDF 且无可用外部 URL → 原文按钮禁用（spec N），不调用归档内容 API', async () => {
+    mocks.getEvidenceCitation.mockResolvedValue(noUrlHtmlEvidence);
     renderDrawer({ kind: 'evidence', evidenceCardId: 'ev-doc-1' });
 
     await screen.findByText('来源追溯（Document）');
     const disabled = screen.getByText('原文预览不可用').closest('button');
     expect(disabled).not.toBeNull();
     expect(disabled).toBeDisabled();
-    // 不应渲染 PDF 链接
+    // 不应渲染 PDF 链接 / 原始网页链接
     expect(screen.queryByText('打开原文 PDF')).not.toBeInTheDocument();
+    expect(screen.queryByText('打开原始网页')).not.toBeInTheDocument();
+    // 未触发任何对归档 content 端点的请求（本组件始终不请求它；这里只断言无 PDF 锚点）
+    expect(document.querySelector(`a[href*="/source-records/"]`)).toBeNull();
   });
 
   it('macro evidence citation：渲染 Macro provenance（指标/系列/归档产物）', async () => {

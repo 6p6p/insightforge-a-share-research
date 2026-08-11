@@ -7,9 +7,11 @@ ReportTab 的观点 / 证据 Tag、EvidenceTab 的「查看引用」都通过页
 - `{ kind: 'claim', claimId }` → `GET /tasks/{id}/citations/claims/{claim}`：
   claim 元数据 + evidence relations（relation 保留 supports / contradicts / context）。
 
-「原文打开策略」（spec N）：后端 content 端点只服务 PDF（其他媒体类型 415）。
-因此 Document provenance 里 `media_type === 'application/pdf'` 才提供「打开原文」
-按钮（新标签页打开流式 PDF），否则显示禁用提示，不请求不可解析的原始字节。
+「原文打开策略」（spec N + 6B.2 Gate A/B）：后端 content 端点只服务 PDF（其他
+媒体类型 415）。PDF → 打开流式端点并带 `#page=<n>`（locator.page_number，前端不
+重新计算）；非 PDF 且 source_url 为 http/https → 直接打开原始网页（target=_blank
++ rel=noopener noreferrer）；否则禁用提示，不请求不可解析的原始字节。绝不使用
+dangerouslySetInnerHTML / 不内联渲染归档 HTML。
 
 任何层都只读，绝不展示 fingerprint / storage_key / prompt / raw provider JSON。
  */
@@ -235,29 +237,72 @@ function ProvenanceBlock({ provenance }: { provenance: EvidenceProvenance }): Re
   return <MacroProvenanceBlock provenance={provenance} />;
 }
 
-/** 原文打开策略（spec N）：后端 content 端点只服务 PDF，其余媒体类型 415。 */
-function OriginalTextButton({ sourceId, mediaType }: { sourceId: string; mediaType: string }): React.JSX.Element {
-  if (mediaType !== 'application/pdf') {
+/** 前端只接受 http/https 外部 URL（杜绝 javascript:/data:/file:）。 */
+function isHttpUrl(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/** 原文打开策略（spec N + Gate A/B）：
+- PDF → 后端 content 端点（`#page=<n>` 由后端 provenance 的 locator.page_number
+  决定，前端不重新计算；无 page_number 则正常打开 PDF）；
+- 非 PDF 且 source_url 为 http/https → 打开原始网页（target=_blank +
+  rel=noopener noreferrer，不经过后端、不渲染归档 HTML）；
+- 其余 → 禁用提示（不请求不可解析的原始字节）。
+ */
+function OriginalTextButton({
+  sourceId,
+  mediaType,
+  sourceUrl,
+  pageNumber,
+}: {
+  sourceId: string;
+  mediaType: string;
+  sourceUrl: string | null;
+  pageNumber: number | null;
+}): React.JSX.Element {
+  if (mediaType === 'application/pdf') {
+    const base = `${API_BASE_URL}/source-records/${sourceId}/content`;
+    const url = pageNumber != null ? `${base}#page=${pageNumber}` : base;
     return (
-      <Tooltip title={`当前媒体类型（${mediaType}）暂不支持原文预览，仅支持 PDF`}>
-        <Button size="small" icon={<FilePdfOutlined />} disabled>
-          原文预览不可用
-        </Button>
-      </Tooltip>
+      <Button
+        size="small"
+        type="primary"
+        icon={<LinkOutlined />}
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        打开原文 PDF
+      </Button>
     );
   }
-  const url = `${API_BASE_URL}/source-records/${sourceId}/content`;
+  if (isHttpUrl(sourceUrl)) {
+    return (
+      <Button
+        size="small"
+        icon={<LinkOutlined />}
+        href={sourceUrl as string}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        打开原始网页
+      </Button>
+    );
+  }
   return (
-    <Button
-      size="small"
-      type="primary"
-      icon={<LinkOutlined />}
-      href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-    >
-      打开原文 PDF
-    </Button>
+    <Tooltip title={`当前媒体类型（${mediaType}）暂不支持原文预览，仅支持 PDF`}>
+      <Button size="small" icon={<FilePdfOutlined />} disabled>
+        原文预览不可用
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -278,6 +323,9 @@ function locatorLabel(locator: CitationLocator | null): string {
   }
   if (locator.ordinal != null) {
     parts.push(`#${locator.ordinal}`);
+  }
+  if (locator.xpath) {
+    parts.push(locator.xpath);
   }
   return parts.join(' ');
 }
@@ -311,7 +359,12 @@ function DocumentProvenanceBlock({ provenance }: { provenance: DocumentProvenanc
         </Descriptions.Item>
       </Descriptions>
       <div style={{ marginTop: 8 }}>
-        <OriginalTextButton sourceId={provenance.source_id} mediaType={provenance.media_type} />
+        <OriginalTextButton
+          sourceId={provenance.source_id}
+          mediaType={provenance.media_type}
+          sourceUrl={provenance.source_url}
+          pageNumber={provenance.locator?.page_number ?? null}
+        />
       </div>
       <div style={{ marginTop: 12 }}>
         <Text type="secondary">引用上下文（≤5000 字符）</Text>

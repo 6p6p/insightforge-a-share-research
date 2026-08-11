@@ -4,9 +4,12 @@
 conflict_indexes, evidence_gap_indexes}。section_id 是 outline 符号键（如 "S2"），
 与审核 issue 的 section_id 关联。
 
-Stage 6B.2（spec O/Q）：段落里的「观点」「证据」Tag 可点击 → 打开
-CitationDrawer（evidence / claim citation）；ReviewsTab「定位报告」通过
-`locateSection`/`locateParagraph` 传进来 → 高亮并滚动到对应段落。
+Stage 6B.2（spec O/Q + Final Gate C/D）：段落里的「观点」「证据」Tag 可点击 →
+打开 CitationDrawer（evidence / claim citation）；ReviewsTab「定位报告」通过
+`locateSection`/`locateParagraph` 传进来 → 高亮并滚动。定位规则：
+- section + paragraph → 定位段落（`report-para-<section_id>:<index>`）；
+- section only → 定位整节容器（`report-section-<section_id>`），不伪造 paragraph；
+- 目标不存在 → 轻量警告「未找到对应报告位置，报告版本可能已变化。」（不静默）。
  */
 
 import { useEffect, useState } from 'react';
@@ -41,9 +44,24 @@ interface Props {
   locateParagraph?: number | null;
 }
 
-/** 段落定位 key：`<section_id>:<paragraph_index>`（paragraph_index 为 -1 表示定位整节）。 */
-function locateKeyOf(sectionId: string, paragraphIndex: number | null): string {
-  return `${sectionId}:${paragraphIndex ?? -1}`;
+/** 定位目标：`section + paragraph` → 段落；`section only` → 整节容器。 */
+type LocateTarget =
+  | { kind: 'paragraph'; key: string }
+  | { kind: 'section'; key: string }
+  | null;
+
+/** 从 URL 定位参数解析定位目标（不做 null → -1 伪造）。 */
+function locateTargetOf(
+  locateSection: string | null | undefined,
+  locateParagraph: number | null | undefined,
+): LocateTarget {
+  if (!locateSection) {
+    return null;
+  }
+  if (locateParagraph != null) {
+    return { kind: 'paragraph', key: `${locateSection}:${locateParagraph}` };
+  }
+  return { kind: 'section', key: locateSection };
 }
 
 export function ReportTab({
@@ -58,7 +76,7 @@ export function ReportTab({
     refetchInterval: 5000,
   });
 
-  const locateKey = locateSection ? locateKeyOf(locateSection, locateParagraph ?? null) : null;
+  const locateTarget = locateTargetOf(locateSection, locateParagraph);
 
   if (isError) {
     return <Alert type="error" showIcon message={artifactErrorMessage(error, '加载报告失败')} />;
@@ -73,7 +91,7 @@ export function ReportTab({
     <ReportContent
       data={data}
       onOpenCitation={onOpenCitation}
-      locateKey={locateKey}
+      locateTarget={locateTarget}
     />
   );
 }
@@ -81,31 +99,41 @@ export function ReportTab({
 function ReportContent({
   data,
   onOpenCitation,
-  locateKey,
+  locateTarget,
 }: {
   data: ReportArtifactResponse;
   onOpenCitation?: (target: CitationTarget) => void;
-  locateKey: string | null;
+  locateTarget: LocateTarget;
 }): React.JSX.Element {
-  const [located, setLocated] = useState<string | null>(null);
+  const [located, setLocated] = useState<LocateTarget>(null);
+  const [locateMissing, setLocateMissing] = useState(false);
 
-  // 数据就绪后再执行滚动，避免 locateKey 到达时正文尚未渲染。
+  // URL 定位参数到达时记录目标；数据/重取变化时重新定位。
   useEffect(() => {
-    setLocated(locateKey);
-  }, [locateKey]);
+    setLocated(locateTarget);
+  }, [locateTarget]);
 
+  // 数据就绪后：存在 → 高亮 + 平滑滚动；不存在 → 轻量警告（不静默、不自动替换）。
   useEffect(() => {
     if (!located) {
       return;
     }
-    const el = document.getElementById(`report-para-${located}`);
+    setLocateMissing(false);
+    const elementId =
+      located.kind === 'paragraph' ? `report-para-${located.key}` : `report-section-${located.key}`;
+    const el = document.getElementById(elementId);
     if (el && typeof el.scrollIntoView === 'function') {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else {
+      setLocateMissing(true);
     }
   }, [located, data.report_id]);
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
+      {locateMissing ? (
+        <Alert type="warning" showIcon message="未找到对应报告位置，报告版本可能已变化。" />
+      ) : null}
       <Card title="报告概览">
         <Descriptions size="small" column={2}>
           <Descriptions.Item label="报告 ID">
@@ -150,10 +178,23 @@ function SectionBlock({
   section: ReportSectionArtifact;
   last: boolean;
   onOpenCitation?: (target: CitationTarget) => void;
-  located: string | null;
+  located: LocateTarget;
 }): React.JSX.Element {
+  const isSectionLocated = located?.kind === 'section' && located.key === section.section_id;
   return (
-    <div>
+    <div
+      id={`report-section-${section.section_id}`}
+      style={
+        isSectionLocated
+          ? {
+              background: '#fffbe6',
+              border: '1px solid #faad14',
+              borderRadius: 6,
+              padding: 12,
+            }
+          : undefined
+      }
+    >
       <Space wrap size="small" style={{ marginBottom: 8 }}>
         <Text strong>{section.title}</Text>
         <Tag>{section.section_id}</Tag>
@@ -164,8 +205,9 @@ function SectionBlock({
       ) : (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           {section.paragraphs.map((paragraph) => {
-            const key = locateKeyOf(section.section_id, paragraph.paragraph_index);
-            const isLocated = located === key;
+            const key = `${section.section_id}:${paragraph.paragraph_index}`;
+            const isLocated =
+              located?.kind === 'paragraph' && located.key === key;
             return (
               <div
                 key={paragraph.paragraph_index}

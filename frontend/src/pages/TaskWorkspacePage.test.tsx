@@ -92,11 +92,11 @@ const workspaceData: TaskWorkspaceResponse = {
   research_chain_active: false,
 };
 
-function renderPage(): ReturnType<typeof render> {
+function renderPage(initialEntries: string[] = ['/tasks/task-1']): ReturnType<typeof render> {
   return render(
     <ConfigProvider locale={zhCN}>
       <QueryClientProvider client={createTestQueryClient()}>
-        <MemoryRouter initialEntries={['/tasks/task-1']}>
+        <MemoryRouter initialEntries={initialEntries}>
           <Routes>
             <Route path="/tasks/:taskId" element={<TaskWorkspacePage />} />
           </Routes>
@@ -430,5 +430,31 @@ describe('TaskWorkspacePage citation navigation（Stage 6B.2 spec O/P/Q）', () 
     expect(located).not.toBeNull();
     // jsdom 会把 #fffbe6 序列化为 rgb(255, 251, 230)
     expect(located?.getAttribute('style')).toContain('rgb(255, 251, 230)');
+  });
+
+  it('section-only 定位（?tab=report&section=S2，无 paragraph）→ 高亮整节容器（Gate C）', async () => {
+    mocks.getTaskReport.mockResolvedValue(reportData);
+    renderPage(['/tasks/task-1?tab=report&section=S2']);
+
+    await screen.findByText('营收分析');
+    const sectionEl = document.getElementById('report-section-S2');
+    expect(sectionEl).not.toBeNull();
+    expect(sectionEl?.getAttribute('style')).toContain('rgb(255, 251, 230)');
+    // 不伪造 paragraph -1：不存在 report-para-S2:-1
+    expect(document.getElementById('report-para-S2:-1')).toBeNull();
+  });
+
+  it('locator 目标不存在 → 显示轻量警告，不静默不 crash（Gate D）', async () => {
+    mocks.getTaskReport.mockResolvedValue(reportData);
+    renderPage(['/tasks/task-1?tab=report&section=S999&paragraph=10']);
+
+    await screen.findByText('营收分析');
+    expect(
+      await screen.findByText('未找到对应报告位置，报告版本可能已变化。'),
+    ).toBeInTheDocument();
+    // 没有自动高亮任何真实段落
+    expect(document.getElementById('report-para-S999:10')).toBeNull();
+    const s2 = document.getElementById('report-section-S2');
+    expect(s2?.getAttribute('style') ?? '').not.toContain('rgb(255, 251, 230)');
   });
 });
