@@ -23,6 +23,7 @@ def test_state_keys_exact() -> None:
         "backflow_round",
         "backflow_plan_id",
         "backflow_new_evidence_card_ids",
+        "backflow_manual_reasons",
         "backflow_progress",
         "backflow_manual_reason",
         "fulfillment_id",

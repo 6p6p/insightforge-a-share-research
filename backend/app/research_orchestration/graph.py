@@ -113,13 +113,9 @@ def build_top_level_research_orchestration_graph(
         make_execute_supplemental_research_node(dependencies),
     )
     builder.add_node("verify_progress", make_verify_progress_node(dependencies))
-    builder.add_node(
-        "prepare_updated_analysis", make_prepare_updated_analysis_node(dependencies)
-    )
+    builder.add_node("prepare_updated_analysis", make_prepare_updated_analysis_node(dependencies))
     builder.add_node("fulfill_request", make_fulfill_request_node(dependencies))
-    builder.add_node(
-        "research_backflow_manual", make_research_backflow_manual_node(dependencies)
-    )
+    builder.add_node("research_backflow_manual", make_research_backflow_manual_node(dependencies))
 
     builder.add_edge(START, "ensure_plan")
     builder.add_edge("ensure_plan", "ensure_route")

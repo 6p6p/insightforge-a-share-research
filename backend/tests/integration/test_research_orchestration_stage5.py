@@ -26,9 +26,10 @@ Concentrated Cases 1-7（spec W）：
 """
 
 import asyncio
+import math
 import time
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -41,6 +42,20 @@ from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.evidence.contracts import (
+    EvidenceConfidence,
+    EvidenceType,
+    compute_research_question_sha256,
+)
+from app.evidence.extractor.contracts import (
+    EvidenceExtractionDecision,
+    EvidenceExtractionItem,
+    EvidenceExtractionReason,
+)
+from app.rag.embedding.contracts import EmbeddingModelSpec
+from app.rag.index.service import VectorIndexService
+from app.rag.retrieval.service import RetrievalService
+from app.research_backflow.executor import ResearchBackflowExecutor
 from app.research_orchestration.contracts import RESEARCH_BACKFLOW_LIMIT_REACHED
 from app.research_orchestration.dependencies import ResearchOrchestrationDependencies
 from app.research_orchestration.recovery import ResearchOrchestrationRecoveryCoordinator
@@ -64,13 +79,18 @@ from app.stage4.runner import Stage4WorkflowRunner
 from app.stage5.runner import Stage5WorkflowRunner
 from app.storage.raw_store import LocalRawArtifactStore
 from app.synthesis.service import SynthesisService
+from app.vectorstore.client import ChromaManager
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from tests.analysis.financial.fakes import FakeFinancialAnalysisModel
 from tests.audit.fakes import FakeAuditModel, pass_decision
 from tests.draft_section.fakes import FakeDraftSectionModel, valid_decision_for
+from tests.embedding.fakes import FakeEmbeddingProvider
+from tests.evidence.fakes import FakeEvidenceExtractionModel
+from tests.integration.research_fulfillment_helpers import _unique_quote
 from tests.integration.test_claim_analysis_service import (
     _seed_document_card as _seed_claim_doc_card,
 )
+from tests.integration.test_evidence_card_service import _seed_html_source
 from tests.integration.test_report_audit_service import (
     human_review_decision,
     research_decision,
@@ -81,6 +101,7 @@ from tests.integration.test_research_planning_service import (
 )
 from tests.integration.test_revision_service import _cleanup_with_revisions
 from tests.integration.test_stage4_workflow import (
+    _AS_OF,
     _QUESTION,
     _claim_count_for_company,
     _good_models,
@@ -137,6 +158,18 @@ async def sessionmaker(database):
 @pytest_asyncio.fixture
 async def connection_uri() -> str:
     return to_postgres_connection_uri(get_settings().database_url)
+
+
+@pytest_asyncio.fixture
+async def chroma_manager() -> ChromaManager:
+    settings = get_settings()
+    manager = ChromaManager(
+        host=settings.chroma_host,
+        port=settings.chroma_port,
+        ssl=settings.chroma_ssl,
+        timeout_seconds=settings.chroma_timeout_seconds,
+    )
+    yield manager
 
 
 @pytest_asyncio.fixture
@@ -309,11 +342,14 @@ def _orchestration_deps(
     models=None,
     revision_model=None,
     backflow_executor=None,
+    preparation=None,
 ) -> ResearchOrchestrationDependencies:
     """完整顶层 deps：plan/router/stage4/synthesis/stage5，fake prepare/fulfill/models。
 
     `backflow_executor`（7A.2B.3）：注入后 research_required 触发 backflow loop；
     真实 `research_backflow_service` 始终绑定（stage5 deps 内构造，0 model call）。
+    `preparation`：默认 `_FakePreparation(prep_outcomes)`；真实 executor E2E（任务 A）
+    注入 `_DynamicPreparation`（实时查询 DB 卡，backflow 新卡自动纳入 Stage4 attempt2）。
     """
     prep_outcomes = prep_outcomes or [(True, request, [])]
     plan_service = _planner(sessionmaker)
@@ -332,7 +368,7 @@ def _orchestration_deps(
         sessionmaker=sessionmaker,
         plan_service=plan_service,
         router=router,
-        preparation=_FakePreparation(prep_outcomes),
+        preparation=preparation or _FakePreparation(prep_outcomes),
         fulfillment=_FakeFulfillment(),
         child_service=child_service,
         stage4_runner=stage4_runner,
@@ -1038,16 +1074,822 @@ async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_u
         assert executor.calls == 2
         s_runs, s_results = await _synthesis_counts(sessionmaker)
         assert (s_runs, s_results) == (3, 3)
-        assert (
-            await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is not None
-        )
-        assert (
-            await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is not None
-        )
+        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is not None
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is not None
 
         # 6 条 run（stage4 x3 + stage5 x3）全部 completed（child 终态），顶层 waiting_human。
         runs = await _runs_for_task(sessionmaker, task_id)
         assert len(runs) == 6
+        assert all(r["status"] == "completed" for r in runs)
+    finally:
+        await manager.close()
+
+
+# ================================================================ 任务 A：真实 Top-level
+# Backflow + Real Chroma E2E（7A.2B.3 Final Gate）
+
+_TEST_SPEC = EmbeddingModelSpec(
+    model_id="BAAI/bge-small-zh-v1.5",
+    dimension=512,
+    normalize_embeddings=True,
+    query_instruction="为这个句子生成表示以用于检索相关文章：",
+    max_input_tokens=512,
+    revision="test-revision-001",
+)
+
+
+async def _drop_collection(client, collection_name: str) -> None:
+    """隔离：删除独立测试 collection；缺失不掩盖真实断言。"""
+    try:
+        await client.delete_collection(collection_name)
+    except Exception:
+        pass
+
+
+def _decision_for_text(text: str) -> EvidenceExtractionDecision:
+    """按真实 hit.text 生成确定性 decision（quote 在该 chunk 内唯一可解析）。"""
+    if not any(text[i] != text[i - 1] for i in range(1, len(text))):
+        return EvidenceExtractionDecision(
+            relevant=False, items=[], reason_code=EvidenceExtractionReason.NOT_RELEVANT
+        )
+    return EvidenceExtractionDecision(
+        relevant=True,
+        items=[
+            EvidenceExtractionItem(
+                evidence_statement="贵州茅台发布经营相关披露材料。",
+                evidence_type=EvidenceType.METRIC,
+                quote_text=_unique_quote(text, 20),
+                confidence=EvidenceConfidence.HIGH,
+            )
+        ],
+    )
+
+
+class _PerHitExtractionModel(FakeEvidenceExtractionModel):
+    """对每个真实 RetrievalHit 按其文本生成确定性 decision（多 hit 场景）。
+
+    record (research_question, RetrievalHit) 到 .calls —— hits 全部来自真实
+    检索链（Chroma query + PG hydrate），**不在测试中手工构造**。
+    """
+
+    async def extract(self, research_question: str, retrieval_hit):
+        self.calls.append((research_question, retrieval_hit))
+        return _decision_for_text(retrieval_hit.text)
+
+
+class _DynamicPreparation:
+    """每次 prepare_research 实时查询 research_question 匹配的 document 证据卡，
+    动态构建 stage4_request。
+
+    首启（executor 未跑）→ 只 seed 卡；backflow 轮次（真实 executor 已创建新卡）
+    → 新卡按 research_question_sha256 自动纳入 → Stage4 attempt2 真实分析新证据
+    （**不手工把新卡塞给 graph**，graph 经 prepare 查询自然纳入，等价 production
+    doc_evidence_pool 过滤）。
+    """
+
+    def __init__(self, sessionmaker, env, ids, research_question):
+        self._sessionmaker = sessionmaker
+        self._env = env
+        self._ids = ids
+        self._research_question = research_question
+        self.calls = 0
+
+    async def prepare_research(self, research_plan_id):
+        self.calls += 1
+        rq_sha = compute_research_question_sha256(self._research_question)
+        async with self._sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT evidence_card_id FROM evidence_cards "
+                        "WHERE company_id = :cid AND research_question_sha256 = :sha "
+                        "ORDER BY created_at, evidence_card_id"
+                    ).bindparams(cid=self._env["company_id"], sha=rq_sha)
+                )
+            ).all()
+        doc_ids = [row[0] for row in rows]
+        assert doc_ids, "dynamic preparation requires matching document evidence cards"
+        request = Stage4WorkflowRequest(
+            task_id=self._env["task_id"],
+            company_id=self._env["company_id"],
+            research_question=self._research_question,
+            analysis_as_of=_AS_OF,
+            analysis_work_items=[
+                {"item_id": "biz", "analysis_type": "business", "evidence_card_ids": doc_ids},
+                {"item_id": "rsk", "analysis_type": "risk", "evidence_card_ids": doc_ids[:1]},
+                {
+                    "item_id": "fin",
+                    "analysis_type": "financial",
+                    "calculation_ids": [self._ids["calc"]],
+                    "additional_evidence_ids": [],
+                },
+                {
+                    "item_id": "mac",
+                    "analysis_type": "macro",
+                    "macro_driver_evidence_ids": [self._ids["macro_card"]],
+                    "company_evidence_ids": [self._ids["company_doc"]],
+                },
+                {
+                    "item_id": "val",
+                    "analysis_type": "valuation",
+                    "comparison_ids": [self._ids["comparison"]],
+                },
+            ],
+        )
+        return ResearchPreparationResult(
+            research_plan_id=research_plan_id,
+            resolved=(),
+            module_inputs=(),
+            missing_needs=(),
+            ready_for_analysis=True,
+            stage4_request=request,
+        )
+
+
+async def test_top_level_backflow_real_chroma_e2e(
+    env, monkeypatch, connection_uri, chroma_manager
+) -> None:
+    """真实 Top-level LangGraph + 真实 ResearchBackflowExecutor + 真实 Chroma 检索链。
+
+    Stage4 a1 → Stage5 a1 → audit research_required → plan_supplemental_research →
+    execute_supplemental_research（**真实检索链**：RetrievalService → Chroma → PG
+    hydrate → EvidenceExtractionService → 新 EvidenceCard）→ verify_progress →
+    prepare_updated_analysis（动态 prepare 纳入新卡）→ Stage4 a2 → 新 Synthesis S2 →
+    fulfill_request → Stage5 a2 continuation → audit pass → completed。
+
+    禁止：手工构造 RetrievalHit / FakeBackflowExecutor / 预塞 EvidenceCard。seed
+    只允许：archived Parsed Source + ChunkSet + ready VectorIndex（真实 Chroma 向量）。
+    """
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+    company_id = env["company_id"]
+
+    # 1. 真实 Source Library：annual_report + ready vector index（独立 collection）。
+    src, _, chunk_set_id, chunks = await _seed_html_source(env, document_type="annual_report")
+    collection_name = f"test_toplevel_backflow_{uuid4().hex[:12]}"
+    embedding = FakeEmbeddingProvider(_TEST_SPEC)
+    await VectorIndexService(
+        sessionmaker=sessionmaker,
+        embedding_provider=embedding,
+        chroma=chroma_manager,
+        collection_name=collection_name,
+    ).index_chunk_set(chunk_set_id)
+
+    # 2. 真实 executor（真实检索链；FakeEmbeddingProvider / FakeEvidenceExtractionModel）。
+    extractor = _PerHitExtractionModel()
+    retrieval = RetrievalService(
+        sessionmaker=sessionmaker,
+        embedding_provider=embedding,
+        chroma=chroma_manager,
+        collection_name=collection_name,
+    )
+    executor = ResearchBackflowExecutor(sessionmaker, retrieval, extractor)
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    client = await chroma_manager.get_client()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        audit = _SequencedAuditDecision(research_decision, pass_decision)
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request=_request(env, ids),
+            audit_model=_audit_model(audit),
+            preparation=_DynamicPreparation(sessionmaker, env, ids, _QUESTION),
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        final = await runner.run_orchestration(orchestration_id)
+
+        # completed，backflow round1 真实消费。
+        assert final["current_phase"] == "completed"
+        assert final["backflow_round"] == 1
+        assert final.get("fulfillment_id")
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+
+        # 拓扑：Stage4/Stage5 attempts=[1,2]；attempt2 记录 source_research_request_id。
+        child4_1 = await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=1)
+        child4_2 = await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=2)
+        child5_1 = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=1)
+        child5_2 = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2)
+        assert child4_1 is not None and child5_1 is not None
+        assert child4_2 is not None and child5_2 is not None
+        assert child4_1["source_research_request_id"] is None
+        assert child4_2["source_research_request_id"] is not None
+        assert child5_2["source_research_request_id"] is not None
+        assert child4_1["run_id"] != child4_2["run_id"]
+        assert child5_1["run_id"] != child5_2["run_id"]
+
+        # 真实检索链命中：extractor 收到真实 RetrievalHit（不手工构造）。
+        assert extractor.calls, "graph 必须触发真实 supplemental retrieval"
+        for question, hit in extractor.calls:
+            assert question == _QUESTION
+            assert hit.source_id == src
+            assert hit.company_id == company_id
+            assert hit.chunk_set_id == chunk_set_id
+            assert hit.text in {c.text for c in chunks}  # 真实 PG hydrate 正文
+            assert math.isfinite(hit.distance)
+
+        # 新 EvidenceCard 来自真实检索 hit 的 chunk + frozen plan question hash。
+        rq_sha = compute_research_question_sha256(_QUESTION)
+        hit_chunk_ids = {str(hit.chunk_id) for _, hit in extractor.calls}
+        async with sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT evidence_card_id::text, research_question_sha256, "
+                        "chunk_id::text, source_id::text, company_id::text FROM evidence_cards "
+                        "WHERE company_id = :cid"
+                    ).bindparams(cid=company_id)
+                )
+            ).mappings()
+            cards = [dict(r) for r in rows]
+        new_from_hit = [
+            c
+            for c in cards
+            if c["source_id"] == str(src)
+            and c["chunk_id"] in hit_chunk_ids
+            and c["research_question_sha256"] == rq_sha
+        ]
+        assert new_from_hit, "backflow 必须从真实检索 hit 创建新 evidence 卡"
+        for card in new_from_hit:
+            assert card["company_id"] == str(company_id)
+
+        # S2 != S1：两个 synthesis run + 两个 result，run fingerprint 不同。
+        assert await _synthesis_counts(sessionmaker) == (2, 2)
+        async with sessionmaker() as session:
+            run_rows = (
+                await session.execute(
+                    text(
+                        "SELECT synthesis_id::text, synthesis_fingerprint FROM "
+                        "claim_synthesis_runs WHERE company_id = :cid ORDER BY created_at"
+                    ).bindparams(cid=company_id)
+                )
+            ).mappings()
+            runs = [dict(r) for r in run_rows]
+        assert len(runs) == 2
+        assert runs[0]["synthesis_id"] != runs[1]["synthesis_id"]
+        assert runs[0]["synthesis_fingerprint"] != runs[1]["synthesis_fingerprint"]
+
+        # Fulfillment 存在；request + plan + fulfillment 各 1 行。
+        assert await _count(sessionmaker, "research_backflow_requests") == 1
+        assert await _count(sessionmaker, "research_backflow_plans") == 1
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+
+        # 4 条 run（stage4 x2 + stage5 x2）全部 completed。
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+
+        # 顶层 checkpoint 携带 research_request_id / backflow_plan_id / fulfillment_id。
+        checkpoint = await runner.read_orchestration_checkpoint(orchestration_id)
+        assert checkpoint.get("research_request_id")
+        assert checkpoint.get("backflow_plan_id")
+        assert checkpoint.get("fulfillment_id")
+    finally:
+        await _drop_collection(client, collection_name)
+        await manager.close()
+
+
+# ================================================================ 任务 B：Backflow durable
+# recovery fault injection（B1-B5，7A.2B.3 Final Gate）
+
+
+class _GatedPreparation:
+    """包装 `prepare_research`：第 `gate_on_call` 次调用后 `await gate.wait()`。
+
+    crash window 用：挂起时 checkpoint 已写到前一节点返回处，cancel 后同顶层
+    thread 从 gate 节点重新执行。
+    """
+
+    def __init__(self, wrapped, gate: asyncio.Event, gate_on_call: int) -> None:
+        self._wrapped = wrapped
+        self._gate = gate
+        self._gate_on_call = gate_on_call
+        self.calls = 0
+
+    async def prepare_research(self, research_plan_id: UUID) -> ResearchPreparationResult:
+        self.calls += 1
+        result = await self._wrapped.prepare_research(research_plan_id)
+        if self.calls == self._gate_on_call:
+            await self._gate.wait()
+        return result
+
+
+async def _backflow_request2(
+    env, request: Stage4WorkflowRequest, *, statement: str, source_url: str
+) -> tuple[Stage4WorkflowRequest, dict]:
+    """seed 一张 `_QUESTION` 新卡并返回 request2（backflow 后纳入 Stage4 attempt2）。"""
+    extra = await _seed_claim_doc_card(
+        env,
+        statement=statement,
+        source_url=source_url,
+        research_question=_QUESTION,
+    )
+    return _with_extra_card(request, extra["evidence_card_id"]), extra
+
+
+async def _count_is(sessionmaker, table: str, expected: int) -> bool:
+    return await _count(sessionmaker, table) == expected
+
+
+async def _synthesis_counts_is(sessionmaker, expected: tuple[int, int]) -> bool:
+    return await _synthesis_counts(sessionmaker) == expected
+
+
+async def test_backflow_recovery_b1_evidence_before_attempt2(
+    env, monkeypatch, connection_uri
+) -> None:
+    """B1：evidence created before Stage4 attempt2，checkpoint 在 verify_progress /
+    prepare_updated_analysis 之间 → 重启同顶层 thread → executor 不重跑（evidence
+    replay 幂等）→ Stage4 attempt2 只执行一次（不得 attempt3）→ completed。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    request = _request(env, ids)
+    request2, extra = await _backflow_request2(
+        env,
+        request,
+        statement="贵州茅台 2026 年新增经销商渠道证据（B1）。",
+        source_url="https://www.xinhuanet.com/2026/0810/b1extra.htm",
+    )
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra["evidence_card_id"],)])
+        gate = asyncio.Event()
+
+        # 进程 A：gate 在 backflow 的 prepare_updated_analysis（prepare_research 第
+        # 4 次调用；前 3 次是首启 prepare / ensure_stage4_child / run_or_resume_stage4）。
+        # 挂起时新卡已创建、checkpoint 停在 verify_progress 之后、Stage4 attempt2 未创建。
+        prep_a = _FakePreparation(
+            [
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request2, []),
+            ]
+        )
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(_SequencedAuditDecision(research_decision, pass_decision)),
+            prep_outcomes=[(True, request, [])],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+            preparation=_GatedPreparation(prep_a, gate, 4),
+        )
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        task = asyncio.create_task(runner.run_orchestration(orchestration_id))
+
+        # 等待 backflow 进入 prepare_updated_analysis 的 gate：executor 已执行（新卡
+        # 产出）且 Stage4 attempt2 尚未创建（prepare gate 挂起）。executor.calls==1
+        # 只在 prepare_research 第 4 次调用（gate 挂起）时成立——首启 3 次 prepare
+        # 在 executor 前，gate 挂起后 executor.calls 不再增长。
+        async def _executor_ran() -> bool:
+            return executor.calls == 1
+
+        await _wait_until(_executor_ran, message="backflow executor 未在超时前执行")
+        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=2) is None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 新 evidence 卡已落库（executor 产出前）。
+        assert await _count(sessionmaker, "evidence_cards") >= 1
+
+        # 进程 B：coordinator 恢复同顶层 thread → Stage4 attempt2 只一次，executor
+        # 不重跑（evidence replay）→ Stage5 attempt2 continuation → completed。
+        executor_b = _FakeBackflowExecutor()
+        deps_b = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(pass_decision),
+            prep_outcomes=[(True, request2, [])],
+            models=_ref_aware_models(),
+            backflow_executor=executor_b,
+        )
+        runner_b = ResearchOrchestrationRunner(sessionmaker, manager, deps_b)
+        coordinator = ResearchOrchestrationRecoveryCoordinator(sessionmaker, runner_b)
+        assert await coordinator.recover_orchestrations() == 1
+
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+        final = await runner_b.read_orchestration_checkpoint(orchestration_id)
+        assert final.get("backflow_round") == 1
+        assert final.get("fulfillment_id")
+        # 不得 attempt3；attempt2 记录 source_research_request_id。
+        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is None
+        child4_2 = await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=2)
+        assert child4_2 is not None
+        assert child4_2["source_research_request_id"] is not None
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2) is not None
+        assert executor.calls == 1
+        assert executor_b.calls == 0  # evidence replay：不重跑 executor
+        assert await _synthesis_counts(sessionmaker) == (2, 2)
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+    finally:
+        await manager.close()
+
+
+async def test_backflow_recovery_b2_s2_no_fulfillment(env, monkeypatch, connection_uri) -> None:
+    """B2：Stage4 attempt2 completed + S2 存在但 0 Fulfillment → 重启 → attach exact
+    (orchestration, stage4, attempt2) + 读已有 S2 + fulfill exactly once（不得新
+    Stage4 attempt2）。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    request = _request(env, ids)
+    request2, extra = await _backflow_request2(
+        env,
+        request,
+        statement="贵州茅台 2026 年新增经销商渠道证据（B2）。",
+        source_url="https://www.xinhuanet.com/2026/0810/b2extra.htm",
+    )
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra["evidence_card_id"],)])
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(_SequencedAuditDecision(research_decision, pass_decision)),
+            prep_outcomes=[
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request2, []),
+            ],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        gate = asyncio.Event()
+        orig_fulfill = deps.backflow_service.fulfill_request
+
+        async def gated_fulfill(research_request_id, synthesis_result_id):
+            await gate.wait()  # crash window：collect_synthesis 之后、fulfill 之前
+            return await orig_fulfill(research_request_id, synthesis_result_id)
+
+        monkeypatch.setattr(deps.backflow_service, "fulfill_request", gated_fulfill)
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        task = asyncio.create_task(runner.run_orchestration(orchestration_id))
+
+        # crash 条件：S2 已落库（synthesis==(2,2)）且 0 fulfillment（gate 挂起）。
+        async def _executor_ran() -> bool:
+            return executor.calls == 1
+
+        await _wait_until(_executor_ran, message="backflow executor 未在超时前执行")
+        await _wait_until(
+            lambda: _synthesis_counts_is(sessionmaker, (2, 2)),
+            message="S2 未在超时前落库",
+        )
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 0
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 进程 B：coordinator 恢复 → 读已有 S2 → fulfill exactly once（不新 Stage4
+        # attempt2）→ Stage5 attempt2 continuation → completed。
+        deps_b = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(pass_decision),
+            prep_outcomes=[(True, request, [])],
+            models=_ref_aware_models(),
+            backflow_executor=_FakeBackflowExecutor(),
+        )
+        runner_b = ResearchOrchestrationRunner(sessionmaker, manager, deps_b)
+        coordinator = ResearchOrchestrationRecoveryCoordinator(sessionmaker, runner_b)
+        assert await coordinator.recover_orchestrations() == 1
+
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+        final = await runner_b.read_orchestration_checkpoint(orchestration_id)
+        assert final.get("fulfillment_id")
+        # 不得新 Stage4 attempt2（仍只有 1、2），不重跑 executor。
+        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is None
+        child4_2 = await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=2)
+        assert child4_2 is not None
+        assert child4_2["run_id"] == final["stage4_child_run_id"]
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2) is not None
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+        assert executor.calls == 1
+        assert await _synthesis_counts(sessionmaker) == (2, 2)
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+    finally:
+        await manager.close()
+
+
+async def test_backflow_recovery_b3_fulfillment_no_stage5(env, monkeypatch, connection_uri) -> None:
+    """B3：Fulfillment F2 存在但无 Stage5 attempt2 → 重启 → build continuation
+    request(F2) → create exact Stage5 attempt2 once（不得重复 fulfillment / Stage4
+    attempt2）。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    request = _request(env, ids)
+    request2, extra = await _backflow_request2(
+        env,
+        request,
+        statement="贵州茅台 2026 年新增经销商渠道证据（B3）。",
+        source_url="https://www.xinhuanet.com/2026/0810/b3extra.htm",
+    )
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra["evidence_card_id"],)])
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(_SequencedAuditDecision(research_decision, pass_decision)),
+            prep_outcomes=[
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request2, []),
+            ],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        gate = asyncio.Event()
+        orig_ensure5 = deps.child_service.ensure_stage5_child
+
+        async def gated_ensure5(
+            orchestration_id,
+            stage5_request,
+            *,
+            attempt_no=1,
+            source_research_request_id=None,
+        ):
+            if attempt_no == 2:
+                await gate.wait()  # crash window：F2 已落库、Stage5 attempt2 未创建
+            return await orig_ensure5(
+                orchestration_id,
+                stage5_request,
+                attempt_no=attempt_no,
+                source_research_request_id=source_research_request_id,
+            )
+
+        monkeypatch.setattr(deps.child_service, "ensure_stage5_child", gated_ensure5)
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        task = asyncio.create_task(runner.run_orchestration(orchestration_id))
+
+        # crash 条件：F2 已落库（fulfillments==1）且 Stage5 attempt2 未创建。
+        await _wait_until(
+            lambda: _count_is(sessionmaker, "research_backflow_fulfillments", 1),
+            message="F2 未在超时前落库",
+        )
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2) is None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 进程 B：coordinator 恢复 → build continuation request(F2) → Stage5 attempt2
+        # once（不得重复 fulfillment / Stage4 attempt2）→ completed。
+        deps_b = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(pass_decision),
+            prep_outcomes=[(True, request, [])],
+            models=_ref_aware_models(),
+            backflow_executor=_FakeBackflowExecutor(),
+        )
+        runner_b = ResearchOrchestrationRunner(sessionmaker, manager, deps_b)
+        coordinator = ResearchOrchestrationRecoveryCoordinator(sessionmaker, runner_b)
+        assert await coordinator.recover_orchestrations() == 1
+
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+        assert await _count(sessionmaker, "research_backflow_plans") == 1
+        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is None
+        child5_2 = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2)
+        assert child5_2 is not None
+        assert child5_2["source_research_request_id"] is not None
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is None
+        assert executor.calls == 1
+        assert await _synthesis_counts(sessionmaker) == (2, 2)
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+    finally:
+        await manager.close()
+
+
+async def test_backflow_recovery_b4_stage5_done_no_projection(
+    env, monkeypatch, connection_uri
+) -> None:
+    """B4：Stage5 attempt2 completed 但 top-level checkpoint 未投影 completed → 重启
+    → attach exact Stage5 attempt2 + 读 child checkpoint → completed（不得 Stage5
+    attempt3 / 重复 execute）。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    request = _request(env, ids)
+    request2, extra = await _backflow_request2(
+        env,
+        request,
+        statement="贵州茅台 2026 年新增经销商渠道证据（B4）。",
+        source_url="https://www.xinhuanet.com/2026/0810/b4extra.htm",
+    )
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra["evidence_card_id"],)])
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(_SequencedAuditDecision(research_decision, pass_decision)),
+            prep_outcomes=[
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request2, []),
+            ],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        gate = asyncio.Event()
+        calls = {"n": 0}
+        orig_execute5 = deps.stage5_runner.execute_stage5
+
+        async def gated_execute5(run_id, req):
+            calls["n"] += 1
+            result = await orig_execute5(run_id, req)
+            if calls["n"] == 2:
+                await gate.wait()  # crash window：attempt2 completed、顶层未投影
+            return result
+
+        monkeypatch.setattr(deps.stage5_runner, "execute_stage5", gated_execute5)
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        task = asyncio.create_task(runner.run_orchestration(orchestration_id))
+
+        async def _attempt2_completed() -> bool:
+            child = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2)
+            if child is None:
+                return False
+            return await _run_status(sessionmaker, UUID(child["run_id"])) == "completed"
+
+        await _wait_until(_attempt2_completed, message="Stage5 attempt2 未在超时前 completed")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 进程 B：coordinator 恢复 → attach exact Stage5 attempt2 + 读 child checkpoint
+        # → completed（execute 不再调用，不得 attempt3）。
+        deps_b = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(pass_decision),
+            prep_outcomes=[(True, request, [])],
+            models=_ref_aware_models(),
+            backflow_executor=_FakeBackflowExecutor(),
+        )
+        calls_b = {"execute": 0}
+        orig_b = deps_b.stage5_runner.execute_stage5
+
+        async def counted_execute(run_id, req):
+            calls_b["execute"] += 1
+            return await orig_b(run_id, req)
+
+        monkeypatch.setattr(deps_b.stage5_runner, "execute_stage5", counted_execute)
+        runner_b = ResearchOrchestrationRunner(sessionmaker, manager, deps_b)
+        coordinator = ResearchOrchestrationRecoveryCoordinator(sessionmaker, runner_b)
+        assert await coordinator.recover_orchestrations() == 1
+
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+        assert row["current_phase"] == "completed"
+        assert calls_b["execute"] == 0  # Stage5 attempt2 completed → 跳过 execute
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is None
+        assert await _count(sessionmaker, "reports") == 2
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+    finally:
+        await manager.close()
+
+
+async def test_backflow_recovery_b5_running_child_skipped(env, monkeypatch, connection_uri) -> None:
+    """B5：backflow Stage5 attempt2 child 仍 running → coordinator 不得 pretend
+    completed / collect synthesis / create next child（跳过）；reconcile（running →
+    FAILED worker_restarted）后再恢复 → completed。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    request = _request(env, ids)
+    request2, extra = await _backflow_request2(
+        env,
+        request,
+        statement="贵州茅台 2026 年新增经销商渠道证据（B5）。",
+        source_url="https://www.xinhuanet.com/2026/0810/b5extra.htm",
+    )
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra["evidence_card_id"],)])
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(_SequencedAuditDecision(research_decision, pass_decision)),
+            prep_outcomes=[
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request2, []),
+                (True, request2, []),
+            ],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        gate = asyncio.Event()
+        calls = {"n": 0}
+        orig_run_graph = deps.stage5_runner._run_graph
+
+        async def gated_run_graph(run_id, thread_id, *, initial_state=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                await gate.wait()  # crash window：attempt2 claim 转 running、graph 未跑
+            return await orig_run_graph(run_id, thread_id, initial_state=initial_state)
+
+        monkeypatch.setattr(deps.stage5_runner, "_run_graph", gated_run_graph)
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        task = asyncio.create_task(runner.run_orchestration(orchestration_id))
+
+        async def _attempt2_running() -> bool:
+            child = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2)
+            if child is None:
+                return False
+            return await _run_status(sessionmaker, UUID(child["run_id"])) == "running"
+
+        await _wait_until(_attempt2_running, message="Stage5 attempt2 未在超时前 running")
+
+        # 进程 B：coordinator 不得恢复 running backflow child（rolling restart）——
+        # 不 pretend completed / 不 collect synthesis / 不 create next child。
+        deps_b = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(pass_decision),
+            prep_outcomes=[(True, request, [])],
+            models=_ref_aware_models(),
+            backflow_executor=_FakeBackflowExecutor(),
+        )
+        runner_b = ResearchOrchestrationRunner(sessionmaker, manager, deps_b)
+        coordinator = ResearchOrchestrationRecoveryCoordinator(sessionmaker, runner_b)
+        assert await coordinator.recover_orchestrations() == 0
+
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "running"  # 未被误标 failed / completed
+        assert row["current_phase"] == "research_backflow"
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+        assert await _synthesis_counts(sessionmaker) == (2, 2)  # 未 collect 新 synthesis
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is None
+
+        # cancel 进程 A → reconcile（running → FAILED worker_restarted）→ coordinator
+        # 恢复同顶层 thread → Stage5 attempt2 resume → completed。
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        recovery = WorkflowRecoveryService(sessionmaker)
+        assert (await recovery.reconcile_orphaned_runs()).marked_failed == 1
+        assert await coordinator.recover_orchestrations() == 1
+
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+        assert row["current_phase"] == "completed"
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is None
+        assert await _count(sessionmaker, "reports") == 2
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
         assert all(r["status"] == "completed" for r in runs)
     finally:
         await manager.close()

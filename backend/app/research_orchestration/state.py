@@ -47,6 +47,11 @@ class ResearchOrchestrationState(TypedDict, total=False):
     # （canonical 排序；verify_progress 据此判定 progress，prepare_updated_analysis
     # 据此组装新 Stage4 输入——v1 只判 EvidenceCard）。
     backflow_new_evidence_card_ids: list[str]
+    # execute_supplemental_research 投影的 plan 级 manual_required_reasons（7A.2B.3
+    # scope 冻结：structured financial/macro/valuation refresh 不在 automatic 文档
+    # 补充研究范围 → verify_progress 给稳定 reason structured_data_refresh_required，
+    # **不误报 research_backflow_no_progress**）。
+    backflow_manual_reasons: list[str]
     # verify_progress 结果：True → 有进度（进入 Stage4 attempt N+1）；False →
     # manual_required（reason=research_backflow_no_progress）。
     backflow_progress: bool

@@ -566,6 +566,11 @@ def make_execute_supplemental_research_node(deps: ResearchOrchestrationDependenc
             "backflow_new_evidence_card_ids": [
                 str(card_id) for card_id in result.new_evidence_card_ids
             ],
+            # 7A.2B.3 scope 冻结：plan 派生时检测到的 structured 需求（非白名单
+            # issue，不在 automatic 文档补充研究范围）→ 投影给 verify_progress，
+            # 使其给稳定 manual reason（structured_data_refresh_required）而非
+            # 误报 research_backflow_no_progress。
+            "backflow_manual_reasons": plan.plan_payload.get("manual_required_reasons", []),
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         }
 
@@ -579,12 +584,24 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
     verified deterministic artifact 且新 Stage4 SynthesisResult ≠ 旧且新 run
     fingerprint ≠ 旧）。backflow executor 只产出 EvidenceCard；deterministic
     artifact（macro/calculation/valuation）是 production pools 的既有产物，非本
-    loop 新增——分支 B 预留。无进度 → `research_backflow_manual`（稳定 reason
-    research_backflow_no_progress，复用 ResearchBackflowNoProgress 语义）。
+    loop 新增——分支 B 预留。无进度 → `research_backflow_manual`：若 plan 已投影
+    structured 需求（`backflow_manual_reasons` 非空）→ 稳定 reason
+    structured_data_refresh_required（**不误报 no_progress**）；否则
+    research_backflow_no_progress（复用 ResearchBackflowNoProgress 语义）。
     """
 
     async def verify_progress(state) -> dict:
         has_progress = bool(state.get("backflow_new_evidence_card_ids"))
+        # 7A.2B.3 scope 冻结：无新增证据卡且 plan 已投影 structured 需求
+        # （financial/macro/valuation refresh）→ 给稳定 manual reason
+        # （structured_data_refresh_required），**不误报 research_backflow_no_progress**；
+        # 否则维持 research_backflow_no_progress。
+        manual_reasons = state.get("backflow_manual_reasons") or []
+        manual_reason = (
+            manual_reasons[0]
+            if (not has_progress and manual_reasons)
+            else (None if has_progress else RESEARCH_BACKFLOW_NO_PROGRESS)
+        )
         await _persist_phase(
             deps.sessionmaker,
             state["orchestration_id"],
@@ -593,9 +610,7 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
         )
         return {
             "backflow_progress": has_progress,
-            "backflow_manual_reason": (
-                None if has_progress else RESEARCH_BACKFLOW_NO_PROGRESS
-            ),
+            "backflow_manual_reason": manual_reason,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         }
 

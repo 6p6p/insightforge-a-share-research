@@ -21,6 +21,7 @@ from app.report.contracts import VerifiedReport
 from app.report_outline.contracts import OutlineSection, VerifiedReportOutline
 from app.research_backflow.contracts import (
     MAX_QUERIES_PER_NEED,
+    RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH,
     RESEARCH_NEED_DESCRIPTIONS,
     SUPPLEMENTAL_RESEARCH_STRATEGY_NAME,
     SUPPLEMENTAL_RESEARCH_STRATEGY_VERSION,
@@ -226,11 +227,43 @@ def test_plan_multiple_whitelist_codes_each_a_need_spec() -> None:
 
 
 def test_plan_no_whitelist_issues_yields_empty_need_specs() -> None:
-    """全部非白名单 issue → 空 need_specs（执行阶段据此 manual_required）。"""
+    """全部非白名单 issue → 空 need_specs + structured manual_required_reasons
+    （执行阶段据此给 structured_data_refresh_required，**不误报 no_progress**）。"""
     request = _verified_request(issues=[_issue(issue_type="wording_overclaim")])
     payload = derive_research_backflow_plan_payload(request, {})
     assert payload["need_specs"] == []
     assert payload["max_queries_per_need"] == MAX_QUERIES_PER_NEED
+    assert payload["manual_required_reasons"] == [
+        RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH
+    ]
+
+
+def test_plan_whitelist_only_manual_required_reasons_empty() -> None:
+    """纯白名单（文档补充研究可自动处理）issue → 无 manual_required_reasons。"""
+    request = _verified_request(
+        issues=[
+            _issue(issue_type="unsupported_by_evidence"),
+            _issue(issue_type="weak_source_quality"),
+        ]
+    )
+    payload = derive_research_backflow_plan_payload(request, {})
+    assert payload["manual_required_reasons"] == []
+
+
+def test_plan_structured_issue_adds_manual_required_reason_even_with_whitelist() -> None:
+    """structured issue 混入白名单 issue → 两者都投影：need_specs 只含白名单，
+    manual_required_reasons 恒含 structured_data_refresh_required。"""
+    request = _verified_request(
+        issues=[
+            _issue(issue_type="insufficient_evidence", section_id="S2"),
+            _issue(issue_type="valuation_overreach"),  # structured → manual
+        ]
+    )
+    payload = derive_research_backflow_plan_payload(request, {})
+    assert _need_codes(payload) == ["insufficient_evidence"]
+    assert payload["manual_required_reasons"] == [
+        RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH
+    ]
 
 
 # ---------------------------------------------------------------- query 模板（spec K frozen）

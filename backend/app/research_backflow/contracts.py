@@ -108,6 +108,10 @@ RESEARCH_BACKFLOW_NEED_STATUS_MANUAL_REQUIRED = "manual_required"
 RESEARCH_BACKFLOW_MANUAL_REASON_SOURCE_ACQUISITION = "source_acquisition_required"
 RESEARCH_BACKFLOW_MANUAL_REASON_INDEX_NOT_READY = "index_not_ready"
 RESEARCH_BACKFLOW_MANUAL_REASON_EVIDENCE_NOT_EXTRACTED = "evidence_not_extracted"
+# 7A.2B.3 scope 冻结：structured financial/macro/valuation refresh 不在 automatic
+# 文档补充研究范围（需 provider/network 或新数据）→ 明确 manual_required，
+# **不误报 research_backflow_no_progress**。
+RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH = "structured_data_refresh_required"
 
 
 def _canonical_dumps(payload: dict) -> bytes:

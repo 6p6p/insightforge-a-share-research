@@ -75,8 +75,17 @@
   causal_overreach / insufficient_evidence）映射 strategy。
 - **v1 只研究已有 Source Library**：Document 走真实
   RetrievalService→Chroma→PG hydrate→EvidenceExtraction→EvidenceCard（不手工伪造
-  RetrievalHit）；Macro/Financial 复用 production services；无满足 source →
-  manual_required / source_acquisition_required，不假装完成。
+  RetrievalHit）；无满足 source → manual_required / source_acquisition_required，
+  不假装完成。
+- **7A.2B.3 scope 冻结（2026-08-12）**：Document supplemental research = **automatic**
+  （`existing_source_library` 策略，5 个白名单 need codes）；Structured financial /
+  macro / valuation refresh = **controlled / manual（7A Product Gate 处理，不在
+  automatic loop）**——structured audit issue（evidence_mismatch /
+  claim_misrepresentation / wording_overclaim / omitted_counterevidence /
+  unresolved_conflict / valuation_overreach）不在自动文档补充研究范围（需 provider /
+  network / LLM 或新数据），plan 派生时投影稳定 reason
+  `structured_data_refresh_required`（`RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH`）
+  → verify_progress 给 manual_required，**不误报 research_backflow_no_progress**。
 - **Progress**：新增 relevant EvidenceCard 或新增 verified deterministic artifact 且
   新 Stage4 SynthesisResult ≠ 旧 且 新 SynthesisRun fingerprint ≠ 旧；复用
   `ResearchBackflowNoProgress`；不重检索旧 Evidence 算 progress。
@@ -102,7 +111,9 @@
   backflow loop（plan_supplemental_research → execute_supplemental_research →
   verify_progress → prepare_updated_analysis → Stage4/5 attempt → fulfill_request →
   build_stage5_continuation_request → route again）；recovery 显式排除 waiting_human
-  （research_backflow / waiting_manual 等人工不自动恢复）。验证：非集成 2061 + 集成
+  （research_backflow / waiting_manual 等人工不自动恢复）；**scope 冻结**：Document
+  supplemental=automatic、Structured refresh=controlled/manual
+  （structured_data_refresh_required，不误报 no_progress）。验证：非集成 2061 + 集成
   987 全绿，ruff 干净，alembic 0044（head）。
 - **本轮不做（边界）**：live external provider 自动抓取、官方披露隐藏接口、
   Playwright、Web 大改、Stage7B Evaluation。

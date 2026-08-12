@@ -75,9 +75,7 @@ def create_research_orchestration_dependencies(
     index_builder = SourceIndexBuilder(
         sessionmaker,
         ChunkingService(sessionmaker),
-        VectorIndexService(
-            sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma
-        ),
+        VectorIndexService(sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma),
     )
     backflow_executor = ResearchBackflowExecutor(
         sessionmaker,

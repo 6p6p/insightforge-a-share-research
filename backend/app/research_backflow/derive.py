@@ -29,6 +29,7 @@ from uuid import UUID
 from app.domain.source_records import SourceDocumentType
 from app.research_backflow.contracts import (
     MAX_QUERIES_PER_NEED,
+    RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH,
     RESEARCH_NEED_CODE_HUMAN_REQUESTED_RESEARCH,
     RESEARCH_NEED_DESCRIPTIONS,
     SUPPLEMENTAL_RESEARCH_NEED_CODES,
@@ -168,9 +169,26 @@ def derive_research_backflow_plan_payload(
             }
         )
 
+    # 7A.2B.3 scope 冻结：非白名单（structured）issue——financial/macro/valuation
+    # refresh / 证据一致性核对等——不在 automatic 文档补充研究范围（需 provider /
+    # network 或新数据）。plan 只派生文档类 need_specs；structured 需求投影为
+    # `manual_required_reasons` 信号，供 verify_progress 给稳定 manual reason
+    # （structured_data_refresh_required），**不误报 research_backflow_no_progress**。
+    structured_issue_types = sorted(
+        {
+            issue.issue_type
+            for issue in verified_request.verified_action.verified_audit.issues
+            if issue.issue_type not in SUPPLEMENTAL_RESEARCH_NEED_CODES
+        }
+    )
     return {
         "need_specs": need_specs,
         "max_queries_per_need": MAX_QUERIES_PER_NEED,
+        "manual_required_reasons": (
+            [RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH]
+            if structured_issue_types
+            else []
+        ),
     }
 
 

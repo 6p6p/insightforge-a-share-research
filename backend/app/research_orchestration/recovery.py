@@ -122,6 +122,8 @@ class ResearchOrchestrationRecoveryCoordinator:
             OrchestrationPhase.STAGE5.value,
         ) and not await self._child_resumable(orchestration_id, phase):
             return False
+        if not await self._backflow_child_resumable(orchestration_id, checkpoint):
+            return False
 
         await self._runner.run_orchestration(orchestration_id)
         return True
@@ -157,3 +159,39 @@ class ResearchOrchestrationRecoveryCoordinator:
                 )
                 return False
             return True
+
+    async def _backflow_child_resumable(self, orchestration_id: UUID, checkpoint: dict) -> bool:
+        """7A.2B.3 backflow：checkpoint 中 `backflow_round > 0` → 最新 backflow
+        child（`current_child_run_id`，stage4/stage5 attempt round+1）仍 `running`
+        → 有 live executor（rolling restart）→ **跳过**（不得 pretend completed /
+        collect synthesis / create next child）。
+
+        backflow 各节点都把 phase persist 成 `research_backflow`（区分不了
+        stage4/stage5 子阶段），所以不用 phase 而是用 checkpoint 的
+        `current_child_run_id` 直接判定最新 child：running → 不恢复（否则
+        `_stage5_outcome` 对 running child 抛 `ResearchOrchestrationIntegrityError`，
+        把有 live executor 的 orchestration 误标 failed）。无 backflow → True。
+        """
+
+        if (checkpoint.get("backflow_round") or 0) <= 0:
+            return True
+        child_run_id = checkpoint.get("current_child_run_id")
+        if child_run_id is None:
+            return True
+        async with self._sessionmaker() as session:
+            run = await WorkflowRunRepository(session).get_by_id(UUID(child_run_id))
+            if run is None:
+                logger.warning(
+                    "research_orchestration_backflow_child_run_missing",
+                    orchestration_id=str(orchestration_id),
+                    workflow_run_id=str(child_run_id),
+                )
+                return False
+            if run.status == WorkflowRunStatus.RUNNING.value:
+                logger.info(
+                    "research_orchestration_backflow_child_running_skip",
+                    orchestration_id=str(orchestration_id),
+                    workflow_run_id=str(run.run_id),
+                )
+                return False
+        return True
