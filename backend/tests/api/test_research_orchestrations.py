@@ -1,7 +1,8 @@
-"""Minimal research orchestration API tests（7A.2B.2 spec U/V，0 DB / 0 real LLM）。
+"""Minimal research orchestration API tests（7A.2B.2 spec U/V + Gate C/E，0 DB / 0 real LLM）。
 
 route 只做协议层 dispatch：本文件 override `get_research_orchestration_service`
-为 Fake service，断言 URL → service 方法 → response 投影；业务语义由
+为 Fake service，断言 URL → service 方法 → response 投影 + HTTP 状态码（新建
+201 / 已调度 202 / 已存在 200）；业务语义由
 `tests/research_orchestration/test_service.py` 覆盖（route 不执行业务）。
 """
 
@@ -16,8 +17,14 @@ from app.research_orchestration.contracts import (
     ORCHESTRATOR_NAME,
     ORCHESTRATOR_VERSION,
 )
-from app.research_orchestration.errors import ResearchOrchestrationNotFound
-from app.research_orchestration.service import ResearchOrchestrationResult
+from app.research_orchestration.errors import (
+    ResearchOrchestrationNotFound,
+    ResearchOrchestrationRetryRequired,
+)
+from app.research_orchestration.service import (
+    OrchestrationStartOutcome,
+    ResearchOrchestrationResult,
+)
 
 _OID = UUID("00000000-0000-0000-0000-000000000001")
 _TASK_ID = UUID("00000000-0000-0000-0000-000000000002")
@@ -48,7 +55,7 @@ def _result(**overrides):
 
 
 class FakeOrchestrationService:
-    """记录 dispatch 的 fake service（route 只投影 result）。"""
+    """记录 dispatch 的 fake service（route 只投影 result + 状态码）。"""
 
     def __init__(self) -> None:
         self.start_calls: list[UUID] = []
@@ -58,10 +65,16 @@ class FakeOrchestrationService:
         self.retry_calls: list[UUID] = []
         self.result = _result()
         self.raise_not_found = False
+        self.raise_retry_required = False
+        self.outcome = OrchestrationStartOutcome(
+            orchestration=self.result, created=True, scheduled=True
+        )
 
-    async def start_orchestration(self, task_id):
+    async def prepare_orchestration_start(self, task_id):
         self.start_calls.append(task_id)
-        return self.result
+        if self.raise_retry_required:
+            raise ResearchOrchestrationRetryRequired()
+        return self.outcome
 
     async def get_current_orchestration(self, task_id):
         self.get_current_calls.append(task_id)
@@ -77,7 +90,7 @@ class FakeOrchestrationService:
         self.action_calls.append((orchestration_id, action, comment))
         return self.result
 
-    async def retry_orchestration(self, orchestration_id):
+    async def retry_and_schedule(self, orchestration_id):
         self.retry_calls.append(orchestration_id)
         return self.result
 
@@ -91,6 +104,7 @@ def _client(app, fake) -> TestClient:
 
 
 def test_post_create_orchestration_dispatches_start(app) -> None:
+    """全新创建 → 201，route 调用 `prepare_orchestration_start`（Gate C）。"""
     fake = FakeOrchestrationService()
     with _client(app, fake) as client:
         response = client.post(f"/api/v1/tasks/{_TASK_ID}/orchestrations")
@@ -101,6 +115,41 @@ def test_post_create_orchestration_dispatches_start(app) -> None:
     assert body["task_id"] == str(_TASK_ID)
     assert body["status"] == "waiting_human"
     assert body["current_phase"] == "awaiting_stage5"
+
+
+def test_post_create_scheduled_existing_returns_202(app) -> None:
+    """已存在 active=pending 且本进程调度后台运行 → 202。"""
+    fake = FakeOrchestrationService()
+    fake.outcome = OrchestrationStartOutcome(
+        orchestration=fake.result, created=False, scheduled=True
+    )
+    with _client(app, fake) as client:
+        response = client.post(f"/api/v1/tasks/{_TASK_ID}/orchestrations")
+    assert response.status_code == 202
+    assert fake.start_calls == [_TASK_ID]
+
+
+def test_post_create_existing_no_schedule_returns_200(app) -> None:
+    """已存在且未调度（running / waiting_human / completed）→ 200。"""
+    fake = FakeOrchestrationService()
+    fake.outcome = OrchestrationStartOutcome(
+        orchestration=fake.result, created=False, scheduled=False
+    )
+    with _client(app, fake) as client:
+        response = client.post(f"/api/v1/tasks/{_TASK_ID}/orchestrations")
+    assert response.status_code == 200
+    assert fake.start_calls == [_TASK_ID]
+
+
+def test_post_create_latest_failed_returns_409(app) -> None:
+    """无 active、latest=failed/cancelled → 409 retry_required（不偷偷回 attempt1）。"""
+    fake = FakeOrchestrationService()
+    fake.raise_retry_required = True
+    with _client(app, fake) as client:
+        response = client.post(f"/api/v1/tasks/{_TASK_ID}/orchestrations")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "research_orchestration_retry_required"
+    assert fake.start_calls == [_TASK_ID]
 
 
 def test_get_current_orchestration(app) -> None:

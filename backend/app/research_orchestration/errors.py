@@ -85,3 +85,15 @@ class ResearchOrchestrationInvalidAction(ResearchOrchestrationError):
     code = "research_orchestration_invalid_action"
     http_status = 400
     message = "研究编排当前状态不允许该操作"
+
+
+class ResearchOrchestrationRetryRequired(ResearchOrchestrationError):
+    """task 无 active 且最近一次 orchestration 是 failed/cancelled（Gate C Case 6）。
+
+    自动研究入口**不偷偷回到 attempt1**——返回 409，用户必须显式 retry
+    （`POST /research-orchestrations/{id}/actions` action=retry → 新 attempt）。
+    """
+
+    code = "research_orchestration_retry_required"
+    http_status = 409
+    message = "该任务最近一次研究编排已结束且未成功，请显式重试"

@@ -64,13 +64,16 @@ def _create_research_orchestration(
     sessionmaker,
     langgraph: LangGraphCheckpointManager,
 ) -> ResearchOrchestrationService:
-    """生产装配顶层编排（7A.2B.2 spec S/T）：构造 0 model call / 0 network。
+    """生产装配顶层编排（7A.2B.2 spec S/T + Gate B）：构造 0 model call / 0 network。
 
     复用 fulfillment / stage4 / stage5 production factories + PG Checkpointer；
-    返回绑定 stage5_runner + orchestration_runner 的 service（human action /
-    recovery / API 共用同一批实例）。自动测试不触发（API 测试 override
-    dependencies；本函数只被 lifespan 调用）。
+    返回绑定 stage5_runner + orchestration_runner + execution_manager 的 service
+    （human action / recovery / API / 后台调度共用同一批实例）。自动测试不触发
+    （API 测试 override dependencies；本函数只被 lifespan 调用）。
     """
+    from app.research_orchestration.execution_manager import (
+        ResearchOrchestrationExecutionManager,
+    )
     from app.research_orchestration.factory import (
         create_research_orchestration_dependencies,
         create_research_orchestration_runner,
@@ -80,11 +83,13 @@ def _create_research_orchestration(
     orchestration_runner = create_research_orchestration_runner(
         settings, sessionmaker, langgraph, dependencies=deps
     )
+    execution_manager = ResearchOrchestrationExecutionManager(orchestration_runner)
     return ResearchOrchestrationService(
         sessionmaker=sessionmaker,
         plan_service=deps.plan_service,
         stage5_runner=deps.stage5_runner,
         orchestration_runner=orchestration_runner,
+        execution_manager=execution_manager,
     )
 
 
@@ -190,6 +195,14 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning(
                 "research_execution_close_failed",
+                error_type=type(exc).__name__,
+            )
+        try:
+            if resources.research_orchestration.execution_manager is not None:
+                await resources.research_orchestration.execution_manager.close()
+        except Exception as exc:
+            logger.warning(
+                "research_orchestration_execution_close_failed",
                 error_type=type(exc).__name__,
             )
         try:

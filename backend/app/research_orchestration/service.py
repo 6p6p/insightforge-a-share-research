@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 if TYPE_CHECKING:  # pragma: no cover — 仅类型注解
+    from app.research_orchestration.execution_manager import ResearchOrchestrationExecutionManager
     from app.research_orchestration.runner import ResearchOrchestrationRunner
 
 from sqlalchemy.exc import IntegrityError
@@ -51,7 +52,6 @@ from app.db.models.research_orchestration import (
 from app.domain.tasks import ACTIVE_WORKFLOW_RUN_STATUSES
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
-    ACTIVE_ORCHESTRATION_STATUSES,
     ORCHESTRATION_SCHEMA_VERSION,
     ORCHESTRATOR_NAME,
     ORCHESTRATOR_VERSION,
@@ -68,6 +68,7 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationIntegrityError,
     ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
+    ResearchOrchestrationRetryRequired,
 )
 from app.research_orchestration.repository import (
     ResearchOrchestrationChildRepository,
@@ -113,6 +114,21 @@ def _constraint_name(exc: IntegrityError) -> str | None:
 
 
 @dataclass(frozen=True)
+class OrchestrationStartOutcome:
+    """`prepare_orchestration_start` 的结果（route 据此决定 HTTP 状态码，Gate C）。
+
+    - `orchestration`：返回的 orchestration 摘要；
+    - `created`：True → 本次新建（route 201）；False → 已存在；
+    - `scheduled`：True → 已调度后台运行（route 202）；False → 未调度
+      （running / waiting_human / completed，route 200）。
+    """
+
+    orchestration: ResearchOrchestrationResult
+    created: bool
+    scheduled: bool
+
+
+@dataclass(frozen=True)
 class ResearchOrchestrationResult:
     """一次 top-level orchestration 的只读摘要（不含 plan / child 正文）。"""
 
@@ -144,6 +160,7 @@ class ResearchOrchestrationService:
         plan_service: ResearchPlanningService,
         stage5_runner: Stage5WorkflowRunner | None = None,
         orchestration_runner: ResearchOrchestrationRunner | None = None,
+        execution_manager: ResearchOrchestrationExecutionManager | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._plan_service = plan_service
@@ -152,6 +169,9 @@ class ResearchOrchestrationService:
         # （production factory 绑定，unit 测试可只测 dispatch 守卫）。
         self._stage5_runner = stage5_runner
         self._orchestration_runner = orchestration_runner
+        # 后台调度（Gate B/C/E）：prepare_orchestration_start / retry_and_schedule /
+        # cancel_orchestration 共用同一 manager；未绑定 → 不调度（unit 测试）。
+        self._execution_manager = execution_manager
 
     @property
     def orchestration_runner(self) -> ResearchOrchestrationRunner | None:
@@ -161,6 +181,11 @@ class ResearchOrchestrationService:
         → None（dispatch 守卫不触碰）。
         """
         return self._orchestration_runner
+
+    @property
+    def execution_manager(self) -> ResearchOrchestrationExecutionManager | None:
+        """只读：lifespan close 复用同一 manager（cancel 本地 task 用）。"""
+        return self._execution_manager
 
     # ------------------------------------------------------------------ create
 
@@ -227,21 +252,58 @@ class ResearchOrchestrationService:
 
     # ------------------------------------------------------------------ start
 
-    async def start_orchestration(self, task_id: UUID) -> ResearchOrchestrationResult:
-        """create/replay → 未终态则顶层 run（spec U：默认自动研究入口）。
+    async def prepare_orchestration_start(self, task_id: UUID) -> OrchestrationStartOutcome:
+        """快速返回的自动研究入口（Gate C：**不 await 整个 LangGraph**）。
 
-        - create 已有 orchestration 时：active（pending/running/waiting_human）
-          → checkpoint-aware continuation（同 orchestration_id + 同顶层 thread，
-          不重建）；terminal（completed/failed/cancelled）→ 原样返回（不重复 run）；
-        - 顶层 run 只由 runner 执行（`_orchestration_runner`，production factory
-          绑定）；未绑定 → RuntimeError（programming error）。
+        语义（Case 1-6）：
+        - Case 1  task 从未有 orchestration → create attempt1 + schedule O1；
+        - Case 2  active=pending → 返回 exact active；本进程无 local task →
+                  schedule exact active（恢复中断的调度）；
+        - Case 3  active=running → 返回 active（不重复 schedule）；
+        - Case 4  active=waiting_human → 返回 active（**不自动 resume**）；
+        - Case 5  无 active、latest=completed → 返回 latest completed；
+        - Case 6  无 active、latest=failed/cancelled → `ResearchOrchestrationRetryRequired`
+                  （不偷偷回到 attempt1，用户必须显式 retry）。
+
+        schedule 经 `ResearchOrchestrationExecutionManager`（同 id 至多一个
+        background task）；manager 未绑定 → 不调度（unit 测试直接构造，production
+        factory 绑定）。
         """
-        result = await self.create_or_get_orchestration(task_id)
-        if result.status in ACTIVE_ORCHESTRATION_STATUSES:
-            if self._orchestration_runner is None:
-                raise RuntimeError("orchestration runner not bound")
-            await self._orchestration_runner.run_orchestration(result.orchestration_id)
-        return await self.get_orchestration(result.orchestration_id)
+        async with self._sessionmaker() as session:
+            repo = ResearchOrchestrationRepository(session)
+            active = await repo.get_active_for_task(task_id)
+            latest = None if active is not None else await repo.get_latest_for_task(task_id)
+
+        if active is not None:
+            result = self._to_result(active)
+            scheduled = False
+            if (
+                active.status == OrchestrationStatus.PENDING.value
+                and self._execution_manager is not None
+            ):
+                scheduled = self._execution_manager.schedule(active.orchestration_id)
+            return OrchestrationStartOutcome(
+                orchestration=result, created=False, scheduled=scheduled
+            )
+
+        if latest is None:
+            # Case 1：从未有 orchestration → 首次 create attempt1 + schedule。
+            result = await self.create_or_get_orchestration(task_id)
+            scheduled = (
+                self._execution_manager.schedule(result.orchestration_id)
+                if self._execution_manager is not None
+                else False
+            )
+            return OrchestrationStartOutcome(
+                orchestration=result, created=True, scheduled=scheduled
+            )
+
+        # 无 active：latest 只可能是 terminal（completed / failed / cancelled）。
+        if latest.status == OrchestrationStatus.COMPLETED.value:
+            return OrchestrationStartOutcome(
+                orchestration=self._to_result(latest), created=False, scheduled=False
+            )
+        raise ResearchOrchestrationRetryRequired()
 
     # ------------------------------------------------------------------ retry
 
@@ -319,6 +381,21 @@ class ResearchOrchestrationService:
                     raise
                 await session.commit()
                 return self._to_result(row, replayed=not created)
+
+    async def retry_and_schedule(self, orchestration_id: UUID) -> ResearchOrchestrationResult:
+        """user retry → 创建 O2 **并自动 schedule**（Gate E；**不 await O2 完成**）。
+
+        - 复用底层 `retry_orchestration(O1)`（同 ResearchPlan、attempt+1、
+          `retry_of=O1`、same input_fingerprint、O1 原样保留；并发 retry 经
+          FOR UPDATE 串行化 → 最终只有一个 O2，不会 O2+O3）；
+        - 创建后立即 `ResearchOrchestrationExecutionManager.schedule(O2)`（同 id
+          至多一个 background task）——**不需要第二次 API 调用再 start O2**；
+        - 返回 O2 摘要（status=pending，立即返回）。
+        """
+        result = await self.retry_orchestration(orchestration_id)
+        if self._execution_manager is not None:
+            self._execution_manager.schedule(result.orchestration_id)
+        return result
 
     # ------------------------------------------------------------------ read
 
@@ -412,14 +489,15 @@ class ResearchOrchestrationService:
     # ------------------------------------------------------------------ cancel
 
     async def cancel_orchestration(self, orchestration_id: UUID) -> ResearchOrchestrationResult:
-        """minimal cancel（spec Q）：先取消 active child，再 orchestration cancelled。
+        """minimal cancel（spec Q）+ ExecutionManager 协作式取消本地 task（Gate F）。
 
-        幂等：已 cancelled → 原样返回；已 completed/failed →
-        `ResearchOrchestrationAlreadyFinished`。child 取消复用现有
-        Stage4/WorkflowRun cancel 的 DB 层入口（`mark_cancelled`）；**不直接 SQL
-        删除 child / orchestration**。
+        **顺序**：先协作式取消本地 asyncio task（await 完成，Runner 的
+        `_stream` 对 CancelledError 不投影失败）→ 再 DB 投影 cancelled（active
+        child cancel + orchestration status=cancelled）。**不出现"只 cancel
+        asyncio.Task 但 DB 仍 running"**；**不直接 SQL 删除 child / orchestration**
+        （old child / history / checkpoint 保留）。幂等：已 cancelled → 原样返回；
+        已 completed/failed → `ResearchOrchestrationAlreadyFinished`。
         """
-        now = datetime.now(UTC)
         async with self._sessionmaker() as session:
             repo = ResearchOrchestrationRepository(session)
             orchestration = await repo.get_by_id(orchestration_id)
@@ -433,6 +511,12 @@ class ResearchOrchestrationService:
             ):
                 raise ResearchOrchestrationAlreadyFinished()
 
+        if self._execution_manager is not None:
+            await self._execution_manager.cancel_local(orchestration_id)
+
+        now = datetime.now(UTC)
+        async with self._sessionmaker() as session:
+            repo = ResearchOrchestrationRepository(session)
             child_repo = ResearchOrchestrationChildRepository(session)
             run_repo = WorkflowRunRepository(session)
             for child in await child_repo.list_children(orchestration_id):

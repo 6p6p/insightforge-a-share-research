@@ -31,6 +31,7 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationAlreadyFinished,
     ResearchOrchestrationIntegrityError,
     ResearchOrchestrationNotFound,
+    ResearchOrchestrationRetryRequired,
 )
 from app.research_orchestration.repository import (
     ResearchOrchestrationChildRepository,
@@ -39,7 +40,7 @@ from app.research_orchestration.repository import (
 from app.research_orchestration.service import ResearchOrchestrationService
 from app.research_planning.repository import ResearchPlanRepository
 from tests.research_orchestration.fakes import (
-    FakeActionOrchestrationRunner,
+    FakeExecutionManager,
     FakePlanService,
     FakeSessionMaker,
     make_orchestration,
@@ -557,73 +558,286 @@ async def test_verify_integrity_retry_parent_missing(monkeypatch) -> None:
 # ------------------------------------------------------------- start / current（7A.2B.2 spec U）
 
 
-def _result(*, status: str = "pending", current_phase: str = "planning", orchestration_id=_OID):
+def _result(
+    *,
+    status: str = "pending",
+    current_phase: str = "planning",
+    orchestration_id=_OID,
+    attempt_no: int = 1,
+    retry_of_orchestration_id: UUID | None = None,
+):
     return ResearchOrchestrationService._to_result(
         make_orchestration(
             orchestration_id=orchestration_id,
             task_id=_TASK_ID,
             status=status,
             current_phase=current_phase,
+            attempt_no=attempt_no,
+            retry_of_orchestration_id=retry_of_orchestration_id,
         )
     )
 
 
-async def test_start_runs_new_orchestration(monkeypatch) -> None:
-    """全新 orchestration（pending）→ 顶层 runner 触发，返回刷新投影。"""
-    runner = FakeActionOrchestrationRunner()
+async def test_prepare_start_first_ever_creates_attempt1_and_schedules(monkeypatch) -> None:
+    """Case 1：task 从未有 orchestration → create attempt1 + schedule O1（201/202）。"""
+    manager = FakeExecutionManager()
     service = ResearchOrchestrationService(
-        FakeSessionMaker(), FakePlanService(), orchestration_runner=runner
+        FakeSessionMaker(), FakePlanService(), execution_manager=manager
     )
     created = _result()
-    refreshed = _result(status="waiting_human", current_phase="awaiting_stage5")
+
+    async def fake_active(self, task_id):
+        return None
+
+    async def fake_latest(self, task_id):
+        return None
 
     async def fake_create(self, task_id):
         return created
 
-    async def fake_get(self, orchestration_id):
-        return refreshed
-
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
     monkeypatch.setattr(ResearchOrchestrationService, "create_or_get_orchestration", fake_create)
-    monkeypatch.setattr(ResearchOrchestrationService, "get_orchestration", fake_get)
 
-    result = await service.start_orchestration(_TASK_ID)
-    assert runner.run_calls == [_OID]
-    assert result.status == "waiting_human"
+    outcome = await service.prepare_orchestration_start(_TASK_ID)
+    assert outcome.created is True
+    assert outcome.scheduled is True
+    assert outcome.orchestration.orchestration_id == _OID
+    assert manager.scheduled == [_OID]
 
 
-async def test_start_skips_terminal_replay(monkeypatch) -> None:
-    """replay 已终态 orchestration（completed）→ 不重复 run，原样返回。"""
-    runner = FakeActionOrchestrationRunner()
+async def test_prepare_start_active_pending_schedules_exact_active(monkeypatch) -> None:
+    """Case 2：active=pending → 返回 exact active；本进程无 local task → schedule。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
     service = ResearchOrchestrationService(
-        FakeSessionMaker(), FakePlanService(), orchestration_runner=runner
+        sessionmaker, FakePlanService(), execution_manager=manager
     )
-    terminal = _result(status="completed", current_phase="completed")
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="pending", current_phase="planning"
+    )
 
-    async def fake_create(self, task_id):
-        return terminal
+    async def fake_active(self, task_id):
+        return active
+
+    async def fake_latest(self, task_id):
+        raise AssertionError("get_latest must not be called when active exists")
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
+
+    outcome = await service.prepare_orchestration_start(_TASK_ID)
+    assert outcome.created is False
+    assert outcome.scheduled is True
+    assert outcome.orchestration.orchestration_id == _OID
+    assert manager.scheduled == [_OID]
+
+
+async def test_prepare_start_active_running_no_schedule(monkeypatch) -> None:
+    """Case 3：active=running → 返回 active，不重复 schedule。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+
+    outcome = await service.prepare_orchestration_start(_TASK_ID)
+    assert outcome.created is False
+    assert outcome.scheduled is False
+    assert manager.scheduled == []
+
+
+async def test_prepare_start_active_waiting_human_no_auto_resume(monkeypatch) -> None:
+    """Case 4：active=waiting_human → 返回 active，不自动 resume / schedule。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="awaiting_stage5",
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+
+    outcome = await service.prepare_orchestration_start(_TASK_ID)
+    assert outcome.created is False
+    assert outcome.scheduled is False
+    assert manager.scheduled == []
+    assert manager.cancelled == []
+
+
+async def test_prepare_start_latest_completed_returns_completed(monkeypatch) -> None:
+    """Case 5：无 active、latest=completed → 返回 latest completed（不 create / schedule）。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    completed = make_orchestration(
+        orchestration_id=_RETRY_ID,
+        task_id=_TASK_ID,
+        status="completed",
+        current_phase="completed",
+        attempt_no=2,
+    )
+
+    async def fake_active(self, task_id):
+        return None
+
+    async def fake_latest(self, task_id):
+        return completed
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
+
+    outcome = await service.prepare_orchestration_start(_TASK_ID)
+    assert outcome.created is False
+    assert outcome.scheduled is False
+    assert outcome.orchestration.orchestration_id == _RETRY_ID
+    assert outcome.orchestration.status == "completed"
+    assert manager.scheduled == []
+
+
+async def test_prepare_start_latest_failed_raises_retry_required(monkeypatch) -> None:
+    """Case 6：无 active、latest=failed → 409 retry_required（不偷偷回 attempt1）。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    failed = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="failed", current_phase="stage4"
+    )
+
+    async def fake_active(self, task_id):
+        return None
+
+    async def fake_latest(self, task_id):
+        return failed
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
+
+    with pytest.raises(ResearchOrchestrationRetryRequired):
+        await service.prepare_orchestration_start(_TASK_ID)
+    assert manager.scheduled == []
+
+
+# ------------------------------------------------------------ retry + schedule（Gate E）
+
+
+async def test_retry_and_schedule_creates_o2_and_schedules(monkeypatch) -> None:
+    """retry HTTP → 创建 O2 + 自动 schedule（不需要第二次 API 调用再 start O2）。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    o2 = _result(
+        orchestration_id=_RETRY_ID, status="pending", current_phase="planning", attempt_no=2
+    )
+
+    async def fake_retry(self, orchestration_id):
+        return o2
+
+    monkeypatch.setattr(ResearchOrchestrationService, "retry_orchestration", fake_retry)
+    result = await service.retry_and_schedule(_OID)
+    assert result.orchestration_id == _RETRY_ID
+    assert result.attempt_no == 2
+    assert manager.scheduled == [_RETRY_ID]
+
+
+async def test_retry_and_schedule_without_manager_only_creates(monkeypatch) -> None:
+    """manager 未绑定 → retry_and_schedule 只创建 O2，不调度（unit 测试场景）。"""
+    sessionmaker = FakeSessionMaker()
+    service = ResearchOrchestrationService(sessionmaker, FakePlanService())
+    o2 = _result(orchestration_id=_RETRY_ID)
+
+    async def fake_retry(self, orchestration_id):
+        return o2
+
+    monkeypatch.setattr(ResearchOrchestrationService, "retry_orchestration", fake_retry)
+    result = await service.retry_and_schedule(_OID)
+    assert result.orchestration_id == _RETRY_ID
+
+
+# ------------------------------------------------------------ cancel（Gate F）
+
+
+async def test_cancel_cancels_local_task_then_db(monkeypatch) -> None:
+    """API cancel → 先协作式取消本地 task，再 DB cancelled（不出现 DB 仍 running）。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+    manager.schedule(_OID)  # 模拟本进程已有 local task
 
     async def fake_get(self, orchestration_id):
-        return terminal
+        return active
 
-    monkeypatch.setattr(ResearchOrchestrationService, "create_or_get_orchestration", fake_create)
-    monkeypatch.setattr(ResearchOrchestrationService, "get_orchestration", fake_get)
+    async def fake_list_children(self, orchestration_id):
+        return []
 
-    result = await service.start_orchestration(_TASK_ID)
-    assert runner.run_calls == []
-    assert result.status == "completed"
+    async def fake_orch_mark_cancelled(self, orchestration_id, completed_at):
+        return make_orchestration(status=OrchestrationStatus.CANCELLED.value)
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchOrchestrationChildRepository, "list_children", fake_list_children)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "mark_cancelled", fake_orch_mark_cancelled)
+
+    result = await service.cancel_orchestration(_OID)
+    assert result.status == OrchestrationStatus.CANCELLED.value
+    assert manager.cancelled == [_OID]
+    assert manager.is_scheduled(_OID) is False
 
 
-async def test_start_active_requires_bound_runner(monkeypatch) -> None:
-    """active 但 runner 未绑定 → RuntimeError（production factory 才绑定）。"""
-    service = ResearchOrchestrationService(FakeSessionMaker(), FakePlanService())
-    created = _result()
+async def test_cancel_no_local_task_is_noop(monkeypatch) -> None:
+    """cancel 时无 local task → cancel_local 不记录（已运行/其他进程）。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), execution_manager=manager
+    )
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
 
-    async def fake_create(self, task_id):
-        return created
+    async def fake_get(self, orchestration_id):
+        return active
 
-    monkeypatch.setattr(ResearchOrchestrationService, "create_or_get_orchestration", fake_create)
-    with pytest.raises(RuntimeError):
-        await service.start_orchestration(_TASK_ID)
+    async def fake_list_children(self, orchestration_id):
+        return []
+
+    async def fake_orch_mark_cancelled(self, orchestration_id, completed_at):
+        return make_orchestration(status=OrchestrationStatus.CANCELLED.value)
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchOrchestrationChildRepository, "list_children", fake_list_children)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "mark_cancelled", fake_orch_mark_cancelled)
+
+    # 无 live task（未 schedule）→ cancel_local no-op。
+    result = await service.cancel_orchestration(_OID)
+    assert result.status == OrchestrationStatus.CANCELLED.value
+    assert manager.cancelled == []
 
 
 async def test_get_current_prefers_active(monkeypatch) -> None:

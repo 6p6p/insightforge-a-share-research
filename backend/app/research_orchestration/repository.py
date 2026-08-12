@@ -102,11 +102,19 @@ class ResearchOrchestrationRepository:
         return result.scalars().first()
 
     async def get_latest_for_task(self, task_id: UUID) -> ResearchOrchestrationModel | None:
-        """同 task 最近一条 orchestration（含 terminal history，`current` 投影用）。"""
+        """同 task 最近一条 orchestration（含 terminal history，`current` 投影用）。
+
+        稳定确定性排序（spec D）：`created_at DESC, orchestration_id DESC`
+        tie-break——不依赖 `MAX(id)` / latest graph guess；并发同毫秒创建多条时
+        结果可预测。
+        """
         result = await self._session.execute(
             select(ResearchOrchestrationModel)
             .where(ResearchOrchestrationModel.task_id == task_id)
-            .order_by(ResearchOrchestrationModel.created_at.desc())
+            .order_by(
+                ResearchOrchestrationModel.created_at.desc(),
+                ResearchOrchestrationModel.orchestration_id.desc(),
+            )
             .limit(1)
         )
         return result.scalar_one_or_none()

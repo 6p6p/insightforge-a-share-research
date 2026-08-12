@@ -156,6 +156,32 @@ class FakeActionOrchestrationRunner:
         return {"current_phase": "awaiting_stage5"}
 
 
+class FakeExecutionManager:
+    """fake `ResearchOrchestrationExecutionManager`（记录 schedule / cancel_local）。"""
+
+    def __init__(self) -> None:
+        self.scheduled: list[UUID] = []
+        self.cancelled: list[UUID] = []
+        self._scheduled_set: set[UUID] = set()
+
+    def schedule(self, orchestration_id: UUID) -> bool:
+        if orchestration_id in self._scheduled_set:
+            return False
+        self._scheduled_set.add(orchestration_id)
+        self.scheduled.append(orchestration_id)
+        return True
+
+    def is_scheduled(self, orchestration_id: UUID) -> bool:
+        return orchestration_id in self._scheduled_set
+
+    async def cancel_local(self, orchestration_id: UUID) -> None:
+        # 与真实 manager 一致：无 live task → no-op（不记录）。
+        if orchestration_id not in self._scheduled_set:
+            return
+        self._scheduled_set.discard(orchestration_id)
+        self.cancelled.append(orchestration_id)
+
+
 class FakeRecoveryRunner:
     """fake orchestration runner（recovery 协调器只读 checkpoint + 触发 run）。"""
 
