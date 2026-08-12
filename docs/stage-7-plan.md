@@ -10,7 +10,15 @@
 - **测试（spec T/U/W）**：planner contracts 单测（14）+ service/router/preparation 集成（23）+ E2E（真实 PG + Fake planner + 真实 Stage4WorkflowRunner 到 SynthesisResult；缺失 valuation comparison → ready=false → 0 Stage4 run）+ Migration 0040 downgrade guard（空表通过 / 有行拒绝）。
 - **API（spec R）**：本轮未新增 research-plan API（推迟 7A.2）。
 
-## 7A.2：Research Planning API + 规划驱动执行（planned）
+## 7A.2A：Research Need Fulfillment（completed）
+
+- **Fulfillment 服务（spec G/H/I）**：`ResearchFulfillmentService.fulfill_research_needs` —— verify Plan + verify Route + `prepare_research()` → 只消费 `missing_needs` → 按 `need_kind` 分发 executor → 重跑 prepare；`FulfillmentResult`（schema v1，`attempts` / `preparation_before/after` / `ready_for_analysis` / `stage4_request`，仅 application output，不持久化 raw exception / prompt / API response）。
+- **Executors（spec J/M/N/O/P）**：`DocumentNeedExecutor`（确定性 RetrievalQuery → Retrieval → `EvidenceExtractionService` → EvidenceCard，source 无 ready index 可确定性补建；SOURCE_NOT_FOUND / INDEX_NOT_READY / EVIDENCE_NOT_EXTRACTED / PROVIDER_UNAVAILABLE）；`FinancialNeedExecutor`（calculation-centric，Observation → `create_calculation`；MISSING_UNDERLYING_OBSERVATION 不凭空造数）；`MacroNeedExecutor`（macro Evidence replay；MACRO_DATA_UNAVAILABLE 不 live fetch）；`ValuationNeedExecutor`（恒 manual_required + EXPLICIT_PEER_SET_REQUIRED，不自动 peer）。
+- **幂等（spec Q）**：底层 create_or_get（EvidenceCard / Calculation / macro Evidence）按 fingerprint replay → 第 2 次 fulfill 0 新增写。
+- **测试（spec R/S/T/U/V）**：executor + E2E 集成 24（document/event 11 + financial/macro/valuation 9 + 全链 service 4；真实 PG + Fake planner / FakeRetrieval / FakeEvidenceExtractionModel，**0 真实 DeepSeek / 0 Retrieval / 0 Chroma / 0 Web**）；Migration 0041 downgrade guard（空表 / v1 new-field-safe 通过，v2 snapshot 拒绝）；全量回归（非集成 1924 + 集成 941）+ ruff + alembic check 干净。
+- **API**：本轮未新增 research-plan API（推迟 7A.2B）。
+
+## 7A.2B：Research Planning API + 规划驱动执行（planned，next）
 
 - `POST /research-plan`（触发 create + route）、`GET /research-plan/{id}`、`POST /research-preparation`（或按任务聚合入口）；前端最小入口（如任务详情页展示 research plan / readiness / missing needs）。
 - 规划驱动执行：ready=true 时自动进入 Stage 4 执行；ready=false 时展示 MissingResearchNeeds 供分析师补齐或触发受控的资料获取。
