@@ -41,6 +41,20 @@ class ResearchPlanIntegrityError(ResearchPlanningError):
     message = "研究计划完整性校验失败"
 
 
+class ResearchPlanLegacyExecutionUnsupported(ResearchPlanningError):
+    """v1 legacy plan 无 frozen input snapshot，禁止进入自动执行。
+
+    v1 行可 verify 历史完整性（replay stored payload），但没有
+    `planner_input_payload` 派生执行语义（research_question / analysis_as_of）——
+    **不用当前 Task 字段猜历史 v1 的 question/cutoff**。Preparation / Fulfillment
+    应重新创建 v2 Plan。
+    """
+
+    code = "research_plan_legacy_execution_unsupported"
+    http_status = 409
+    message = "旧版研究计划不支持自动执行，请重新创建研究计划"
+
+
 class ResearchPlanRouteNotFound(ResearchPlanningError):
     """research_plan_routes 不存在。"""
 

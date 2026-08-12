@@ -1,7 +1,8 @@
 """Research fulfillment service (stage 7A.2A spec G/H/I): 自动补证据。
 
 `fulfill_research_needs(research_plan_id)` 流程（spec G/H）：
-1. **verify Plan**（`verify_research_plan_integrity`，重放 stored snapshot，0 LLM）；
+1. **verify Plan + frozen execution context**（`get_verified_execution_context`：
+   verify 重放 stored snapshot + 从 `planner_input_payload` 派生执行语义，0 LLM）；
 2. **verify Route**（`verify_research_plan_route_integrity`，重放 stored route
    payload，0 LLM）；
 3. **`prepare_research()`**（只读现有 artifacts）→ 得到 `missing_needs`；
@@ -125,21 +126,24 @@ class ResearchFulfillmentService:
         }
 
     async def fulfill_research_needs(self, research_plan_id: UUID) -> ResearchFulfillmentResult:
-        """verify Plan + verify Route + prepare → 只消费 missing_needs → 重跑。"""
-        plan = await self._plan_service.verify_research_plan_integrity(research_plan_id)
+        """verify Plan + verify Route + prepare → 只消费 missing_needs → 重跑。
+
+        全部执行语义（company_id / research_question / analysis_as_of / payload）
+        来自 Verified Plan Execution Context（frozen `planner_input_payload`），
+        **不读当前 ResearchTask 字段**（spec 7A.2A B）——Task 在 Plan 创建后被修改
+        不影响既有 Plan 的执行。Task 存在性/ownership 由 verify 保证。
+        """
+        ctx = await self._plan_service.get_verified_execution_context(research_plan_id)
         route = await self._router.verify_research_plan_route_integrity(research_plan_id)
-        payload = ResearchPlanPayload.model_validate(plan.plan_payload)
+        payload = ctx.payload
         route_payload = validate_route_payload(route.route_payload)
-        task = await self._load_task(plan.task_id)
-        questions = list(task.questions or [])
-        research_question = questions[0] if questions else ""
         context = FulfillmentContext(
-            research_plan_id=plan.research_plan_id,
+            research_plan_id=ctx.research_plan_id,
             route_plan_id=route.route_plan_id,
-            company_id=plan.company_id,
-            task_id=plan.task_id,
-            research_question=research_question,
-            analysis_as_of=task.research_end_date,
+            company_id=ctx.company_id,
+            task_id=ctx.task_id,
+            research_question=ctx.research_question,
+            analysis_as_of=ctx.analysis_as_of,
             payload=payload,
         )
 
@@ -181,16 +185,6 @@ class ResearchFulfillmentService:
                 else None
             ),
         )
-
-    async def _load_task(self, task_id: UUID):
-        from app.core.errors import TaskNotFound
-        from app.repositories.research_task_repository import ResearchTaskRepository
-
-        async with self._sessionmaker() as session:
-            task = await ResearchTaskRepository(session).get_by_id(task_id)
-        if task is None:
-            raise TaskNotFound()
-        return task
 
     def _executor_for(
         self,

@@ -48,7 +48,6 @@ from app.analysis.macro.contracts import (
 )
 from app.analysis.valuation.contracts import MAX_VALUATION_COMPARISONS_PER_REQUEST
 from app.claims.macro_policy import resolve_availability
-from app.core.errors import TaskNotFound
 from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.financial_calculation import (
     FinancialCalculationInputModel,
@@ -57,7 +56,6 @@ from app.db.models.financial_calculation import (
 from app.db.models.financial_metric_observation import FinancialMetricObservationModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.relative_valuation_comparison import RelativeValuationComparisonModel
-from app.db.models.research_task import ResearchTaskModel
 from app.db.models.source_record import SourceRecordModel
 from app.evidence.contracts import EvidenceOrigin, compute_research_question_sha256
 from app.financial.calculations.contracts import (
@@ -66,7 +64,6 @@ from app.financial.calculations.contracts import (
     calculation_input_roles,
     expected_metric_code,
 )
-from app.repositories.research_task_repository import ResearchTaskRepository
 from app.research_planning.contracts import (
     _GROWTH_CALCULATION_CODES,
     ResearchDocumentNeedType,
@@ -76,7 +73,10 @@ from app.research_planning.router import (
     ResearchSourceRouter,
     validate_route_payload,
 )
-from app.research_planning.service import ResearchPlanningService
+from app.research_planning.service import (
+    ResearchPlanningService,
+    VerifiedPlanExecutionContext,
+)
 from app.stage4.contracts import (
     FinancialWorkItem,
     GenericWorkItem,
@@ -203,26 +203,29 @@ class ResearchPreparationService:
     # ------------------------------------------------------------------ 主入口
 
     async def prepare_research(self, research_plan_id: UUID) -> ResearchPreparationResult:
-        """verify plan + route → 解析 needs → module_inputs → ready/stage4_request。"""
-        plan = await self._plan_service.verify_research_plan_integrity(research_plan_id)
+        """verify plan + route → 解析 needs → module_inputs → ready/stage4_request。
+
+        全部执行语义（research_question / analysis_as_of / company_id / payload）
+        来自 Verified Plan Execution Context（frozen `planner_input_payload`），
+        **不读当前 ResearchTask 字段**（spec 7A.2A B）——Task 在 Plan 创建后被修改
+        不影响既有 Plan 的执行。Task row 只用于存在性/ownership/FK（verify 已交叉
+        核对 task 仍属于同一 company identity）。
+        """
+        ctx = await self._plan_service.get_verified_execution_context(research_plan_id)
         route = await self._router.verify_research_plan_route_integrity(research_plan_id)
-        payload = ResearchPlanPayload.model_validate(plan.plan_payload)
+        payload = ctx.payload
         route_payload = validate_route_payload(route.route_payload)
 
-        task = await self._load_task(plan.task_id)
-        analysis_as_of = task.research_end_date
-        # Gate C：document EvidenceCard 只有在其 research_question 与当前任务研究
-        # 问题一致（sha256）时才算 ready 输入；不匹配 → 该证据不计入解析。
-        questions = list(task.questions or [])
-        target_question_sha256 = (
-            compute_research_question_sha256(questions[0]) if questions else None
-        )
+        analysis_as_of = ctx.analysis_as_of
+        # Gate C：document EvidenceCard 只有在其 research_question 与 **frozen plan
+        # research_question** 一致（sha256）时才算 ready 输入；不匹配 → 不计入。
+        target_question_sha256 = compute_research_question_sha256(ctx.research_question)
 
         provider_keys_by_code = {
             entry.need_code: entry.provider_keys for entry in route_payload.entries
         }
 
-        data = await self._load_resolution_data(plan.company_id)
+        data = await self._load_resolution_data(ctx.company_id)
 
         resolved: list[ResolvedNeed] = []
         missing: list[MissingResearchNeed] = []
@@ -398,9 +401,9 @@ class ResearchPreparationService:
                 )
 
         ready = not missing
-        stage4_request = self._build_stage4_request(plan, task, module_inputs) if ready else None
+        stage4_request = self._build_stage4_request(ctx, module_inputs) if ready else None
         return ResearchPreparationResult(
-            research_plan_id=plan.research_plan_id,
+            research_plan_id=ctx.research_plan_id,
             resolved=tuple(resolved),
             module_inputs=tuple(module_inputs),
             missing_needs=tuple(missing),
@@ -700,13 +703,10 @@ class ResearchPreparationService:
 
     def _build_stage4_request(
         self,
-        plan,
-        task: ResearchTaskModel,
+        ctx: VerifiedPlanExecutionContext,
         module_inputs: list[ModuleInput],
     ) -> Stage4WorkflowRequest:
-        """按 module_inputs 构造现有 Stage4WorkflowRequest（1..12 items，item_id 唯一）。"""
-        questions = list(task.questions or [])
-        research_question = questions[0] if questions else ""
+        """按 module_inputs 构造现有 Stage4WorkflowRequest（question/as_of 来自 frozen ctx）。"""
         items = []
         for index, input_ in enumerate(module_inputs, start=1):
             item_id = f"{input_.analysis_type}-{index}"
@@ -745,21 +745,14 @@ class ResearchPreparationService:
                     )
                 )
         return Stage4WorkflowRequest(
-            task_id=plan.task_id,
-            company_id=plan.company_id,
-            research_question=research_question,
-            analysis_as_of=task.research_end_date,
+            task_id=ctx.task_id,
+            company_id=ctx.company_id,
+            research_question=ctx.research_question,
+            analysis_as_of=ctx.analysis_as_of,
             analysis_work_items=items,
         )
 
     # ------------------------------------------------------------------ 数据加载
-
-    async def _load_task(self, task_id: UUID):
-        async with self._sessionmaker() as session:
-            task = await ResearchTaskRepository(session).get_by_id(task_id)
-        if task is None:
-            raise TaskNotFound()
-        return task
 
     async def _load_resolution_data(self, company_id: UUID) -> _ResolutionData:
         async with self._sessionmaker() as session:

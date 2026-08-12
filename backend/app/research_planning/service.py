@@ -24,7 +24,7 @@ fingerprint（spec H / A）：
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -53,6 +53,7 @@ from app.research_planning.contracts import (
 )
 from app.research_planning.errors import (
     ResearchPlanIntegrityError,
+    ResearchPlanLegacyExecutionUnsupported,
     ResearchPlanNotFound,
 )
 from app.research_planning.planner import (
@@ -78,6 +79,25 @@ class ResearchPlanResult:
     plan_fingerprint: str
     plan_payload: dict
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class VerifiedPlanExecutionContext:
+    """verified v2 Plan 的 **frozen 执行上下文**（spec 7A.2A B）。
+
+    全部执行语义（research_question / analysis_as_of / company_id / task_id /
+    company identity）来自 `research_plans.planner_input_payload` 的
+    creation-time `ResearchPlannerInputSnapshot`，**不读当前 ResearchTask 字段**——
+    Task 在 Plan 创建后被修改不影响既有 Plan 的执行语义（frozen Plan 原则）。
+    """
+
+    research_plan_id: UUID
+    task_id: UUID
+    company_id: UUID
+    research_question: str
+    analysis_as_of: date
+    company: CompanyIdentitySnapshot
+    payload: ResearchPlanPayload
 
 
 def compute_planner_input_fingerprint(
@@ -364,6 +384,32 @@ class ResearchPlanningService:
             stored_input=stored_input,
             stored_payload=stored_payload,
             stored_plan_fp=stored_plan_fp,
+        )
+
+    async def get_verified_execution_context(
+        self, research_plan_id: UUID
+    ) -> VerifiedPlanExecutionContext:
+        """verify plan → 从 stored `planner_input_payload` 返回 **frozen 执行上下文**。
+
+        - v2 行：verify 后验证 stored snapshot，派生 research_question /
+          analysis_as_of / company identity / validated payload——执行语义与
+          Task 当前状态解耦（spec 7A.2A B）；
+        - v1 legacy 行：无 snapshot → `ResearchPlanLegacyExecutionUnsupported`
+          （可 verify 历史，不允许自动执行；**不拿当前 Task 猜历史 question/cutoff**）。
+        """
+        plan = await self.verify_research_plan_integrity(research_plan_id)
+        if plan.planner_input_payload is None:
+            raise ResearchPlanLegacyExecutionUnsupported()
+        snapshot = self._validate_input_snapshot(plan.planner_input_payload)
+        payload = validate_plan_payload(plan.plan_payload)
+        return VerifiedPlanExecutionContext(
+            research_plan_id=plan.research_plan_id,
+            task_id=plan.task_id,
+            company_id=plan.company_id,
+            research_question=snapshot.research_question,
+            analysis_as_of=snapshot.analysis_as_of,
+            company=snapshot.company_identity(),
+            payload=payload,
         )
 
     async def _verify_v2(
