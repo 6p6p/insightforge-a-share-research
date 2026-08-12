@@ -27,6 +27,15 @@ class ClaimRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_by_ids(self, claim_ids: list[UUID]) -> list[ClaimModel]:
+        """按 id 批量加载（补充研究计划派生 related Claim statements 用）。"""
+        if not claim_ids:
+            return []
+        result = await self._session.execute(
+            select(ClaimModel).where(ClaimModel.claim_id.in_(claim_ids))
+        )
+        return list(result.scalars().all())
+
     async def list_by_company(
         self,
         company_id: UUID,

@@ -18,7 +18,7 @@
 - **测试（spec R/S/T/U/V）**：executor + E2E 集成 24（document/event 11 + financial/macro/valuation 9 + 全链 service 4；真实 PG + Fake planner / FakeRetrieval / FakeEvidenceExtractionModel，**0 真实 DeepSeek / 0 Retrieval / 0 Chroma / 0 Web**）；Migration 0041 downgrade guard（空表 / v1 new-field-safe 通过，v2 snapshot 拒绝）；全量回归（非集成 1924 + 集成 941）+ ruff + alembic check 干净。
 - **API**：本轮未新增 research-plan API（推迟 7A.2B）。
 
-## 7A.2B：Research Planning API + 规划驱动执行（completed；7A.2B.3 next，architecture decision frozen 2026-08-12）
+## 7A.2B：Research Planning API + 规划驱动执行（completed；7A.2B.2 FINAL，7A.2B.3 FINAL，architecture decision frozen 2026-08-12）
 
 ### 7A.2B architecture decision（方案 D：Top-level LangGraph Orchestrator + 独立 Stage4/Stage5 WorkflowRuns）
 
@@ -44,7 +44,7 @@
 - **测试（spec T/U/S）**：单元 43（fingerprint / state / graph topology / runner 守卫 + 失败投影 / service replay-conflict-cancel-verify / child exact 复用与并发 winner / recovery 跳过与恢复判定，0 DB）+ 集成 6 Cases（happy path → awaiting_stage5、not-ready→fulfill→ready、fulfill 后仍 not-ready → waiting_manual、Stage4 child 失败投影、replay + active 409、worker restart 同 thread 恢复无重复产物；真实 PG + 真实 LangGraph + fake prepare/fulfill，**0 真实 DeepSeek**）。全量回归 + ruff + alembic check 干净。
 - **本轮不做（边界）**：Stage5 auto-execution、HumanReview、ResearchBackflow auto-loop、Web 一键研究、Stage7B Evaluation；lifespan / production factory 未接线（本阶段无 API 入口创建 orchestration，恢复协调器与 legacy 边界已作为 spec'd 交付物落地，待入口接线时一并接入）。
 
-### 7A.2B.2：Stage5 Orchestration Lifecycle（completed）
+### 7A.2B.2：Stage5 Orchestration Lifecycle（completed，FINAL）
 
 - **Migration 0043（spec B/C）**：`research_orchestration_runs` 增加重试 schema——`attempt_no INTEGER NOT NULL`（现有 rows 回填 1，CHECK ≥ 1）、`retry_of_orchestration_id UUID NULL`（FK RESTRICT + 不自指 CHECK）；唯一性由 `input_fingerprint UNIQUE` 改为 `UNIQUE(research_plan_id, attempt_no)`（同 plan 的 attempt 1/2/3 允许，active partial unique 不变）；`ResearchOrchestrationService.retry_orchestration` 支持 user retry（新 orchestration_id / 新顶层 thread / attempt 递增 / 同 task 已有 active → 409）；downgrade guard：任一表有行 → 拒绝 rollback。
 - **Stage5 exact child + execute/resume（spec J/K/L/M）**：`Stage5RequestBuilder`（Stage4 checkpoint state → `Stage5WorkflowRequest` 的唯一投影，首启/恢复共用，legacy 链与顶层 orchestration 复用同一 builder）；`ensure_stage5_child` 与 Stage4 同事务模式（WorkflowRun + child link，无 crash 孤儿窗口）；`run_or_resume_stage5` 按 child 状态 execute（pending）/ resume（failed(worker_restarted)；**无 checkpoint 的 run → 同 run/thread 用 request 重建 initial state 重首启**）/ 跳过（completed / waiting_human / running）。顶层 graph v2 接入 Stage5：`route_stage5_result` 纯 state 路由 → completed→complete_orchestration / waiting_human→awaiting_stage5 END / research_required→pause_for_research / failed→stage5_failed / cancelled→stage5_cancelled。
@@ -55,21 +55,70 @@
 - **测试（spec W/X）**：集成 7 Cases（真实 PG + PG Checkpointer + 真实 LangGraph + Fake Planner/Stage4/Stage5 models，**0 真实 DeepSeek**）：full chain → Check PASS → Audit PASS → completed；waiting_human → approve → **same Stage5 run resume** → completed；waiting_human → rewrite → revision → complete；research route → ResearchBackflowRequest → phase=research_backflow（不自动 research）；crash 在 Stage4 后 → 同顶层 thread 恢复 → Stage5（不重复 Stage4）；crash 在 Stage5 completed 后 → 恢复（不重复 Stage5）；failed O1 → user retry O2（新 id/thread、attempt=2）→ complete。Migration 0043 downgrade guard（3）+ pip check + ruff check/format + 全量回归（非集成 2034 + 集成 967，0 失败）。
 - **本轮不做（边界）**：live source provider 自动获取、ResearchBackflow 补充研究自动执行、Web 大改、Stage7B Evaluation。
 
-### 7A.2B.3：Research Orchestration Continuation（planned，next）
+### 7A.2B.3：Supplemental Research Backflow（completed）
 
-- 在 7A.2B.2 完整 lifecycle 之上的后续编排能力（本轮未开工；具体 spec 后续定义，不包含自动交易 / 技术分析 / 买卖建议）。
+- **Post-Audit Supplemental Research**：Initial Research（Plan→Preparation→Fulfillment）与
+  Supplemental Research（BackflowRequest→Supplemental Plan→supplemental Evidence→新
+  Stage4→新 Synthesis→BackflowFulfillment→新 Stage5）是**两条不同 research entry**，
+  禁止直接调用 `fulfill_research_needs(original_plan_id)`。
+- **Backflow input 唯一入口 research_request_id**；caller 不能 override
+  company/question/cutoff/claim/evidence scope。
+- **Migration 0044 + `research_backflow_plans`**：backflow_plan_id /
+  research_backflow_request_id UNIQUE / schema_version / strategy_name /
+  strategy_version / plan_payload JSONB / plan_fingerprint CHAR(64) / created_at；
+  plan_payload 含 need_specs[]（need_code / target_section_ids / related_claim_ids /
+  related_evidence_card_ids / retrieval_queries[] / allowed_source_types[] /
+  manual_required_reason?）。不保存 model reasoning / prompt / secret；v1 0 LLM 确定性生成。
+- **确定性 query 模板**：research question + related Claim statement +
+  research_need_code + section context，禁止 LLM 自由生成 web query；need codes
+  （unsupported_by_evidence / weak_source_quality / stale_or_temporally_misaligned /
+  causal_overreach / insufficient_evidence）映射 strategy。
+- **v1 只研究已有 Source Library**：Document 走真实
+  RetrievalService→Chroma→PG hydrate→EvidenceExtraction→EvidenceCard（不手工伪造
+  RetrievalHit）；Macro/Financial 复用 production services；无满足 source →
+  manual_required / source_acquisition_required，不假装完成。
+- **Progress**：新增 relevant EvidenceCard 或新增 verified deterministic artifact 且
+  新 Stage4 SynthesisResult ≠ 旧 且 新 SynthesisRun fingerprint ≠ 旧；复用
+  `ResearchBackflowNoProgress`；不重检索旧 Evidence 算 progress。
+- **Child attempt 语义**：top-level O1 attempt=1 = user execution attempt；child attempt
+  （Stage4/5 attempt=1/2）= 该 orchestration 内 research generation；Audit research 后仍
+  same O1 same top-level thread，Stage4/5 attempt=2；不新建 top-level orchestration；
+  不混 child attempt_no 与 orchestration attempt_no；
+  `ensure_stage4_child` / `ensure_stage5_child` 支持显式 attempt_no≥1；exact identity =
+  orchestration_id + stage + attempt_no。
+- **Backflow loop 扩展顶层 graph**：research_required → research_backflow →
+  plan_supplemental_research → execute_supplemental_research → verify_progress →
+  prepare_updated_analysis → Stage4 attempt2 → Synthesis S2 →
+  `ResearchBackflowService.fulfill_request(request_id, S2)` →
+  build_stage5_continuation_request → Stage5 attempt2 → route again；必须复用现有
+  fulfill_request / build_stage5_continuation_request。
+- **S2 代表 updated complete Claim set**（原 question + analysis_as_of + 仍有效旧
+  Evidence + 新 supplemental Evidence），不是 patch Claim。
+- **MAX_BACKFLOW_RESEARCH_ROUNDS = 2**；达到上限 → waiting_human / manual_required，
+  稳定 reason `research_backflow_limit_reached`，不 failed。
+- **本轮完成（2026-08-12）**：Migration 0044（head）+ `research_backflow_plans` +
+  service/repository + 确定性 query 派生；`ResearchBackflowExecutor` v1 只研究已有
+  Source Library（真实 Retrieval→Chroma→EvidenceCard，0 real DeepSeek）；顶层 graph
+  backflow loop（plan_supplemental_research → execute_supplemental_research →
+  verify_progress → prepare_updated_analysis → Stage4/5 attempt → fulfill_request →
+  build_stage5_continuation_request → route again）；recovery 显式排除 waiting_human
+  （research_backflow / waiting_manual 等人工不自动恢复）。验证：非集成 2061 + 集成
+  987 全绿，ruff 干净，alembic 0044（head）。
+- **本轮不做（边界）**：live external provider 自动抓取、官方披露隐藏接口、
+  Playwright、Web 大改、Stage7B Evaluation。
 
-## 7B：三路评估（3-way Evaluation，planned）
+## 7B：三路系统评估（3-way System Evaluation，planned，frozen）
 
-- 对自动编排产出的最终研究报告做**三路独立评估并汇合**，不伪造数据、不越过既有证据链：
-  1. **事实核查评估**：复用 Stage5 Report Audit / Check 结果——issue 分布、severity、
-     `recommended_route` 与最终修订是否闭合；
-  2. **证据链评估**：Source → Evidence → Claim → Report → Audit 全程可追溯——
-     report 关键论断逐条定位到 Evidence 与 Source，缺失/断裂回退为显式 gap；
-  3. **人工/分析师复核**：分析师对证据充分性、判断稳健性与表述准确性给出独立判定。
-- 三路汇合 → 结构化评估结论（每路 pass / needs_revision / blocked），持久化为一等公民
-  evaluation artifact。
-- **本轮不做**：7B 实现（含其依赖的 Stage7 全链自动执行），明确排期到后续阶段。
+- **三路对照，不是三种评估通道**：对同一批 **frozen cases / snapshots / questions /
+  labels**，分别跑三条 research pipeline，比较端到端输出质量：
+  1. **single_rag**：单次 RAG 直接生成报告；
+  2. **multi_stage_no_audit**：多阶段证据链但无 Audit（无事实核查 / 修订）；
+  3. **insightforge_full**：InsightForge 全链（证据链 + Audit + 修订 + backflow）。
+- **metric / judge channel**：quality / evidence / citation / cost-token / latency /
+  failure-recovery 作为比较维度；「事实核查 / 证据链 / 人工评分」只允许作为
+  **metric 或 judge channel**（评分来源），**不是 7B 的评估结构本身**。
+- **本轮不做**：7B 实现（含其依赖的 Stage7 全链自动执行），明确排期到后续阶段；
+  不因 7A.2B.3 提前开始。
 
 ## 7C：受控资料获取 + Stage 7 整体闭环（planned）
 

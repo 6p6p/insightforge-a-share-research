@@ -88,6 +88,13 @@ class ResearchBackflowFulfillmentNotFound(ResearchBackflowError):
     message = "research backflow fulfillment not found"
 
 
+class ResearchBackflowPlanNotFound(ResearchBackflowError):
+    """backflow_plan_id 不存在。"""
+
+    code = "research_backflow_plan_not_found"
+    message = "research backflow plan not found"
+
+
 class ResearchBackflowContinuationMismatch(ResearchBackflowError):
     """continuation identity（spec L）不符：新 SynthesisResult 的 company /
     research-question / analysis_as_of 与 request 绑定不一致。

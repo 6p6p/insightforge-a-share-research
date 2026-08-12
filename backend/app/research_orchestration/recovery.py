@@ -108,6 +108,10 @@ class ResearchOrchestrationRecoveryCoordinator:
             return False
         if orchestration.status in _TERMINAL_ORCHESTRATION_STATUSES:
             return False
+        if orchestration.status == OrchestrationStatus.WAITING_HUMAN.value:
+            # 等人工（awaiting_stage5 / research_backflow / waiting_manual）不自动
+            # 恢复；候选 SQL 已按 status 过滤，这里按同一语义防御直接调用。
+            return False
         if orchestration.current_phase == OrchestrationPhase.AWAITING_STAGE5.value:
             return False
 

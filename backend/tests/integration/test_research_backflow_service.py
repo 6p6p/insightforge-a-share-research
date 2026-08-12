@@ -33,6 +33,11 @@ from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.research_backflow.contracts import (
+    MAX_QUERIES_PER_NEED,
+    RESEARCH_BACKFLOW_PLAN_SCHEMA_VERSION,
+    SUPPLEMENTAL_RESEARCH_STRATEGY_NAME,
+)
 from app.research_backflow.errors import (
     ResearchBackflowAlreadyFulfilled,
     ResearchBackflowContinuationMismatch,
@@ -271,6 +276,76 @@ async def test_research_request_auto_created_and_replayed(env, monkeypatch, conn
         == verified.verified_source_synthesis.research_question_sha256
     )
     assert verified.analysis_as_of == verified.verified_source_synthesis.analysis_as_of
+
+
+# ---------------------------------------------------------------- 补充研究计划（7A.2B.3 spec K）
+
+
+async def test_research_backflow_plan_created_and_replayed(
+    env, monkeypatch, connection_uri
+) -> None:
+    """supplemental plan：确定性派生 + create_or_get replay + tamper → IntegrityError。
+
+    audit issue（unsupported_by_evidence，白名单）→ 恰好一个 need_spec；query /
+    allowed_source_types 非空（冻结模板 + 真实 source 词表）；replay 幂等同指纹；
+    直接改 DB payload → 重放校验失败（**不自动 repair**）。
+    """
+    synthesis_result_id = await _seed_synthesis(env, monkeypatch, connection_uri)
+    request = _request(env, synthesis_result_id)
+    deps = _stage5_deps(
+        env["sessionmaker"],
+        draft_model=FakeDraftSectionModel(decision_factory=valid_decision_for),
+        audit_model=FakeAuditModel(decision_factory=research_decision),
+        revision_model=FakeRevisionWriterModel(),
+    )
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        runner = Stage5WorkflowRunner(env["sessionmaker"], manager, deps)
+        run = await runner.create_stage5_run(request)
+        result = await runner.execute_stage5(run.run_id, request)
+    finally:
+        await manager.close()
+    assert result["terminal"] == STAGE5_TERMINAL_RESEARCH_REQUIRED
+
+    service = deps.research_backflow_service
+    req = await service.create_or_get_request(run.run_id)
+
+    plan = await service.create_or_get_plan(req.research_request_id)
+    assert plan.replayed is False
+    assert plan.plan_schema_version == RESEARCH_BACKFLOW_PLAN_SCHEMA_VERSION
+    assert plan.strategy_name == SUPPLEMENTAL_RESEARCH_STRATEGY_NAME
+    assert len(plan.plan_fingerprint) == 64
+    assert plan.plan_payload["max_queries_per_need"] == MAX_QUERIES_PER_NEED
+    # unsupported_by_evidence ∈ 白名单 → 恰好一个 need_spec。
+    assert [spec["need_code"] for spec in plan.plan_payload["need_specs"]] == [
+        "unsupported_by_evidence"
+    ]
+    spec = plan.plan_payload["need_specs"][0]
+    assert spec["retrieval_queries"], "冻结 query 模板非空"
+    assert spec["allowed_source_types"], "真实 source 词表非空"
+
+    # 数据库落一行。
+    assert await _run_count(env["sessionmaker"], "research_backflow_plans") == 1
+
+    # replay 幂等：同一 plan_id / 同一指纹。
+    again = await service.create_or_get_plan(req.research_request_id)
+    assert again.replayed is True
+    assert again.backflow_plan_id == plan.backflow_plan_id
+    assert again.plan_fingerprint == plan.plan_fingerprint
+
+    # tamper：直接改 DB payload → 重放校验失败（0 自动 repair）。
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE research_backflow_plans SET plan_payload = JSONB_SET("
+                "plan_payload, '{max_queries_per_need}', '9'::jsonb) "
+                "WHERE research_backflow_request_id = CAST(:rid AS uuid)"
+            ).bindparams(rid=req.research_request_id)
+        )
+        await session.commit()
+    with pytest.raises(ResearchBackflowIntegrityError):
+        await service.create_or_get_plan(req.research_request_id)
 
 
 # ---------------------------------------------------------------- 路径 B：human research

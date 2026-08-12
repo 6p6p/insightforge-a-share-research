@@ -27,6 +27,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.domain.tasks import WorkflowRunStatus
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
+    MAX_BACKFLOW_RESEARCH_ROUNDS,
+    RESEARCH_BACKFLOW_LIMIT_REACHED,
+    RESEARCH_BACKFLOW_NO_PROGRESS,
     OrchestrationPhase,
     OrchestrationStatus,
 )
@@ -304,6 +307,30 @@ async def _stage5_request(deps: ResearchOrchestrationDependencies, state) -> Sta
     )
 
 
+def _require_backflow(deps: ResearchOrchestrationDependencies):
+    """backflow loop 节点：deps 未装配 → RuntimeError（programming error，不静默降级）。"""
+    if deps.backflow_service is None or deps.backflow_executor is None:
+        raise RuntimeError("research backflow dependencies not bound")
+    return deps.backflow_service, deps.backflow_executor
+
+
+async def _stage5_request_for_attempt(
+    deps: ResearchOrchestrationDependencies, state
+) -> tuple[Stage5WorkflowRequest, int]:
+    """Stage5 request + attempt_no：backflow 激活（round>0）→ continuation request
+    （spec O：`build_stage5_continuation_request(fulfillment_id)`）+ attempt=round+1；
+    否则从 Stage4 checkpoint 投影 + attempt=1。caller（ensure_stage5_child /
+    run_or_resume_stage5）共用，保证 execute 与 request 一致。
+    """
+    if (state.get("backflow_round") or 0) > 0:
+        service, _ = _require_backflow(deps)
+        return (
+            await service.build_stage5_continuation_request(UUID(state["fulfillment_id"])),
+            state["backflow_round"] + 1,
+        )
+    return (await _stage5_request(deps, state), 1)
+
+
 async def _stage5_outcome(
     deps: ResearchOrchestrationDependencies, run_id: UUID
 ) -> tuple[str, dict]:
@@ -340,28 +367,42 @@ async def _stage5_outcome(
 
 
 def make_ensure_stage5_child_node(deps: ResearchOrchestrationDependencies):
-    """ensure_stage5_child：exact child (orchestration_id, stage5, attempt 1)。
+    """ensure_stage5_child：exact child (orchestration_id, stage5, attempt_no)。
 
-    - 从真实 Stage4 checkpoint 投影 `Stage5WorkflowRequest`（spec J/K），不复制
-      Stage4→Stage5 bridge 逻辑；
+    - 首启（round=0）：从真实 Stage4 checkpoint 投影 `Stage5WorkflowRequest`
+      （spec J/K），不复制 Stage4→Stage5 bridge 逻辑；attempt 1；
+    - backflow（round>0，7A.2B.3）：`build_stage5_continuation_request(fulfillment_id)`
+      构造续跑 request（spec O），attempt = round + 1，child link 记录
+      source_research_request_id；
     - 经 `ResearchOrchestrationChildService.ensure_stage5_child` **同一事务**创建
       WorkflowRun + child link（已有 child → attach，不重复 create，spec K）。
     """
 
     async def ensure_stage5_child(state) -> dict:
-        stage5_request = await _stage5_request(deps, state)
+        stage5_request, attempt_no = await _stage5_request_for_attempt(deps, state)
+        is_backflow = (state.get("backflow_round") or 0) > 0
         child = await deps.child_service.ensure_stage5_child(
-            UUID(state["orchestration_id"]), stage5_request
+            UUID(state["orchestration_id"]),
+            stage5_request,
+            attempt_no=attempt_no,
+            source_research_request_id=(
+                UUID(state["research_request_id"]) if is_backflow else None
+            ),
+        )
+        phase = (
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW)
+            if is_backflow
+            else _phase_value(OrchestrationPhase.STAGE5)
         )
         await _persist_phase(
             deps.sessionmaker,
             state["orchestration_id"],
             OrchestrationStatus.RUNNING.value,
-            _phase_value(OrchestrationPhase.STAGE5),
+            phase,
         )
         return {
             "current_child_run_id": str(child.run_id),
-            "current_phase": _phase_value(OrchestrationPhase.STAGE5),
+            "current_phase": phase,
         }
 
     return ensure_stage5_child
@@ -380,7 +421,7 @@ def make_run_or_resume_stage5_node(deps: ResearchOrchestrationDependencies):
 
     async def run_or_resume_stage5(state) -> dict:
         run_id = UUID(state["current_child_run_id"])
-        stage5_request = await _stage5_request(deps, state)
+        stage5_request, _ = await _stage5_request_for_attempt(deps, state)
         async with deps.sessionmaker() as session:
             run = await WorkflowRunRepository(session).get_by_id(run_id)
         if run is None:
@@ -394,15 +435,20 @@ def make_run_or_resume_stage5_node(deps: ResearchOrchestrationDependencies):
         # completed / waiting_human / cancelled / running：不重复执行。
 
         status, extra = await _stage5_outcome(deps, run_id)
+        phase = (
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW)
+            if (state.get("backflow_round") or 0) > 0
+            else _phase_value(OrchestrationPhase.STAGE5)
+        )
         await _persist_phase(
             deps.sessionmaker,
             state["orchestration_id"],
             OrchestrationStatus.RUNNING.value,
-            _phase_value(OrchestrationPhase.STAGE5),
+            phase,
         )
         return {
             "stage5_run_status": status,
-            "current_phase": _phase_value(OrchestrationPhase.STAGE5),
+            "current_phase": phase,
             **extra,
         }
 
@@ -415,8 +461,16 @@ def route_stage5_result(state) -> str:
     continuation（spec M）：runner 用 `aupdate_state(config, {"current_phase":
     stage5}, as_node="ensure_stage5_child")` 重新进入 `run_or_resume_stage5`
     后，节点重新投影 fresh `stage5_run_status`，本函数据此重新判定。
+
+    research_required（7A.2B.3）：`backflow_round < MAX_BACKFLOW_RESEARCH_ROUNDS`
+    → 返回 `research_required`（进入 backflow loop）；否则 → `research_backflow_manual`
+    （达到上限，reason=research_backflow_limit_reached）。
     """
     status = state.get("stage5_run_status")
+    if status == STAGE5_ROUTE_RESEARCH_REQUIRED:
+        if (state.get("backflow_round") or 0) >= MAX_BACKFLOW_RESEARCH_ROUNDS:
+            return "research_backflow_manual"
+        return STAGE5_ROUTE_RESEARCH_REQUIRED
     if status in _STAGE5_ROUTE_VALUES:
         return status
     raise ValueError(f"invalid stage5_run_status: {status}")
@@ -456,11 +510,180 @@ def make_complete_orchestration_node(deps: ResearchOrchestrationDependencies):
     return complete_orchestration
 
 
-def make_pause_for_research_node(deps: ResearchOrchestrationDependencies):
-    """pause_for_research：Stage5 research_required → **只持久化 research_request_id
-    + phase=research_backflow**（spec P；不实现 backflow 循环）。"""
+# ------------------------------------------------------------------ backflow loop（7A.2B.3）
 
-    async def pause_for_research(state) -> dict:
+
+def make_plan_supplemental_research_node(deps: ResearchOrchestrationDependencies):
+    """plan_supplemental_research：round+1，create/replay 确定性补充计划（spec K）。
+
+    `ResearchBackflowService.create_or_get_plan`（0 LLM 派生 need_specs[]，同
+    request → replay）；`backflow_round` 递增表示进入一轮 backflow（Stage4/5
+    child attempt = round + 1）。
+    """
+
+    async def plan_supplemental_research(state) -> dict:
+        service, _ = _require_backflow(deps)
+        round_no = (state.get("backflow_round") or 0) + 1
+        plan = await service.create_or_get_plan(UUID(state["research_request_id"]))
+        await _persist_phase(
+            deps.sessionmaker,
+            state["orchestration_id"],
+            OrchestrationStatus.RUNNING.value,
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        )
+        return {
+            "backflow_round": round_no,
+            "backflow_plan_id": str(plan.backflow_plan_id),
+            "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        }
+
+    return plan_supplemental_research
+
+
+def make_execute_supplemental_research_node(deps: ResearchOrchestrationDependencies):
+    """execute_supplemental_research：确定性检索已有 Source Library → 新证据卡。
+
+    verify request（重放校验）→ create_or_get_plan（幂等 replay 拿 plan_payload）
+    → `ResearchBackflowExecutor.execute_supplemental_research`（真实检索链，只研究
+    已有 source；无满足 source → manual_required）。投影**新增** EvidenceCard id
+    供 verify_progress / prepare_updated_analysis。
+    """
+
+    async def execute_supplemental_research(state) -> dict:
+        service, executor = _require_backflow(deps)
+        verified = await service.verify_research_request_integrity(
+            UUID(state["research_request_id"])
+        )
+        plan = await service.create_or_get_plan(UUID(state["research_request_id"]))
+        result = await executor.execute_supplemental_research(verified, plan.plan_payload)
+        await _persist_phase(
+            deps.sessionmaker,
+            state["orchestration_id"],
+            OrchestrationStatus.RUNNING.value,
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        )
+        return {
+            "backflow_new_evidence_card_ids": [
+                str(card_id) for card_id in result.new_evidence_card_ids
+            ],
+            "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        }
+
+    return execute_supplemental_research
+
+
+def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
+    """verify_progress：新增 relevant EvidenceCard → 有进度；否则 → manual_required。
+
+    v1 只判定 executor 产出的新增 EvidenceCard（spec：新增 EvidenceCard **或**新增
+    verified deterministic artifact 且新 Stage4 SynthesisResult ≠ 旧且新 run
+    fingerprint ≠ 旧）。backflow executor 只产出 EvidenceCard；deterministic
+    artifact（macro/calculation/valuation）是 production pools 的既有产物，非本
+    loop 新增——分支 B 预留。无进度 → `research_backflow_manual`（稳定 reason
+    research_backflow_no_progress，复用 ResearchBackflowNoProgress 语义）。
+    """
+
+    async def verify_progress(state) -> dict:
+        has_progress = bool(state.get("backflow_new_evidence_card_ids"))
+        await _persist_phase(
+            deps.sessionmaker,
+            state["orchestration_id"],
+            OrchestrationStatus.RUNNING.value,
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        )
+        return {
+            "backflow_progress": has_progress,
+            "backflow_manual_reason": (
+                None if has_progress else RESEARCH_BACKFLOW_NO_PROGRESS
+            ),
+            "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        }
+
+    return verify_progress
+
+
+def route_backflow_progress(state) -> str:
+    """verify_progress → 条件边：有进度 → Stage4 attempt；无 → manual_required。"""
+    return "progress" if state.get("backflow_progress") else "no_progress"
+
+
+def route_after_collect_synthesis(state) -> str:
+    """collect_synthesis → 条件边：首启（round=0）→ ensure_stage5_child；backflow
+    （round>0）→ fulfill_request（先消费新 SynthesisResult 再重建 Stage5 续跑）。"""
+    return "fulfill_request" if (state.get("backflow_round") or 0) > 0 else "ensure_stage5_child"
+
+
+def make_prepare_updated_analysis_node(deps: ResearchOrchestrationDependencies):
+    """prepare_updated_analysis：重跑 prepare（新卡经 research_question_sha256
+    自动进 doc_evidence_pool → stage4_request，无需新 request-builder）→ ensure
+    Stage4 child attempt round+1，`stage4_child_run_id` 锚点更新为最新 Stage4 run
+    （collect_synthesis 读它得到新 SynthesisResult）。
+    """
+
+    async def prepare_updated_analysis(state) -> dict:
+        prep = await deps.preparation.prepare_research(UUID(state["research_plan_id"]))
+        if not prep.ready_for_analysis or prep.stage4_request is None:
+            raise ResearchOrchestrationIntegrityError(
+                "backflow stage4 child requires ready preparation"
+            )
+        attempt_no = (state.get("backflow_round") or 0) + 1
+        child = await deps.child_service.ensure_stage4_child(
+            UUID(state["orchestration_id"]),
+            prep.stage4_request,
+            attempt_no=attempt_no,
+            source_research_request_id=UUID(state["research_request_id"]),
+        )
+        await _persist_phase(
+            deps.sessionmaker,
+            state["orchestration_id"],
+            OrchestrationStatus.RUNNING.value,
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        )
+        return {
+            "stage4_child_run_id": str(child.run_id),
+            "current_child_run_id": str(child.run_id),
+            "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        }
+
+    return prepare_updated_analysis
+
+
+def make_fulfill_request_node(deps: ResearchOrchestrationDependencies):
+    """fulfill_request：消费新 Stage4 SynthesisResult → fulfillment 行（spec K/L/M/N）。
+
+    `fulfill_request(research_request_id, new_synthesis_result_id)`：verify request
+    + verify 新 result + continuation identity（company/question/cutoff 全等）+
+    no-progress 政策（新 result ≠ source result 且新 run fingerprint ≠ source）+
+    fingerprint → create_or_get。产物 `fulfillment_id` 供 Stage5 continuation
+    request 重建。
+    """
+
+    async def fulfill_request(state) -> dict:
+        service, _ = _require_backflow(deps)
+        fulfillment = await service.fulfill_request(
+            UUID(state["research_request_id"]), UUID(state["synthesis_result_id"])
+        )
+        await _persist_phase(
+            deps.sessionmaker,
+            state["orchestration_id"],
+            OrchestrationStatus.RUNNING.value,
+            _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        )
+        return {
+            "fulfillment_id": str(fulfillment.fulfillment_id),
+            "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+        }
+
+    return fulfill_request
+
+
+def make_research_backflow_manual_node(deps: ResearchOrchestrationDependencies):
+    """research_backflow_manual：backflow 终止 → status=waiting_human、phase=
+    research_backflow、稳定 reason（research_backflow_no_progress 由 verify_progress
+    投影；research_backflow_limit_reached 由 round 上限路由触发，节点默认）。"""
+
+    async def research_backflow_manual(state) -> dict:
+        reason = state.get("backflow_manual_reason") or RESEARCH_BACKFLOW_LIMIT_REACHED
         await _persist_phase(
             deps.sessionmaker,
             state["orchestration_id"],
@@ -468,11 +691,11 @@ def make_pause_for_research_node(deps: ResearchOrchestrationDependencies):
             _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         )
         return {
-            "research_request_id": state.get("research_request_id"),
+            "backflow_manual_reason": reason,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         }
 
-    return pause_for_research
+    return research_backflow_manual
 
 
 def make_stage5_failed_node(deps: ResearchOrchestrationDependencies):

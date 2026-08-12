@@ -27,17 +27,21 @@ Concentrated Cases 1-7（spec W）：
 
 import asyncio
 import time
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
+from app.analysis.claims.contracts import ClaimAnalysisDecision, ClaimCandidate
 from app.analysis.financial.errors import FinancialAnalysisModelUnavailable
+from app.claims.contracts import ClaimConfidence, ClaimImportance, ClaimKind
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.research_orchestration.contracts import RESEARCH_BACKFLOW_LIMIT_REACHED
 from app.research_orchestration.dependencies import ResearchOrchestrationDependencies
 from app.research_orchestration.recovery import ResearchOrchestrationRecoveryCoordinator
 from app.research_orchestration.runner import ResearchOrchestrationRunner
@@ -55,6 +59,7 @@ from app.research_planning.service import ResearchPlanningService
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.source_registry_service import SourceRegistryService
 from app.services.workflow_recovery_service import WorkflowRecoveryService
+from app.stage4.contracts import Stage4WorkflowRequest
 from app.stage4.runner import Stage4WorkflowRunner
 from app.stage5.runner import Stage5WorkflowRunner
 from app.storage.raw_store import LocalRawArtifactStore
@@ -63,6 +68,9 @@ from app.workflows.checkpoint import LangGraphCheckpointManager
 from tests.analysis.financial.fakes import FakeFinancialAnalysisModel
 from tests.audit.fakes import FakeAuditModel, pass_decision
 from tests.draft_section.fakes import FakeDraftSectionModel, valid_decision_for
+from tests.integration.test_claim_analysis_service import (
+    _seed_document_card as _seed_claim_doc_card,
+)
 from tests.integration.test_report_audit_service import (
     human_review_decision,
     research_decision,
@@ -73,14 +81,15 @@ from tests.integration.test_research_planning_service import (
 )
 from tests.integration.test_revision_service import _cleanup_with_revisions
 from tests.integration.test_stage4_workflow import (
-    _build_deps as _stage4_deps,
-)
-from tests.integration.test_stage4_workflow import (
+    _QUESTION,
     _claim_count_for_company,
     _good_models,
     _request,
     _seed_worker_inputs,
     _synthesis_counts,
+)
+from tests.integration.test_stage4_workflow import (
+    _build_deps as _stage4_deps,
 )
 from tests.integration.test_stage5_workflow import _stage5_deps
 from tests.integration.test_valuation_claim_service import _seed_company
@@ -199,6 +208,76 @@ class _SequencedAuditDecision:
         return self._factories[idx](pack)
 
 
+class _FakeBackflowExecutor:
+    """可控 `ResearchBackflowExecutor`：按调用次序返回预置 new_evidence_card_ids
+    （最后重复）。只投影 `new_evidence_card_ids`（graph 节点只读它；真实检索链
+    已由 test_research_backflow_executor.py 覆盖，0 real DeepSeek）。"""
+
+    def __init__(self, new_card_batches=()) -> None:
+        self._batches = list(new_card_batches)
+        self.calls = 0
+        self.executed: list = []
+
+    async def execute_supplemental_research(self, verified_request, plan_payload):
+        self.calls += 1
+        self.executed.append((verified_request, plan_payload))
+        idx = min(self.calls - 1, len(self._batches) - 1) if self._batches else -1
+        return SimpleNamespace(
+            new_evidence_card_ids=tuple(self._batches[idx]) if self._batches else ()
+        )
+
+
+def _with_extra_card(request: Stage4WorkflowRequest, extra_card_id) -> Stage4WorkflowRequest:
+    """把新卡追加到 business work item（模拟真实 prepare 把新 EvidenceCard 经
+    research_question_sha256 过滤纳入 stage4_request）。extra_card_id 可能是
+    str / UUID（seed helper 返回 UUID）；work item 保持 Pydantic model（Stage4
+    `_build_initial_state` 对 item 调 model_dump）。"""
+    extra_uuid = UUID(str(extra_card_id))
+    items = [
+        item.model_copy(update={"evidence_card_ids": item.evidence_card_ids + [extra_uuid]})
+        if item.item_id == "biz"
+        else item
+        for item in request.analysis_work_items
+    ]
+    return request.model_copy(update={"analysis_work_items": items})
+
+
+class _RefAwareClaimModel:
+    """Deterministic claim model：decision 引用 evidence pack 全部 refs。
+
+    fake claim 分析按 str(card_id) 排序分配 E1..En；若只引 E1（如
+    `_claim_decision`），新增卡除非恰好成为最小 UUID 卡，否则不改变 claim 的
+    evidence relations → fingerprint 不变 → backflow fulfill 误判 no progress。
+    引用**全部** refs 保证：work item 纳入新 EvidenceCard → 新 support ref →
+    新 claim fingerprint → 新 synthesis run（确定性，不依赖 UUID 排序）。
+    """
+
+    model_id = "ref-aware-claim"
+
+    async def analyze(self, context, evidence_pack):
+        self.calls = getattr(self, "calls", [])
+        self.calls.append((context, evidence_pack))
+        return ClaimAnalysisDecision(
+            relevant=True,
+            claims=[
+                ClaimCandidate(
+                    statement="ref-aware claim",
+                    claim_kind=ClaimKind.INFERENCE,
+                    confidence=ClaimConfidence.MEDIUM,
+                    importance=ClaimImportance.NORMAL,
+                    support_refs=[item.evidence_ref for item in evidence_pack.items],
+                    contradict_refs=[],
+                    context_refs=[],
+                )
+            ],
+        )
+
+
+def _ref_aware_models() -> dict:
+    """`_good_models()` + ref-aware claim model（biz/rsk 用）。"""
+    return {**_good_models(), "claim": _RefAwareClaimModel()}
+
+
 def _planner(sessionmaker) -> ResearchPlanningService:
     return ResearchPlanningService(
         sessionmaker,
@@ -229,8 +308,13 @@ def _orchestration_deps(
     prep_outcomes=None,
     models=None,
     revision_model=None,
+    backflow_executor=None,
 ) -> ResearchOrchestrationDependencies:
-    """完整顶层 deps：plan/router/stage4/synthesis/stage5，fake prepare/fulfill/models。"""
+    """完整顶层 deps：plan/router/stage4/synthesis/stage5，fake prepare/fulfill/models。
+
+    `backflow_executor`（7A.2B.3）：注入后 research_required 触发 backflow loop；
+    真实 `research_backflow_service` 始终绑定（stage5 deps 内构造，0 model call）。
+    """
     prep_outcomes = prep_outcomes or [(True, request, [])]
     plan_service = _planner(sessionmaker)
     router = ResearchSourceRouter(sessionmaker, plan_service)
@@ -254,6 +338,8 @@ def _orchestration_deps(
         stage4_runner=stage4_runner,
         synthesis_service=SynthesisService(sessionmaker),
         stage5_runner=stage5_runner,
+        backflow_service=stage5_runner.dependencies.research_backflow_service,
+        backflow_executor=backflow_executor,
     )
 
 
@@ -296,22 +382,32 @@ async def _get_orchestration_row(sessionmaker, orchestration_id: UUID) -> dict:
         return dict(row)
 
 
-async def _get_child(sessionmaker, orchestration_id: UUID, stage: str) -> dict | None:
+async def _get_child(
+    sessionmaker, orchestration_id: UUID, stage: str, *, attempt_no: int = 1
+) -> dict | None:
     async with sessionmaker() as session:
         row = (
             (
                 await session.execute(
                     text(
-                        "SELECT workflow_run_id::text AS run_id, stage, attempt_no "
+                        "SELECT workflow_run_id::text AS run_id, stage, attempt_no, "
+                        "source_research_request_id::text AS source_research_request_id "
                         "FROM research_orchestration_child_runs "
-                        "WHERE orchestration_id = :oid AND stage = :stage AND attempt_no = 1"
-                    ).bindparams(oid=orchestration_id, stage=stage)
+                        "WHERE orchestration_id = :oid AND stage = :stage AND attempt_no = :an"
+                    ).bindparams(oid=orchestration_id, stage=stage, an=attempt_no)
                 )
             )
             .mappings()
             .first()
         )
         return dict(row) if row else None
+
+
+async def _get_child_attempt(
+    sessionmaker, orchestration_id: UUID, stage: str, attempt_no: int
+) -> dict | None:
+    """按 attempt_no 精确取 child（backflow 断言用）。"""
+    return await _get_child(sessionmaker, orchestration_id, stage, attempt_no=attempt_no)
 
 
 async def _runs_for_task(sessionmaker, task_id: UUID) -> list[dict]:
@@ -502,9 +598,11 @@ async def test_case3_rewrite_revision_complete(env, monkeypatch, connection_uri)
 # ---------------------------------------------------------------- Case 4
 
 
-async def test_case4_research_route_no_auto_research(env, monkeypatch, connection_uri) -> None:
-    """Case 4：research route（audit research_required）→ ResearchBackflowRequest →
-    orchestration phase=research_backflow、status=waiting_human、no auto research。"""
+async def test_case4_research_route_no_progress_manual(env, monkeypatch, connection_uri) -> None:
+    """Case 4（7A.2B.3）：research_required → backflow loop round1 → 无新增
+    EvidenceCard → verify no_progress → research_backflow_manual
+    （reason=research_backflow_no_progress）→ waiting_human；真实补充计划落库、
+    无新 child / 无 fulfillment（不假装完成）。"""
     ids = await _seed_worker_inputs(env, monkeypatch)
     request = _request(env, ids)
     sessionmaker = env["sessionmaker"]
@@ -514,28 +612,43 @@ async def test_case4_research_route_no_auto_research(env, monkeypatch, connectio
     await manager.setup()
     try:
         orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor()  # 0 卡 → no_progress
         deps = _orchestration_deps(
-            sessionmaker, manager, request, audit_model=_audit_model(research_decision)
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(research_decision),
+            backflow_executor=executor,
         )
         runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
         final = await runner.run_orchestration(orchestration_id)
 
         assert final["current_phase"] == "research_backflow"
         assert final.get("research_request_id")
+        assert final["backflow_round"] == 1
+        assert final["backflow_manual_reason"] == "research_backflow_no_progress"
+        assert final.get("backflow_plan_id")
         row = await _get_orchestration_row(sessionmaker, orchestration_id)
         assert row["status"] == "waiting_human"
         assert row["current_phase"] == "research_backflow"
-        # ResearchBackflowRequest 已持久化（可验证交接请求，spec P）。
+        # ResearchBackflowRequest 已持久化（可验证交接请求，spec P）；补充计划 1 行。
         assert await _count(sessionmaker, "research_backflow_requests") == 1
+        assert await _count(sessionmaker, "research_backflow_plans") == 1
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 0
 
-        # no auto research：无新 WorkflowRun / fulfillment 未触发。
+        # no auto research：无新 WorkflowRun（仍 1 stage4 + 1 stage5）/ fulfillment 未触发。
         runs = await _runs_for_task(sessionmaker, task_id)
         assert len(runs) == 2
         assert all(r["status"] == "completed" for r in runs)
         assert deps.fulfillment.calls == 0
-        # 顶层 checkpoint 携带 research_request_id（供 7A.2B.3 supplemental research）。
+        assert executor.calls == 1
+        # 无 Stage4/Stage5 backflow attempt（child 只有 attempt 1）。
+        assert await _get_child_attempt(sessionmaker, orchestration_id, "stage4", 2) is None
+        assert await _get_child_attempt(sessionmaker, orchestration_id, "stage5", 2) is None
+        # 顶层 checkpoint 携带 research_request_id（backflow loop input 唯一入口）。
         checkpoint = await runner.read_orchestration_checkpoint(orchestration_id)
         assert checkpoint.get("research_request_id")
+        assert checkpoint.get("backflow_plan_id")
     finally:
         await manager.close()
 
@@ -767,5 +880,174 @@ async def test_case7_failed_retry_new_id_thread_attempt2(env, monkeypatch, conne
         assert row1b["current_phase"] == "stage4"
         assert row1b["attempt_no"] == 1
         assert row1b["retry_of_orchestration_id"] is None
+    finally:
+        await manager.close()
+
+
+# ---------------------------------------------------------------- backflow（7A.2B.3）
+
+
+async def test_backflow_progress_fulfill_continuation_completed(
+    env, monkeypatch, connection_uri
+) -> None:
+    """Backflow happy path：research_required → loop round1 → 真实补充计划 + 新增
+    EvidenceCard（fake executor 返回 seed 的真实卡）→ Stage4 attempt2（新卡纳入 →
+    新 Synthesis fingerprint）→ 真实 fulfill_request 落库 → Stage5 attempt2
+    continuation（source_research_request_id 记录）→ audit pass → completed。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    extra = await _seed_claim_doc_card(
+        env,
+        statement="贵州茅台 2026 年新增经销商渠道证据。",
+        source_url="https://www.xinhuanet.com/2026/0810/s4extra.htm",
+        research_question=_QUESTION,
+    )
+    request = _request(env, ids)
+    request2 = _with_extra_card(request, extra["evidence_card_id"])
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        audit = _SequencedAuditDecision(research_decision, pass_decision)
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra["evidence_card_id"],)])
+        # prepare 调用序：首启 3 次（prepare + ensure_stage4_child +
+        # run_or_resume_stage4 都用 base）→ backflow 2 次（prepare_updated_analysis
+        # + run_or_resume_stage4 用 request2）。
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(audit),
+            prep_outcomes=[
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request2, []),
+            ],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        final = await runner.run_orchestration(orchestration_id)
+
+        # completed，backflow round1 正常消费。
+        assert final["current_phase"] == "completed"
+        assert final["backflow_round"] == 1
+        assert final.get("fulfillment_id")
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "completed"
+
+        # 真实补充计划 + fulfillment 各 1 行；Stage4 attempt2 确实重分析。
+        assert await _count(sessionmaker, "research_backflow_plans") == 1
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+        assert executor.calls == 1
+        s_runs, s_results = await _synthesis_counts(sessionmaker)
+        assert (s_runs, s_results) == (2, 2)
+
+        # child：Stage4/Stage5 attempt1 + attempt2；attempt2 记录 source_research_request_id。
+        child4_1 = await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=1)
+        child4_2 = await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=2)
+        child5_1 = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=1)
+        child5_2 = await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2)
+        assert child4_1 is not None and child5_1 is not None
+        assert child4_2 is not None and child5_2 is not None
+        assert child4_2["source_research_request_id"] is not None
+        assert child5_2["source_research_request_id"] is not None
+        assert child4_1["source_research_request_id"] is None
+        assert child5_1["source_research_request_id"] is None
+        assert child4_1["run_id"] != child4_2["run_id"]
+        assert child5_1["run_id"] != child5_2["run_id"]
+
+        # 4 条 run（stage4 x2 + stage5 x2）全部 completed。
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 4
+        assert all(r["status"] == "completed" for r in runs)
+    finally:
+        await manager.close()
+
+
+async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_uri) -> None:
+    """Backflow 达上限：两轮各新增 EvidenceCard + 两轮 fulfill 成功 → Stage5 第三次
+    research_required → round=2 >= MAX → research_backflow_manual
+    （reason=research_backflow_limit_reached）→ waiting_human；3 次 Stage4/Stage5
+    attempt、2 行 fulfillment。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    extra_a = await _seed_claim_doc_card(
+        env,
+        statement="贵州茅台 2026 年渠道证据 A。",
+        source_url="https://www.xinhuanet.com/2026/0810/s4extraA.htm",
+        research_question=_QUESTION,
+    )
+    extra_b = await _seed_claim_doc_card(
+        env,
+        statement="贵州茅台 2026 年渠道证据 B。",
+        source_url="https://www.xinhuanet.com/2026/0810/s4extraB.htm",
+        research_question=_QUESTION,
+    )
+    request = _request(env, ids)
+    request_a = _with_extra_card(request, extra_a["evidence_card_id"])
+    request_ab = _with_extra_card(request_a, extra_b["evidence_card_id"])
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        orchestration_id = await _create_orchestration(sessionmaker, task_id)
+        executor = _FakeBackflowExecutor(
+            new_card_batches=[
+                (extra_a["evidence_card_id"],),
+                (extra_b["evidence_card_id"],),
+            ]
+        )
+        # prepare 调用序：首启 3 次 base → round1 2 次 request_a → round2 2 次
+        # request_ab（prepare/ensure_stage4_child/run_or_resume_stage4 +
+        # prepare_updated_analysis/run_or_resume_stage4）。
+        deps = _orchestration_deps(
+            sessionmaker,
+            manager,
+            request,
+            audit_model=_audit_model(research_decision),  # 每轮都 research_required
+            prep_outcomes=[
+                (True, request, []),
+                (True, request, []),
+                (True, request, []),
+                (True, request_a, []),
+                (True, request_a, []),
+                (True, request_ab, []),
+            ],
+            models=_ref_aware_models(),
+            backflow_executor=executor,
+        )
+        runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
+        final = await runner.run_orchestration(orchestration_id)
+
+        # 达上限 → research_backflow_manual（稳定 reason），不 pretend completed。
+        assert final["current_phase"] == "research_backflow"
+        assert final["backflow_round"] == 2
+        assert final["backflow_manual_reason"] == RESEARCH_BACKFLOW_LIMIT_REACHED
+        row = await _get_orchestration_row(sessionmaker, orchestration_id)
+        assert row["status"] == "waiting_human"
+        assert row["current_phase"] == "research_backflow"
+
+        # 两轮补充计划 + 两轮 fulfillment；Stage4/Stage5 共 3 次 attempt。
+        assert await _count(sessionmaker, "research_backflow_plans") == 2
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 2
+        assert executor.calls == 2
+        s_runs, s_results = await _synthesis_counts(sessionmaker)
+        assert (s_runs, s_results) == (3, 3)
+        assert (
+            await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is not None
+        )
+        assert (
+            await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is not None
+        )
+
+        # 6 条 run（stage4 x3 + stage5 x3）全部 completed（child 终态），顶层 waiting_human。
+        runs = await _runs_for_task(sessionmaker, task_id)
+        assert len(runs) == 6
+        assert all(r["status"] == "completed" for r in runs)
     finally:
         await manager.close()

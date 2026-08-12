@@ -20,6 +20,12 @@ def test_state_keys_exact() -> None:
         "synthesis_result_id",
         "stage5_run_status",
         "research_request_id",
+        "backflow_round",
+        "backflow_plan_id",
+        "backflow_new_evidence_card_ids",
+        "backflow_progress",
+        "backflow_manual_reason",
+        "fulfillment_id",
         "error_code",
     }
 

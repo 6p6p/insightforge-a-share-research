@@ -28,7 +28,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.research_backflow.errors import ResearchBackflowNoProgress
 from app.research_orchestration.contracts import (
+    RESEARCH_BACKFLOW_NO_PROGRESS,
     OrchestrationPhase,
     OrchestrationStatus,
 )
@@ -144,16 +146,42 @@ class ResearchOrchestrationRunner:
     # ------------------------------------------------------------------ internal
 
     async def _stream(self, graph, config, *, initial_state: dict | None) -> dict:
-        """共享执行路径：graph 期间不持有 DB session；异常 → 失败投影后重抛。"""
+        """共享执行路径：graph 期间不持有 DB session；异常 → 失败投影后重抛。
+
+        `ResearchBackflowNoProgress`（7A.2B.3 兜底）：fulfill_request 的 no-progress
+        政策（新 SynthesisResult 与 source 相同）触发 → **不投影 failed**，而是
+        backflow manual_required（status=waiting_human、phase=research_backflow、
+        reason=research_backflow_no_progress；verify_progress 已拦截无新证据，
+        此处是 S2 兜底）。
+        """
         try:
             async for _update in graph.astream(initial_state, config, stream_mode="updates"):
                 pass
             return await graph.aget_state(config)
         except asyncio.CancelledError:
             raise
+        except ResearchBackflowNoProgress:
+            thread_id = UUID(config["configurable"]["thread_id"])
+            await self._mark_research_backflow_manual(thread_id)
+            await graph.aupdate_state(
+                config,
+                {"backflow_manual_reason": RESEARCH_BACKFLOW_NO_PROGRESS},
+                as_node="research_backflow_manual",
+            )
+            return await graph.aget_state(config)
         except Exception as exc:
             await self._mark_orchestration_failed(UUID(config["configurable"]["thread_id"]), exc)
             raise
+
+    async def _mark_research_backflow_manual(self, orchestration_id: UUID) -> None:
+        """backflow 终止投影：status=waiting_human、phase=research_backflow。"""
+        async with self._sessionmaker() as session:
+            await ResearchOrchestrationRepository(session).update_progress(
+                orchestration_id,
+                status=OrchestrationStatus.WAITING_HUMAN.value,
+                current_phase=OrchestrationPhase.RESEARCH_BACKFLOW.value,
+            )
+            await session.commit()
 
     async def _mark_running(self, orchestration_id: UUID, *, phase: str) -> None:
         async with self._sessionmaker() as session:

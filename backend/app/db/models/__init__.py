@@ -42,6 +42,7 @@ from app.db.models.report_export import ReportExportModel
 from app.db.models.report_outline import ReportOutlineModel
 from app.db.models.research_backflow import (
     ResearchBackflowFulfillmentModel,
+    ResearchBackflowPlanModel,
     ResearchBackflowRequestModel,
 )
 from app.db.models.research_orchestration import (
@@ -106,6 +107,7 @@ __all__ = [
     "ReportExportModel",
     "ReportOutlineModel",
     "ResearchBackflowFulfillmentModel",
+    "ResearchBackflowPlanModel",
     "ResearchBackflowRequestModel",
     "ResearchOrchestrationChildModel",
     "ResearchOrchestrationModel",

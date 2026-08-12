@@ -109,11 +109,13 @@ async def _cleanup_with_revisions(sessionmaker) -> None:
 
     5E.2B：research_backflow_fulfillments/requests 以 RESTRICT 引用 workflow_runs /
     reports / review_actions——必须先删，否则后续 DELETE 会被 FK 拒绝。
+    7A.2B.3：research_backflow_plans 以 RESTRICT 引用 requests——必须最先删。
     """
     async with sessionmaker() as session:
         # report_exports 以 RESTRICT 引用 reports / report_audits /
         # human_review_decisions —— 必须先删，否则后续 DELETE 会被 FK 拒绝。
         await session.execute(text("DELETE FROM report_exports"))
+        await session.execute(text("DELETE FROM research_backflow_plans"))
         await session.execute(text("DELETE FROM research_backflow_fulfillments"))
         await session.execute(text("DELETE FROM research_backflow_requests"))
         await session.execute(text("DELETE FROM draft_section_revisions"))

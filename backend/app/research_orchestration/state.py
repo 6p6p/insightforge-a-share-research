@@ -35,7 +35,26 @@ class ResearchOrchestrationState(TypedDict, total=False):
     # state，不碰 DB——续接 aupdate_state 注入 fresh 值后条件边重新判定）。
     stage5_run_status: str
     # research_required terminal 时：Stage5 checkpoint 的 research_request_id
-    # （spec P：仅持久化 ID + phase=research_backflow，不实现 backflow 循环）。
+    # （backflow loop 的 input 唯一入口；Stage5 每轮 research_required 创建新
+    # request，loop 用最新的，spec 7A.2B.3）。
     research_request_id: str
+    # backflow loop（7A.2B.3）：当前已完成补充研究轮数（0 = 未进入 loop；
+    # route_stage5_result 在 research_required 且 round < MAX 时进入 loop）。
+    backflow_round: int
+    # plan_supplemental_research 之后：create_or_get_plan 的确定性补充计划 id。
+    backflow_plan_id: str
+    # execute_supplemental_research 投影的**新增** relevant EvidenceCard id
+    # （canonical 排序；verify_progress 据此判定 progress，prepare_updated_analysis
+    # 据此组装新 Stage4 输入——v1 只判 EvidenceCard）。
+    backflow_new_evidence_card_ids: list[str]
+    # verify_progress 结果：True → 有进度（进入 Stage4 attempt N+1）；False →
+    # manual_required（reason=research_backflow_no_progress）。
+    backflow_progress: bool
+    # backflow terminal 的稳定 reason（research_backflow_limit_reached /
+    # research_backflow_no_progress；checkpoint state observability）。
+    backflow_manual_reason: str
+    # fulfill_request 之后：consumed 的新 SynthesisResult 的 fulfillment 行 id
+    # （build_stage5_continuation_request 据此重建 Stage5 attempt 的 request）。
+    fulfillment_id: str
     # 失败时 runner 投影的稳定 error_code。
     error_code: str

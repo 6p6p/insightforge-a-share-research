@@ -13,12 +13,15 @@ from app.research_orchestration.graph import (
     build_top_level_research_orchestration_graph,
 )
 from app.research_orchestration.nodes import (
+    route_after_collect_synthesis,
+    route_backflow_progress,
     route_readiness,
     route_readiness_after_fulfill,
     route_stage5_result,
 )
 
-# 期望节点集合（graph.py topology 注释中列出的 16 个 node，7A.2B.2 spec L）。
+# 期望节点集合（graph.py topology 注释中列出的 21 个 node，7A.2B.2 spec L +
+# 7A.2B.3 backflow loop）。
 _EXPECTED_NODES = {
     "ensure_plan",
     "ensure_route",
@@ -32,10 +35,15 @@ _EXPECTED_NODES = {
     "run_or_resume_stage5",
     "awaiting_stage5",
     "complete_orchestration",
-    "pause_for_research",
     "stage5_failed",
     "stage5_cancelled",
     "waiting_manual",
+    "plan_supplemental_research",
+    "execute_supplemental_research",
+    "verify_progress",
+    "prepare_updated_analysis",
+    "fulfill_request",
+    "research_backflow_manual",
 }
 
 # 编译后 graph.nodes 还会带 __start__ / __end__ 哨兵节点。
@@ -77,7 +85,28 @@ def test_route_readiness_after_fulfill() -> None:
     ["completed", "waiting_human", "research_required", "failed", "cancelled"],
 )
 def test_route_stage5_result_known_statuses(status: str) -> None:
+    # research_required + round 缺失（0）< MAX → 保持 research_required（进 backflow loop）。
     assert route_stage5_result({"stage5_run_status": status}) == status
+
+
+def test_route_stage5_result_research_required_below_limit_enters_backflow() -> None:
+    """research_required + round < MAX_BACKFLOW_RESEARCH_ROUNDS → 进入 backflow loop。"""
+    assert (
+        route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 0})
+        == "research_required"
+    )
+    assert (
+        route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 1})
+        == "research_required"
+    )
+
+
+def test_route_stage5_result_research_required_limit_reached() -> None:
+    """research_required + round >= MAX → research_backflow_manual（limit）。"""
+    assert (
+        route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 2})
+        == "research_backflow_manual"
+    )
 
 
 def test_route_stage5_result_unknown_status_raises() -> None:
@@ -86,3 +115,19 @@ def test_route_stage5_result_unknown_status_raises() -> None:
         route_stage5_result({"stage5_run_status": "banana"})
     with pytest.raises(ValueError, match="invalid stage5_run_status"):
         route_stage5_result({})
+
+
+# ------------------------------------------------------------------ backflow 条件路由
+
+
+def test_route_backflow_progress() -> None:
+    assert route_backflow_progress({"backflow_progress": True}) == "progress"
+    assert route_backflow_progress({"backflow_progress": False}) == "no_progress"
+    assert route_backflow_progress({}) == "no_progress"
+
+
+def test_route_after_collect_synthesis() -> None:
+    assert route_after_collect_synthesis({}) == "ensure_stage5_child"  # 首启
+    assert route_after_collect_synthesis({"backflow_round": 0}) == "ensure_stage5_child"
+    assert route_after_collect_synthesis({"backflow_round": 1}) == "fulfill_request"
+    assert route_after_collect_synthesis({"backflow_round": 2}) == "fulfill_request"

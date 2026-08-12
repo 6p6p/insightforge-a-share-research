@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.research_backflow.executor import ResearchBackflowExecutor
+from app.research_backflow.service import ResearchBackflowService
 from app.research_fulfillment.service import ResearchFulfillmentService
 from app.research_orchestration.service import ResearchOrchestrationChildService
 from app.research_planning.preparation import ResearchPreparationService
@@ -39,3 +41,7 @@ class ResearchOrchestrationDependencies:
     stage4_runner: Stage4WorkflowRunner
     synthesis_service: SynthesisService
     stage5_runner: Stage5WorkflowRunner
+    # 7A.2B.3 backflow loop 依赖（生产 factory 装配；未进入 backflow 的测试可
+    # 不注入——backflow 节点在缺 deps 时抛 RuntimeError，不静默降级）。
+    backflow_service: ResearchBackflowService | None = None
+    backflow_executor: ResearchBackflowExecutor | None = None

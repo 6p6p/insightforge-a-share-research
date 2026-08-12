@@ -1,4 +1,5 @@
-"""Research backflow service (stage 5E.2B): 可验证 research handoff + 消费新综合。
+"""Research backflow service (stage 5E.2B + 7A.2B.3): 可验证 research handoff +
+确定性补充计划 + 消费新综合。
 
 Stage5 **不执行** Stage2/3/4 research。本 service 只负责确定性交接与控制：
 1. `create_or_get_request(source_stage5_run_id)`（spec F/G/H/I/J）：从 Stage 5 run
@@ -7,14 +8,18 @@ Stage5 **不执行** Stage2/3/4 research。本 service 只负责确定性交接�
    human_review + research decision）→ 从 Report→Outline→Synthesis chain 恢复
    身份 / cutoff（caller 不能提供）→ derive 结构化 request_payload → request
    fingerprint → create_or_get 原子持久化（同 run → replay，不 update）；
-2. `fulfill_request(research_request_id, new_synthesis_result_id)`（spec K/L/M/N）：
+2. `create_or_get_plan(research_backflow_request_id)`（spec K）：verify request →
+   加载 related Claim statements → **0 LLM** 确定性派生补充计划 payload
+   （need_specs[] + 冻结 query 模板）→ plan fingerprint → create_or_get（同
+   request → replay）；
+3. `fulfill_request(research_request_id, new_synthesis_result_id)`（spec K/L/M/N）：
    verify request → verify 新 SynthesisResult → continuation identity（company /
    question hash / cutoff 全等）→ no-progress 政策（新 result ≠ source result 且
    新 run fingerprint ≠ source run fingerprint）→ fulfillment fingerprint →
    create_or_get（同 request+result → replay；不同 result → AlreadyFulfilled）；
-3. read-side `verify_research_request_integrity` / `verify_research_fulfillment_integrity`
+4. read-side `verify_research_request_integrity` / `verify_research_fulfillment_integrity`
    （spec P，重放校验，**不自动 repair**）；
-4. `build_stage5_continuation_request(fulfillment_id)`（spec O）：从 source run
+5. `build_stage5_continuation_request(fulfillment_id)`（spec O）：从 source run
    恢复 task_id，构造 `Stage5WorkflowRequest`（**不**自动创建 WorkflowRun）。
 
 **import 边界**：本模块 **不得** module-level import `app.stage5.graph` /
@@ -32,23 +37,33 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.analysis.synthesis.service import SynthesisAnalysisService
 from app.db.models.research_backflow import (
     ResearchBackflowFulfillmentModel,
+    ResearchBackflowPlanModel,
     ResearchBackflowRequestModel,
 )
 from app.db.models.workflow_run import WorkflowRunModel
 from app.report.service import ReportService
+from app.repositories.claim_repository import ClaimRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_backflow.contracts import (
     RESEARCH_BACKFLOW_FULFILLMENT_SCHEMA_VERSION,
+    RESEARCH_BACKFLOW_PLAN_SCHEMA_VERSION,
     RESEARCH_BACKFLOW_REQUEST_SCHEMA_VERSION,
+    SUPPLEMENTAL_RESEARCH_STRATEGY_NAME,
+    SUPPLEMENTAL_RESEARCH_STRATEGY_VERSION,
     ResearchBackflowFulfillmentResult,
+    ResearchBackflowPlanResult,
     ResearchBackflowRequestResult,
     VerifiedResearchBackflowFulfillment,
     VerifiedResearchBackflowRequest,
     canonical_payload_equals,
     compute_research_backflow_fulfillment_fingerprint,
+    compute_research_backflow_plan_fingerprint,
     compute_research_backflow_request_fingerprint,
 )
-from app.research_backflow.derive import derive_research_request_payload
+from app.research_backflow.derive import (
+    derive_research_backflow_plan_payload,
+    derive_research_request_payload,
+)
 from app.research_backflow.errors import (
     ResearchBackflowAlreadyFulfilled,
     ResearchBackflowContinuationMismatch,
@@ -244,6 +259,67 @@ class ResearchBackflowService:
             new_synthesis_result_id=row.new_synthesis_result_id,
             fulfillment_schema_version=row.fulfillment_schema_version,
             fulfillment_fingerprint=row.fulfillment_fingerprint,
+            replayed=not was_created,
+        )
+
+    # ------------------------------------------------------------------ 补充计划（7A.2B.3 spec K）
+
+    async def create_or_get_plan(
+        self, research_backflow_request_id: UUID
+    ) -> ResearchBackflowPlanResult:
+        """为 research request 派生确定性补充研究计划（**0 LLM**，spec K）。
+
+        verify request（含真实 audit issues / 源 synthesis / 源 report）→ 加载
+        related Claim statements → 纯函数派生 plan_payload（need_specs[] +
+        冻结 query 模板）→ plan fingerprint → create_or_get（同 request → replay，
+        **不 update**）。`manual_required_reason` 由执行阶段在「无满足 source」时
+        决定，计划阶段不写（不假装完成）。
+        """
+        verified_request = await self.verify_research_request_integrity(
+            research_backflow_request_id
+        )
+        claim_statements = await self._load_claim_statements(verified_request)
+        plan_payload = derive_research_backflow_plan_payload(verified_request, claim_statements)
+        fingerprint = compute_research_backflow_plan_fingerprint(
+            plan_schema_version=RESEARCH_BACKFLOW_PLAN_SCHEMA_VERSION,
+            research_backflow_request_id=verified_request.research_request_id,
+            request_fingerprint=verified_request.request_fingerprint,
+            strategy_name=SUPPLEMENTAL_RESEARCH_STRATEGY_NAME,
+            strategy_version=SUPPLEMENTAL_RESEARCH_STRATEGY_VERSION,
+            plan_payload=plan_payload,
+        )
+        expected = ResearchBackflowPlanModel(
+            backflow_plan_id=uuid4(),
+            research_backflow_request_id=verified_request.research_request_id,
+            plan_schema_version=RESEARCH_BACKFLOW_PLAN_SCHEMA_VERSION,
+            strategy_name=SUPPLEMENTAL_RESEARCH_STRATEGY_NAME,
+            strategy_version=SUPPLEMENTAL_RESEARCH_STRATEGY_VERSION,
+            plan_payload=plan_payload,
+            plan_fingerprint=fingerprint,
+        )
+
+        async with self._sessionmaker() as session:
+            try:
+                repo = ResearchBackflowRepository(session)
+                row, was_created = await repo.create_or_get_plan(expected)
+                if not was_created:
+                    await self._verify_plan_replay(row, expected)
+                await session.commit()
+            except ResearchBackflowError:
+                await session.rollback()
+                raise
+            except SQLAlchemyError as exc:
+                await session.rollback()
+                raise ResearchBackflowPersistenceFailed() from exc
+
+        return ResearchBackflowPlanResult(
+            backflow_plan_id=row.backflow_plan_id,
+            research_backflow_request_id=row.research_backflow_request_id,
+            plan_schema_version=row.plan_schema_version,
+            strategy_name=row.strategy_name,
+            strategy_version=row.strategy_version,
+            plan_payload=dict(row.plan_payload),
+            plan_fingerprint=row.plan_fingerprint,
             replayed=not was_created,
         )
 
@@ -527,6 +603,53 @@ class ResearchBackflowService:
             raise ResearchBackflowContinuationMismatch("research_question_sha256")
         if verified_new.analysis_as_of != verified_request.analysis_as_of:
             raise ResearchBackflowContinuationMismatch("analysis_as_of")
+
+    async def _load_claim_statements(
+        self, verified_request: VerifiedResearchBackflowRequest
+    ) -> dict[UUID, str]:
+        """加载 related_claim_ids 对应的 Claim statement（query 模板用）。
+
+        从 verified audit issues 的 related_claim_ids 并集读取；非 UUID / 不存在的
+        claim 跳过（派生仍确定性：每次都跳过同一批 → 指纹稳定）。0 命中 → 空 dict
+        （query 模板退化为 research question base query）。
+        """
+        raw_ids: set[str] = set()
+        for issue in verified_request.verified_action.verified_audit.issues:
+            raw_ids.update(issue.related_claim_ids)
+        claim_ids: list[UUID] = []
+        for raw in raw_ids:
+            try:
+                claim_ids.append(UUID(raw))
+            except ValueError:
+                continue
+        if not claim_ids:
+            return {}
+        async with self._sessionmaker() as session:
+            rows = await ClaimRepository(session).list_by_ids(claim_ids)
+        return {row.claim_id: row.statement for row in rows}
+
+    @staticmethod
+    async def _verify_plan_replay(
+        row: ResearchBackflowPlanModel,
+        expected: ResearchBackflowPlanModel,
+    ) -> None:
+        """persisted 行 vs 重派生期望（spec P replay；任一不一致 → IntegrityError）。"""
+        checks = [
+            (
+                "research_backflow_request_id",
+                row.research_backflow_request_id,
+                expected.research_backflow_request_id,
+            ),
+            ("plan_schema_version", row.plan_schema_version, expected.plan_schema_version),
+            ("strategy_name", row.strategy_name, expected.strategy_name),
+            ("strategy_version", row.strategy_version, expected.strategy_version),
+            ("plan_fingerprint", row.plan_fingerprint, expected.plan_fingerprint),
+        ]
+        for field, actual, want in checks:
+            if actual != want:
+                raise ResearchBackflowIntegrityError(f"research plan {field} replay mismatch")
+        if not canonical_payload_equals(row.plan_payload, expected.plan_payload):
+            raise ResearchBackflowIntegrityError("research plan payload replay mismatch")
 
     @staticmethod
     def _check_no_progress(

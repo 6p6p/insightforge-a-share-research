@@ -179,20 +179,75 @@ class _FakeChildService:
         self._stage5_run_id = stage5_run_id
         self.stage4_requests: list = []
         self.stage5_requests: list = []
+        self.stage4_attempts: list[int] = []
+        self.stage5_attempts: list[int] = []
+        self.stage4_sources: list = []
+        self.stage5_sources: list = []
 
-    async def ensure_stage4_child(self, orchestration_id, request) -> ChildRunResult:
+    async def ensure_stage4_child(
+        self, orchestration_id, request, *, attempt_no=1, source_research_request_id=None
+    ) -> ChildRunResult:
         self.stage4_requests.append(request)
+        self.stage4_attempts.append(attempt_no)
+        self.stage4_sources.append(source_research_request_id)
         return ChildRunResult(run_id=self._stage4_run_id, created=True)
 
-    async def ensure_stage5_child(self, orchestration_id, request) -> ChildRunResult:
+    async def ensure_stage5_child(
+        self, orchestration_id, request, *, attempt_no=1, source_research_request_id=None
+    ) -> ChildRunResult:
         self.stage5_requests.append(request)
+        self.stage5_attempts.append(attempt_no)
+        self.stage5_sources.append(source_research_request_id)
         return ChildRunResult(run_id=self._stage5_run_id, created=True)
+
+
+class _FakeBackflowService:
+    """backflow 节点的最小 fake：create_or_get_plan / verify request / fulfill /
+    build continuation request 全部确定性返回。"""
+
+    def __init__(self) -> None:
+        self.plan_requests: list = []
+        self.fulfillments: list = []
+
+    async def create_or_get_plan(self, research_backflow_request_id):
+        self.plan_requests.append(research_backflow_request_id)
+        return SimpleNamespace(backflow_plan_id=uuid4(), plan_payload={"need_specs": []})
+
+    async def verify_research_request_integrity(self, research_request_id):
+        return SimpleNamespace()  # fake executor 不读字段
+
+    async def fulfill_request(self, research_request_id, new_synthesis_result_id):
+        self.fulfillments.append((research_request_id, new_synthesis_result_id))
+        return SimpleNamespace(fulfillment_id=uuid4())
+
+    async def build_stage5_continuation_request(self, fulfillment_id):
+        return SimpleNamespace(
+            task_id=_TASK_ID,
+            company_id=_COMPANY_ID,
+            research_question="分析目标公司基本面",
+            analysis_as_of="2026-06-30",
+            synthesis_result_id=_SYNTHESIS_RESULT_ID,
+        )
+
+
+class _FakeBackflowExecutor:
+    """fake executor：返回配置的"新增"证据卡 id（verify_progress 据此判定）。"""
+
+    def __init__(self, *, new_card_ids: tuple[str, ...] = ()) -> None:
+        self._new_card_ids = new_card_ids
+        self.calls = 0
+
+    async def execute_supplemental_research(self, verified_request, plan_payload):
+        self.calls += 1
+        return SimpleNamespace(
+            new_evidence_card_ids=tuple(UUID(c) for c in self._new_card_ids)
+        )
 
 
 class _Harness:
     """fake deps + 共享 checkpointer + repo monkeypatch 的记录器。"""
 
-    def __init__(self, *, stage5_outcome: str) -> None:
+    def __init__(self, *, stage5_outcome: str, backflow_new_cards: tuple[str, ...] = ()) -> None:
         self.runs = _Runs()
         self.stage4_run_id = uuid4()
         self.stage5_run_id = uuid4()
@@ -203,6 +258,8 @@ class _Harness:
             self.runs, self.stage5_run_id, outcome=stage5_outcome
         )
         self.child_service = _FakeChildService(self.stage4_run_id, self.stage5_run_id)
+        self.backflow_service = _FakeBackflowService()
+        self.backflow_executor = _FakeBackflowExecutor(new_card_ids=backflow_new_cards)
         self.deps = ResearchOrchestrationDependencies(
             sessionmaker=FakeSessionMaker(),
             plan_service=FakePlanService(),
@@ -213,6 +270,8 @@ class _Harness:
             stage4_runner=self.stage4_runner,
             synthesis_service=_FakeSynthesis(),
             stage5_runner=self.stage5_runner,
+            backflow_service=self.backflow_service,
+            backflow_executor=self.backflow_executor,
         )
         self.saver = _SharedSaver()
         # orchestration 行 + 进度 / 终态记录。
@@ -356,10 +415,18 @@ async def test_continuation_reenters_run_or_resume_stage5_node(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_research_required_persists_request_and_phase(monkeypatch) -> None:
-    """Stage5 research_required → pause_for_research：只持久化 research_request_id +
-    phase=research_backflow（spec P），orchestration 停在 waiting_human。"""
-    harness = _Harness(stage5_outcome="research_required")
+async def test_research_required_backflow_loop_to_limit(monkeypatch) -> None:
+    """research_required → backflow loop（每轮新增 EvidenceCard）→ 两轮后达
+    MAX_BACKFLOW_RESEARCH_ROUNDS → research_backflow_manual（limit_reached）。
+
+    验证：round 递增、Stage4/5 child attempt 1/2/3、每轮 execute_supplemental_
+    research、backflow child link 记录 source_research_request_id、最终
+    waiting_human + phase=research_backflow + 稳定 reason。
+    """
+    harness = _Harness(
+        stage5_outcome="research_required",
+        backflow_new_cards=("00000000-0000-0000-0000-0000000000a1",),
+    )
     harness.bind(monkeypatch)
     final = await harness.runner().run_orchestration(_ORCH_ID)
 
@@ -370,6 +437,39 @@ async def test_research_required_persists_request_and_phase(monkeypatch) -> None
     )
     assert final["research_request_id"] == str(_RESEARCH_REQUEST_ID)
     assert final["current_phase"] == OrchestrationPhase.RESEARCH_BACKFLOW.value
+    assert final["backflow_manual_reason"] == "research_backflow_limit_reached"
+    assert final["backflow_round"] == 2
+    # 首启 attempt1 + 两轮 backflow attempt2/3。
+    assert harness.child_service.stage4_attempts == [1, 2, 3]
+    assert harness.child_service.stage5_attempts == [1, 2, 3]
+    assert harness.backflow_executor.calls == 2
+    # backflow child link 记录 source_research_request_id（attempt1 为 None）。
+    assert harness.child_service.stage4_sources[1:] == [_RESEARCH_REQUEST_ID] * 2
+    assert harness.child_service.stage5_sources[1:] == [_RESEARCH_REQUEST_ID] * 2
+    # fake run 复用同一 run：execute 只发生在首启（attempt2/3 复用 completed run）。
+    assert harness.stage5_runner.execute_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_research_required_no_progress_manual(monkeypatch) -> None:
+    """research_required → execute 无新增 EvidenceCard → verify_progress no_progress
+    → research_backflow_manual（reason=research_backflow_no_progress），不进入
+    Stage4/Stage5 backflow attempt。"""
+    harness = _Harness(stage5_outcome="research_required", backflow_new_cards=())
+    harness.bind(monkeypatch)
+    final = await harness.runner().run_orchestration(_ORCH_ID)
+
+    assert harness.terminal_status is None
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.RESEARCH_BACKFLOW.value,
+    )
+    assert final["backflow_manual_reason"] == "research_backflow_no_progress"
+    assert final["backflow_round"] == 1
+    assert harness.backflow_executor.calls == 1
+    # 无进度 → 不创建 Stage4/Stage5 backflow attempt。
+    assert harness.child_service.stage4_attempts == [1]
+    assert harness.child_service.stage5_attempts == [1]
 
 
 @pytest.mark.asyncio

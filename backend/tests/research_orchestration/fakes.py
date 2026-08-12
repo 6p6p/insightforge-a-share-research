@@ -151,6 +151,11 @@ class FakeActionOrchestrationRunner:
     def __init__(self) -> None:
         self.run_calls: list[UUID] = []
 
+    async def read_orchestration_checkpoint(self, orchestration_id: UUID) -> dict:
+        # act_on_orchestration 用 backflow_round 精确定位 Stage5 child attempt_no
+        # （round 缺失 → attempt 1，与原行为一致）。
+        return {}
+
     async def run_orchestration(self, orchestration_id: UUID) -> dict:
         self.run_calls.append(orchestration_id)
         return {"current_phase": "awaiting_stage5"}

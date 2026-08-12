@@ -72,6 +72,40 @@ async def test_awaiting_stage5_skip(monkeypatch) -> None:
     assert runner.run_calls == []
 
 
+async def test_research_backflow_waiting_human_skip(monkeypatch) -> None:
+    """7A.2B.3：research_backflow（waiting_human）等人工裁决，不自动恢复。"""
+    sessionmaker = FakeSessionMaker()
+    runner = FakeRecoveryRunner()
+
+    async def fake_get(self, orchestration_id):
+        return _orchestration_row(
+            status=OrchestrationStatus.WAITING_HUMAN.value,
+            current_phase=OrchestrationPhase.RESEARCH_BACKFLOW.value,
+        )
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    ok = await _coordinator(sessionmaker, runner)._recover_one(_OID)
+    assert ok is False
+    assert runner.run_calls == []
+
+
+async def test_waiting_manual_skip(monkeypatch) -> None:
+    """waiting_manual（waiting_human）等人工，不自动恢复。"""
+    sessionmaker = FakeSessionMaker()
+    runner = FakeRecoveryRunner()
+
+    async def fake_get(self, orchestration_id):
+        return _orchestration_row(
+            status=OrchestrationStatus.WAITING_HUMAN.value,
+            current_phase=OrchestrationPhase.WAITING_MANUAL.value,
+        )
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    ok = await _coordinator(sessionmaker, runner)._recover_one(_OID)
+    assert ok is False
+    assert runner.run_calls == []
+
+
 async def test_stage4_child_running_skip(monkeypatch) -> None:
     sessionmaker = FakeSessionMaker()
     runner = FakeRecoveryRunner(checkpoint_phase=OrchestrationPhase.STAGE4.value)

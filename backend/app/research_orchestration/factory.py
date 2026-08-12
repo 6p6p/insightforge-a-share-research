@@ -21,15 +21,23 @@ ResearchOrchestrationDependencies / ResearchOrchestrationRunner`。
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import Settings
+from app.llm.factory import create_evidence_extraction_model
+from app.rag.embedding.bge import BGEProvider
+from app.rag.index.service import VectorIndexService
+from app.rag.retrieval.service import RetrievalService
+from app.research_backflow.executor import ResearchBackflowExecutor
+from app.research_fulfillment.executors import SourceIndexBuilder
 from app.research_fulfillment.factory import create_research_fulfillment_service
 from app.research_orchestration.dependencies import ResearchOrchestrationDependencies
 from app.research_orchestration.runner import ResearchOrchestrationRunner
 from app.research_orchestration.service import ResearchOrchestrationChildService
+from app.services.chunking_service import ChunkingService
 from app.stage4.dependencies import create_stage4_dependencies
 from app.stage4.runner import Stage4WorkflowRunner
 from app.stage5.dependencies import create_stage5_dependencies
 from app.stage5.runner import Stage5WorkflowRunner
 from app.synthesis.service import SynthesisService
+from app.vectorstore.client import ChromaManager
 from app.workflows.checkpoint import LangGraphCheckpointManager
 
 
@@ -51,6 +59,32 @@ def create_research_orchestration_dependencies(
         create_stage5_dependencies(settings, sessionmaker),
     )
     child_service = ResearchOrchestrationChildService(sessionmaker, stage4_runner, stage5_runner)
+    # backflow loop（7A.2B.3）：复用真实检索链 + 确定性 index builder + 同一
+    # research_backflow_service（stage5 runner 绑定实例；构造 0 model call /
+    # 0 network / 0 DB 连接，与 fulfillment / stage4 / stage5 factory 一致）。
+    chroma = ChromaManager(
+        host=settings.chroma_host,
+        port=settings.chroma_port,
+        ssl=settings.chroma_ssl,
+        timeout_seconds=settings.chroma_timeout_seconds,
+    )
+    embedding = BGEProvider()
+    retrieval = RetrievalService(
+        sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma
+    )
+    index_builder = SourceIndexBuilder(
+        sessionmaker,
+        ChunkingService(sessionmaker),
+        VectorIndexService(
+            sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma
+        ),
+    )
+    backflow_executor = ResearchBackflowExecutor(
+        sessionmaker,
+        retrieval,
+        create_evidence_extraction_model(settings),
+        index_builder=index_builder,
+    )
     return ResearchOrchestrationDependencies(
         sessionmaker=sessionmaker,
         plan_service=fulfillment.plan_service,
@@ -61,6 +95,8 @@ def create_research_orchestration_dependencies(
         stage4_runner=stage4_runner,
         synthesis_service=SynthesisService(sessionmaker),
         stage5_runner=stage5_runner,
+        backflow_service=stage5_runner.dependencies.research_backflow_service,
+        backflow_executor=backflow_executor,
     )
 
 

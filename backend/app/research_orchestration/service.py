@@ -570,9 +570,16 @@ class ResearchOrchestrationService:
         if self._stage5_runner is None or self._orchestration_runner is None:
             raise RuntimeError("orchestration action runners not bound")
 
+        # 精确定位当前待裁决的 Stage5 child：首启 attempt 1；backflow 轮次后为
+        # attempt = backflow_round + 1（spec D：exact (orchestration_id, stage5,
+        # attempt_no)，不猜 latest）。
+        checkpoint = await self._orchestration_runner.read_orchestration_checkpoint(
+            orchestration_id
+        )
+        attempt_no = (checkpoint.get("backflow_round") or 0) + 1
         async with self._sessionmaker() as session:
             child = await ResearchOrchestrationChildRepository(session).get_child(
-                orchestration_id, ChildStage.STAGE5.value, 1
+                orchestration_id, ChildStage.STAGE5.value, attempt_no
             )
         if child is None:
             raise ResearchOrchestrationChildNotFound()
@@ -661,33 +668,55 @@ class ResearchOrchestrationChildService:
         self,
         orchestration_id: UUID,
         stage4_request: Stage4WorkflowRequest,
+        *,
+        attempt_no: int = _FIRST_ATTEMPT,
+        source_research_request_id: UUID | None = None,
     ) -> ChildRunResult:
-        return await self._ensure_child(orchestration_id, ChildStage.STAGE4.value, stage4_request)
+        return await self._ensure_child(
+            orchestration_id,
+            ChildStage.STAGE4.value,
+            stage4_request,
+            attempt_no=attempt_no,
+            source_research_request_id=source_research_request_id,
+        )
 
     async def ensure_stage5_child(
         self,
         orchestration_id: UUID,
         stage5_request: Stage5WorkflowRequest,
+        *,
+        attempt_no: int = _FIRST_ATTEMPT,
+        source_research_request_id: UUID | None = None,
     ) -> ChildRunResult:
-        """exact child `(orchestration_id, stage5, attempt 1)`（spec K）。
+        """exact child `(orchestration_id, stage5, attempt_no)`（spec D/K）。
 
-        stage5 runner 必须绑定（production factory / graph 注入）；未绑定 →
-        RuntimeError（programming error，不猜归属）。
+        v1 首启 attempt 1；backflow（7A.2B.3）用 attempt 2/3，child link 上记录
+        source_research_request_id 供 audit 追踪。stage5 runner 必须绑定（production
+        factory / graph 注入）；未绑定 → RuntimeError（programming error，不猜归属）。
         """
         if self._stage5_runner is None:
             raise RuntimeError("stage5 runner not bound to child service")
-        return await self._ensure_child(orchestration_id, ChildStage.STAGE5.value, stage5_request)
+        return await self._ensure_child(
+            orchestration_id,
+            ChildStage.STAGE5.value,
+            stage5_request,
+            attempt_no=attempt_no,
+            source_research_request_id=source_research_request_id,
+        )
 
     async def _ensure_child(
         self,
         orchestration_id: UUID,
         stage: str,
         request,
+        *,
+        attempt_no: int = _FIRST_ATTEMPT,
+        source_research_request_id: UUID | None = None,
     ) -> ChildRunResult:
         """stage4/stage5 共用的 exact child 逻辑（create 分支按 stage 分发 runner）。"""
         async with self._sessionmaker() as session:
             child_repo = ResearchOrchestrationChildRepository(session)
-            existing = await child_repo.get_child(orchestration_id, stage, 1)
+            existing = await child_repo.get_child(orchestration_id, stage, attempt_no)
             if existing is not None:
                 run = await WorkflowRunRepository(session).get_by_id(existing.workflow_run_id)
                 if run is None:
@@ -700,7 +729,8 @@ class ResearchOrchestrationChildService:
                     orchestration_id=orchestration_id,
                     workflow_run_id=run_id,
                     stage=stage,
-                    attempt_no=1,
+                    attempt_no=attempt_no,
+                    source_research_request_id=source_research_request_id,
                 )
             )
 
@@ -714,14 +744,14 @@ class ResearchOrchestrationChildService:
         except ActiveWorkflowRunExists:
             # 并发：另一个 active WorkflowRun（可能是本 orchestration 的 child）
             # 已存在 → exact 重查，命中返回 winner。
-            winner = await self._requery_exact_child(orchestration_id, stage)
+            winner = await self._requery_exact_child(orchestration_id, stage, attempt_no)
             if winner is not None:
                 return winner
             raise
         except IntegrityError as exc:
             # child link 归属冲突（runner 原样抛）→ 先重查 exact child（并发
             # winner）；确无 child 且约束属于 child ownership → 409，否则原样抛。
-            winner = await self._requery_exact_child(orchestration_id, stage)
+            winner = await self._requery_exact_child(orchestration_id, stage, attempt_no)
             if winner is not None:
                 return winner
             if _constraint_name(exc) in _CHILD_OWNERSHIP_CONSTRAINTS:
@@ -730,12 +760,12 @@ class ResearchOrchestrationChildService:
         return ChildRunResult(run_id=result.run_id, created=True)
 
     async def _requery_exact_child(
-        self, orchestration_id: UUID, stage: str
+        self, orchestration_id: UUID, stage: str, attempt_no: int = _FIRST_ATTEMPT
     ) -> ChildRunResult | None:
-        """并发 winner 判定：exact child `(orchestration_id, stage, attempt 1)`。"""
+        """并发 winner 判定：exact child `(orchestration_id, stage, attempt_no)`。"""
         async with self._sessionmaker() as session:
             existing = await ResearchOrchestrationChildRepository(session).get_child(
-                orchestration_id, stage, 1
+                orchestration_id, stage, attempt_no
             )
         if existing is not None:
             return ChildRunResult(run_id=existing.workflow_run_id, created=False)

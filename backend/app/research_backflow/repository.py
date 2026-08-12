@@ -1,12 +1,14 @@
 """Data access for research backflow contract (stage 5E.2B).
 
-两表各自按业务唯一键做 **create_or_get**（ON CONFLICT DO NOTHING 无目标索引，
+三表各自按业务唯一键做 **create_or_get**（ON CONFLICT DO NOTHING 无目标索引，
 镜像 `ReviewActionRepository`）：
 - `research_backflow_requests` 按 `(source_stage5_run_id)` UNIQUE——一个 Stage 5
   run 至多 1 行（request_fingerprint 也 UNIQUE，并发同 run 的派生必然同指纹 →
   1 行）；
 - `research_backflow_fulfillments` 按 `(research_request_id)` UNIQUE——一个请求
-  至多 1 个 fulfillment（fulfillment_fingerprint 也 UNIQUE）。
+  至多 1 个 fulfillment（fulfillment_fingerprint 也 UNIQUE）；
+- `research_backflow_plans` 按 `(research_backflow_request_id)` UNIQUE——一个
+  request 至多 1 个补充计划（plan_fingerprint 也 UNIQUE）。
 
 **无 Python 进程锁**；不允许 update API。
 """
@@ -19,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.research_backflow import (
     ResearchBackflowFulfillmentModel,
+    ResearchBackflowPlanModel,
     ResearchBackflowRequestModel,
 )
 from app.db.models.workflow_run import WorkflowRunModel
@@ -75,6 +78,46 @@ class ResearchBackflowRepository:
         existing = await self.get_request_by_run_id(request.source_stage5_run_id)
         if existing is None:
             raise RuntimeError("research backflow request conflict without existing row")
+        return existing, False
+
+    async def get_plan_by_request_id(
+        self, research_backflow_request_id: UUID
+    ) -> ResearchBackflowPlanModel | None:
+        result = await self._session.execute(
+            select(ResearchBackflowPlanModel).where(
+                ResearchBackflowPlanModel.research_backflow_request_id
+                == research_backflow_request_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def create_or_get_plan(
+        self, plan: ResearchBackflowPlanModel
+    ) -> tuple[ResearchBackflowPlanModel, bool]:
+        """同 request 并发只能有 1 行（`(research_backflow_request_id)` UNIQUE）。
+
+        输家回查既有行（created=False）并复用（replay 语义）。request immutable +
+        derive deterministic → 并发派生的 fingerprint 必然相同；**无 Python 进程锁**。
+        """
+        excluded = {"created_at"}
+        values = {
+            column.key: getattr(plan, column.key)
+            for column in ResearchBackflowPlanModel.__table__.columns
+            if column.key not in excluded
+        }
+        stmt = (
+            insert(ResearchBackflowPlanModel)
+            .values(**values)
+            .on_conflict_do_nothing()
+            .returning(ResearchBackflowPlanModel)
+        )
+        inserted = await self._session.execute(stmt)
+        row = inserted.scalar_one_or_none()
+        if row is not None:
+            return row, True
+        existing = await self.get_plan_by_request_id(plan.research_backflow_request_id)
+        if existing is None:
+            raise RuntimeError("research backflow plan conflict without existing row")
         return existing, False
 
     async def get_fulfillment_by_id(

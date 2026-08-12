@@ -21,6 +21,16 @@ ORCHESTRATOR_VERSION = 1
 # uq_research_orchestration_runs_one_active_per_task 的语义）。
 ACTIVE_ORCHESTRATION_STATUSES = frozenset({"pending", "running", "waiting_human"})
 
+# 补充研究最大轮数（7A.2B.3 spec K-X）：同一 orchestration 内最多执行
+# MAX_BACKFLOW_RESEARCH_ROUNDS 轮 backflow（Stage4/5 child attempt 2、3）。
+# 达到上限仍未 resolved → waiting_human / manual_required，稳定 reason
+# research_backflow_limit_reached（防无限循环）。
+MAX_BACKFLOW_RESEARCH_ROUNDS = 2
+
+# backflow terminal 的稳定 reason（写进 checkpoint state + observability）。
+RESEARCH_BACKFLOW_LIMIT_REACHED = "research_backflow_limit_reached"
+RESEARCH_BACKFLOW_NO_PROGRESS = "research_backflow_no_progress"
+
 
 class OrchestrationStatus(StrEnum):
     """一次 top-level orchestration 的状态（独立表，不改 workflow_runs 语义）。"""

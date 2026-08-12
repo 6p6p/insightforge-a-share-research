@@ -31,6 +31,19 @@ decision）+ source Report → 确定性身份 / cutoff 绑定 + structured 交�
 - `fulfillment_fingerprint` CHAR(64) UNIQUE = schema + request id+fingerprint +
   new synthesis result id+result fingerprint + new synthesis run id+synthesis
   fingerprint（**不含** fulfillment_id / created_at）。
+
+`research_backflow_plans` 保存一次 research request 的**确定性补充研究计划**
+（stage 7A.2B.3，immutable，v1 由 **0 LLM** 生成）：
+- `research_backflow_request_id` FK RESTRICT、`(research_backflow_request_id)`
+  UNIQUE——一个请求至多一个补充计划（同 request → create_or_get replay）；
+- `plan_schema_version` / `strategy_name` / `strategy_version`——计划 schema 版本
+  与确定性策略身份（need_code → strategy 映射）；
+- `plan_payload` JSONB（结构化 `need_specs[]`：need_code / target_section_ids /
+  related_claim_ids / related_evidence_card_ids / retrieval_queries[] /
+  allowed_source_types[] / manual_required_reason?；query 由确定性模板派生，
+  **不保存** model reasoning / prompt / secret）；
+- `plan_fingerprint` CHAR(64) UNIQUE = schema + request id+fingerprint + strategy
+  + normalized plan_payload 的 SHA-256（**不含** backflow_plan_id / created_at）。
 """
 
 import uuid
@@ -45,6 +58,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    String,
     UniqueConstraint,
     text,
 )
@@ -164,6 +178,58 @@ class ResearchBackflowFulfillmentModel(Base):
     )
     fulfillment_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     fulfillment_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class ResearchBackflowPlanModel(Base):
+    __tablename__ = "research_backflow_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "plan_schema_version >= 1",
+            name="ck_research_backflow_plans_plan_schema_version",
+        ),
+        CheckConstraint(
+            "btrim(strategy_name) <> ''",
+            name="ck_research_backflow_plans_strategy_name_not_blank",
+        ),
+        CheckConstraint(
+            "strategy_version >= 1",
+            name="ck_research_backflow_plans_strategy_version",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(plan_payload) = 'object'",
+            name="ck_research_backflow_plans_plan_payload_object",
+        ),
+        CheckConstraint(
+            f"plan_fingerprint {_SHA256_CHECK}",
+            name="ck_research_backflow_plans_plan_fingerprint",
+        ),
+        UniqueConstraint(
+            "research_backflow_request_id",
+            name="uq_research_backflow_plans_research_backflow_request_id",
+        ),
+        UniqueConstraint(
+            "plan_fingerprint",
+            name="uq_research_backflow_plans_plan_fingerprint",
+        ),
+        Index("ix_research_backflow_plans_created_at", "created_at"),
+    )
+
+    backflow_plan_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    research_backflow_request_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("research_backflow_requests.research_request_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    plan_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    plan_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
