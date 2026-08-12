@@ -18,7 +18,16 @@
 - **测试（spec R/S/T/U/V）**：executor + E2E 集成 24（document/event 11 + financial/macro/valuation 9 + 全链 service 4；真实 PG + Fake planner / FakeRetrieval / FakeEvidenceExtractionModel，**0 真实 DeepSeek / 0 Retrieval / 0 Chroma / 0 Web**）；Migration 0041 downgrade guard（空表 / v1 new-field-safe 通过，v2 snapshot 拒绝）；全量回归（非集成 1924 + 集成 941）+ ruff + alembic check 干净。
 - **API**：本轮未新增 research-plan API（推迟 7A.2B）。
 
-## 7A.2B：Research Planning API + 规划驱动执行（planned，next）
+## 7A.2B：Research Planning API + 规划驱动执行（planned，next；architecture decision frozen 2026-08-12）
+
+### 7A.2B architecture decision（方案 D：Top-level LangGraph Orchestrator + 独立 Stage4/Stage5 WorkflowRuns）
+
+- 新增一等公民 `research_orchestration_runs`（**非 WorkflowRun**）承载顶层 orchestration lifecycle；顶层必须是真实 LangGraph graph `stage7_top_level`，PG Checkpointer、`thread_id = orchestration_id`；节点序列 plan → route → prepare → fulfill → wait/manual → start/resume Stage4 → Synthesis → start/resume Stage5 → rewrite/human/research → research backflow → continuation → complete。
+- 顶层 state 只存 ID / 小结构（task_id / research_plan_id / orchestration_id / current_stage / current_child_run_id / synthesis_result_id / research_request_id），不存正文 / Evidence body；backflow 只消费 immutable Request/Fulfillment 的 ID，不改写旧 artifact。
+- **不改** `uq_workflow_runs_one_active_per_task` / `uq_workflow_runs_thread_id`：Stage4/5 保持独立 WorkflowRun、`thread_id=run_id`、独立 checkpoint / recovery / action 语义，**不改造为 subgraph**；顶层不在 workflow_runs，与 child 无 invariant 冲突。
+- 顶层调用 child 必须 idempotent：节点重放先查该阶段已有 child run（task + graph + orchestration 锚定），已存在则 attach/recover，不重复 create。
+- crash 恢复同 `orchestration_id` + 同顶层 thread；user retry 新建 orchestration_id / 顶层 thread（child 沿用现有 retry 语义）；Web 仍以 Stage4/5 WorkflowRun 展示具体执行阶段，可额外投影顶层 phase。
+- 对比：A 不满足「LangGraph 唯一顶层编排器」；B 需把 Stage4/5 subgraph 化（recovery/workspace/action/既有集成测试全重锚定，风险最大）；C 需放宽 active-run index；D 仅新增一张增量表，不动现有 invariant。
 
 - `POST /research-plan`（触发 create + route）、`GET /research-plan/{id}`、`POST /research-preparation`（或按任务聚合入口）；前端最小入口（如任务详情页展示 research plan / readiness / missing needs）。
 - 规划驱动执行：ready=true 时自动进入 Stage 4 执行；ready=false 时展示 MissingResearchNeeds 供分析师补齐或触发受控的资料获取。
