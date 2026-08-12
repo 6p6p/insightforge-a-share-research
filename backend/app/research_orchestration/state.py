@@ -22,9 +22,20 @@ class ResearchOrchestrationState(TypedDict, total=False):
     # prepare 结果摘要（不存 missing need 正文 / stage4 request 正文）。
     preparation_ready: bool
     missing_need_codes: list[str]
-    # stage4 child run（exact ownership，spec D）→ run_id。
+    # stage4 child run（exact ownership，spec D）→ run_id；immutable 锚点：
+    # ensure_stage5_child / run_or_resume_stage5 从这里重建 Stage5 request
+    # （Stage5RequestBuilder.from_stage4_state，spec J）。
+    stage4_child_run_id: str
+    # current child run（ensure_stage4_child → stage4 id；ensure_stage5_child 起
+    # 变为 stage5 id）。
     current_child_run_id: str
     # collect_synthesis 之后：真实 Stage4 checkpoint 的 synthesis_result_id。
     synthesis_result_id: str
+    # run_or_resume_stage5 投影的 Stage5 child 终态（route_stage5_result 只读
+    # state，不碰 DB——续接 aupdate_state 注入 fresh 值后条件边重新判定）。
+    stage5_run_status: str
+    # research_required terminal 时：Stage5 checkpoint 的 research_request_id
+    # （spec P：仅持久化 ID + phase=research_backflow，不实现 backflow 循环）。
+    research_request_id: str
     # 失败时 runner 投影的稳定 error_code。
     error_code: str

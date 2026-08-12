@@ -1,10 +1,14 @@
-"""ResearchOrchestrationRecoveryCoordinator unit tests（spec O/E，0 DB）。
+"""ResearchOrchestrationRecoveryCoordinator unit tests（spec O/E + 7A.2B.2 Q，0 DB）。
 
 `_recover_one` 判定：
 - terminal / None → 不恢复；
-- `awaiting_stage5`（正常 terminal phase，等 7A.2B.2 接 Stage5）→ 不恢复；
-- phase=stage4 且 exact child `running`（live executor / rolling restart）→ 跳过；
-- phase=stage4 且 child failed(worker_restarted) / missing → 恢复顶层 graph。
+- `awaiting_stage5`（正常 terminal pause，等 Stage5 人工裁决）→ 不恢复；
+- phase=stage4 / stage5 且 exact child `running`（live executor / rolling
+  restart）→ 跳过（stage5 必须跳过：`_stage5_outcome` 对 running child 抛
+  IntegrityError，不跳过会误标 failed）；
+- phase=stage4 / stage5 且 child failed(worker_restarted) / waiting_human /
+  missing → 恢复顶层 graph（`run_or_resume_stage4` / `run_or_resume_stage5`
+  节点做 execute / resume / 跳过 collect）。
 绝不新建 orchestration / 绝不换 thread（同 orchestration_id + 同顶层 thread）。
 """
 
@@ -100,6 +104,7 @@ async def test_stage4_child_failed_resumes(monkeypatch) -> None:
         return _orchestration_row()
 
     async def fake_get_child(self, orchestration_id, stage, attempt_no):
+        assert stage == "stage4"
         return SimpleNamespace(workflow_run_id=UUID("00000000-0000-0000-0000-000000000009"))
 
     async def fake_run_get(self, run_id):
@@ -123,6 +128,112 @@ async def test_stage4_no_child_resumes(monkeypatch) -> None:
         return _orchestration_row()
 
     async def fake_get_child(self, orchestration_id, stage, attempt_no):
+        return None
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchOrchestrationChildRepository, "get_child", fake_get_child)
+
+    ok = await _coordinator(sessionmaker, runner)._recover_one(_OID)
+    assert ok is True
+    assert runner.run_calls == [_OID]
+
+
+# ------------------------------------------------------------------ stage5 (7A.2B.2 Q)
+
+
+def _stage5_row() -> SimpleNamespace:
+    return _orchestration_row(current_phase=OrchestrationPhase.STAGE5.value)
+
+
+async def test_stage5_child_running_skip(monkeypatch) -> None:
+    """phase=stage5 且 stage5 child 仍 running（live executor / rolling restart）→
+    跳过。必须跳过：`_stage5_outcome` 对 running child 抛 IntegrityError，不跳过
+    会把有 live executor 的 orchestration 误标 failed。"""
+    sessionmaker = FakeSessionMaker()
+    runner = FakeRecoveryRunner(checkpoint_phase=OrchestrationPhase.STAGE5.value)
+
+    async def fake_get(self, orchestration_id):
+        return _stage5_row()
+
+    async def fake_get_child(self, orchestration_id, stage, attempt_no):
+        assert stage == "stage5"
+        return SimpleNamespace(workflow_run_id=UUID("00000000-0000-0000-0000-000000000009"))
+
+    async def fake_run_get(self, run_id):
+        return SimpleNamespace(
+            run_id=UUID("00000000-0000-0000-0000-000000000009"), status="running"
+        )
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchOrchestrationChildRepository, "get_child", fake_get_child)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_run_get)
+
+    ok = await _coordinator(sessionmaker, runner)._recover_one(_OID)
+    assert ok is False
+    assert runner.run_calls == []
+
+
+async def test_stage5_child_failed_resumes(monkeypatch) -> None:
+    """phase=stage5 且 child failed(worker_restarted) → 恢复顶层 graph，由
+    run_or_resume_stage5 节点 resume_stage5_for_recovery。"""
+    sessionmaker = FakeSessionMaker()
+    runner = FakeRecoveryRunner(checkpoint_phase=OrchestrationPhase.STAGE5.value)
+
+    async def fake_get(self, orchestration_id):
+        return _stage5_row()
+
+    async def fake_get_child(self, orchestration_id, stage, attempt_no):
+        assert stage == "stage5"
+        return SimpleNamespace(workflow_run_id=UUID("00000000-0000-0000-0000-000000000009"))
+
+    async def fake_run_get(self, run_id):
+        return SimpleNamespace(status="failed")
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchOrchestrationChildRepository, "get_child", fake_get_child)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_run_get)
+
+    ok = await _coordinator(sessionmaker, runner)._recover_one(_OID)
+    assert ok is True
+    assert runner.run_calls == [_OID]
+
+
+async def test_stage5_child_waiting_human_resumes(monkeypatch) -> None:
+    """phase=stage5 且 child waiting_human（人工已裁决 / crash 在 awaiting_stage5
+    持久化前）→ 恢复顶层 graph 收敛到 awaiting_stage5。"""
+    sessionmaker = FakeSessionMaker()
+    runner = FakeRecoveryRunner(checkpoint_phase=OrchestrationPhase.STAGE5.value)
+
+    async def fake_get(self, orchestration_id):
+        return _stage5_row()
+
+    async def fake_get_child(self, orchestration_id, stage, attempt_no):
+        assert stage == "stage5"
+        return SimpleNamespace(workflow_run_id=UUID("00000000-0000-0000-0000-000000000009"))
+
+    async def fake_run_get(self, run_id):
+        return SimpleNamespace(status="waiting_human")
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchOrchestrationChildRepository, "get_child", fake_get_child)
+    monkeypatch.setattr(WorkflowRunRepository, "get_by_id", fake_run_get)
+
+    ok = await _coordinator(sessionmaker, runner)._recover_one(_OID)
+    assert ok is True
+    assert runner.run_calls == [_OID]
+
+
+async def test_stage5_no_child_resumes(monkeypatch) -> None:
+    """crash 在 ensure_stage5_child 完成前：无 stage5 child → 顶层 graph 重新
+    ensure / execute（run_or_resume_stage5 节点判定）。"""
+    sessionmaker = FakeSessionMaker()
+    runner = FakeRecoveryRunner(checkpoint_phase=OrchestrationPhase.STAGE5.value)
+
+    async def fake_get(self, orchestration_id):
+        return _stage5_row()
+
+    async def fake_get_child(self, orchestration_id, stage, attempt_no):
+        assert stage == "stage5"
         return None
 
     monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)

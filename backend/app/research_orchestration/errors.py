@@ -11,7 +11,9 @@
 - `ResearchOrchestrationChildConflict`：child 已存在 / 已被其他 orchestration 拥有
   （409，UNIQUE(workflow_run_id) / UNIQUE(orchestration_id, stage, attempt_no)）；
 - `ResearchOrchestrationAlreadyFinished`：对 terminal orchestration 执行 cancel /
-  重新执行（409）。
+  重新执行（409）；
+- `ResearchOrchestrationInvalidAction`（7A.2B.2 spec N/P）：`act_on_orchestration`
+  对当前状态不允许的操作（非 waiting_human / 非 awaiting_stage5 / 未知 action，400）。
 """
 
 from app.core.errors import DomainError
@@ -71,3 +73,15 @@ class ResearchOrchestrationAlreadyFinished(ResearchOrchestrationError):
     code = "research_orchestration_already_finished"
     http_status = 409
     message = "研究编排已结束，不能重复执行"
+
+
+class ResearchOrchestrationInvalidAction(ResearchOrchestrationError):
+    """`act_on_orchestration` 对当前状态不允许的操作（7A.2B.2 spec N/P）。
+
+    覆盖：非 waiting_human 提交 human decision、非 awaiting_stage5 阶段、
+    未知 action 名。
+    """
+
+    code = "research_orchestration_invalid_action"
+    http_status = 400
+    message = "研究编排当前状态不允许该操作"

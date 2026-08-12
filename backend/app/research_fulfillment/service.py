@@ -125,6 +125,21 @@ class ResearchFulfillmentService:
             "valuation": valuation_executor,
         }
 
+    # 只读复用（7A.2B.2 spec S）：production factory 复用同一批
+    # plan/router/preparation——顶层编排 graph 的 ensure_plan/ensure_route/prepare
+    # 节点与 fulfill 共享同一服务实例，保证 plan fingerprint / route verify 一致性。
+    @property
+    def plan_service(self) -> ResearchPlanningService:
+        return self._plan_service
+
+    @property
+    def router(self) -> ResearchSourceRouter:
+        return self._router
+
+    @property
+    def preparation(self) -> ResearchPreparationService:
+        return self._preparation
+
     async def fulfill_research_needs(self, research_plan_id: UUID) -> ResearchFulfillmentResult:
         """verify Plan + verify Route + prepare → 只消费 missing_needs → 重跑。
 

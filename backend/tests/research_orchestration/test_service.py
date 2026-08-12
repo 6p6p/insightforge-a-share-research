@@ -39,6 +39,7 @@ from app.research_orchestration.repository import (
 from app.research_orchestration.service import ResearchOrchestrationService
 from app.research_planning.repository import ResearchPlanRepository
 from tests.research_orchestration.fakes import (
+    FakeActionOrchestrationRunner,
     FakePlanService,
     FakeSessionMaker,
     make_orchestration,
@@ -551,3 +552,135 @@ async def test_verify_integrity_retry_parent_missing(monkeypatch) -> None:
     monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
     with pytest.raises(ResearchOrchestrationIntegrityError):
         await _service(sessionmaker).verify_orchestration_integrity(row.orchestration_id)
+
+
+# ------------------------------------------------------------- start / current（7A.2B.2 spec U）
+
+
+def _result(*, status: str = "pending", current_phase: str = "planning", orchestration_id=_OID):
+    return ResearchOrchestrationService._to_result(
+        make_orchestration(
+            orchestration_id=orchestration_id,
+            task_id=_TASK_ID,
+            status=status,
+            current_phase=current_phase,
+        )
+    )
+
+
+async def test_start_runs_new_orchestration(monkeypatch) -> None:
+    """全新 orchestration（pending）→ 顶层 runner 触发，返回刷新投影。"""
+    runner = FakeActionOrchestrationRunner()
+    service = ResearchOrchestrationService(
+        FakeSessionMaker(), FakePlanService(), orchestration_runner=runner
+    )
+    created = _result()
+    refreshed = _result(status="waiting_human", current_phase="awaiting_stage5")
+
+    async def fake_create(self, task_id):
+        return created
+
+    async def fake_get(self, orchestration_id):
+        return refreshed
+
+    monkeypatch.setattr(ResearchOrchestrationService, "create_or_get_orchestration", fake_create)
+    monkeypatch.setattr(ResearchOrchestrationService, "get_orchestration", fake_get)
+
+    result = await service.start_orchestration(_TASK_ID)
+    assert runner.run_calls == [_OID]
+    assert result.status == "waiting_human"
+
+
+async def test_start_skips_terminal_replay(monkeypatch) -> None:
+    """replay 已终态 orchestration（completed）→ 不重复 run，原样返回。"""
+    runner = FakeActionOrchestrationRunner()
+    service = ResearchOrchestrationService(
+        FakeSessionMaker(), FakePlanService(), orchestration_runner=runner
+    )
+    terminal = _result(status="completed", current_phase="completed")
+
+    async def fake_create(self, task_id):
+        return terminal
+
+    async def fake_get(self, orchestration_id):
+        return terminal
+
+    monkeypatch.setattr(ResearchOrchestrationService, "create_or_get_orchestration", fake_create)
+    monkeypatch.setattr(ResearchOrchestrationService, "get_orchestration", fake_get)
+
+    result = await service.start_orchestration(_TASK_ID)
+    assert runner.run_calls == []
+    assert result.status == "completed"
+
+
+async def test_start_active_requires_bound_runner(monkeypatch) -> None:
+    """active 但 runner 未绑定 → RuntimeError（production factory 才绑定）。"""
+    service = ResearchOrchestrationService(FakeSessionMaker(), FakePlanService())
+    created = _result()
+
+    async def fake_create(self, task_id):
+        return created
+
+    monkeypatch.setattr(ResearchOrchestrationService, "create_or_get_orchestration", fake_create)
+    with pytest.raises(RuntimeError):
+        await service.start_orchestration(_TASK_ID)
+
+
+async def test_get_current_prefers_active(monkeypatch) -> None:
+    """active orchestration 存在 → 返回 active（不回落 latest）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+    latest = make_orchestration(
+        orchestration_id=_RETRY_ID, task_id=_TASK_ID, status="failed", current_phase="stage5"
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    async def fake_latest(self, task_id):
+        return latest
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
+
+    result = await _service(sessionmaker).get_current_orchestration(_TASK_ID)
+    assert result.orchestration_id == _OID
+
+
+async def test_get_current_falls_back_to_latest(monkeypatch) -> None:
+    """无 active → 返回最近一条（含 terminal history）。"""
+    sessionmaker = FakeSessionMaker()
+    latest = make_orchestration(
+        orchestration_id=_RETRY_ID, task_id=_TASK_ID, status="failed", current_phase="stage5"
+    )
+
+    async def fake_active(self, task_id):
+        return None
+
+    async def fake_latest(self, task_id):
+        return latest
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
+
+    result = await _service(sessionmaker).get_current_orchestration(_TASK_ID)
+    assert result.orchestration_id == _RETRY_ID
+
+
+async def test_get_current_none_raises_not_found(monkeypatch) -> None:
+    """task 无任何 orchestration → 404。"""
+    sessionmaker = FakeSessionMaker()
+
+    async def fake_active(self, task_id):
+        return None
+
+    async def fake_latest(self, task_id):
+        return None
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_task", fake_latest)
+
+    with pytest.raises(ResearchOrchestrationNotFound):
+        await _service(sessionmaker).get_current_orchestration(_TASK_ID)

@@ -18,12 +18,13 @@
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
 from langgraph.types import Command
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import (
     ActiveWorkflowRunExists,
@@ -93,6 +94,12 @@ def _sanitize_error(exc: Exception) -> str:
     return type(exc).__name__[:_MAX_ERROR_MESSAGE_LENGTH]
 
 
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """从 PostgreSQL Diagnostics 取违反的约束名（无 diag / 非约束错误 → None）。"""
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    return getattr(diag, "constraint_name", None) if diag is not None else None
+
+
 def _has_interrupt(state) -> bool:
     return bool(state.tasks) and any(task.interrupts for task in state.tasks)
 
@@ -115,7 +122,12 @@ class Stage5WorkflowRunner:
 
     # ------------------------------------------------------------------ create
 
-    async def create_stage5_run(self, request: Stage5WorkflowRequest) -> WorkflowRunResponse:
+    async def create_stage5_run(
+        self,
+        request: Stage5WorkflowRequest,
+        *,
+        on_run_created: Callable[[AsyncSession, UUID], None] | None = None,
+    ) -> WorkflowRunResponse:
         """创建 Stage 5 工作流 run（必须绑定一个真实 ResearchTask）。
 
         - 真实 PG 校验 task 存在 → 缺失 `Stage5ResearchTaskNotFound`（不猜任务、
@@ -123,7 +135,14 @@ class Stage5WorkflowRunner:
         - active-run 不变式：同一 task 同时只能存在一个 active WorkflowRun——
           先查 `get_active_for_task`，再靠 partial unique index
           `uq_workflow_runs_one_active_per_task` 兜底并发（IntegrityError →
-          `ActiveWorkflowRunExists`）。
+          `ActiveWorkflowRunExists`）；
+        - `on_run_created`（orchestration ownership，spec K/F）：可选 transaction
+          hook `(AsyncSession, run_id) → None`。**WorkflowRun 行 + hook 副作用
+          在同一事务提交**（run create 与 child link insert 之间无 crash 孤儿
+          窗口）；runner **不 import orchestration 层**；
+        - **IntegrityError 分类（spec E）**：只有 `uq_workflow_runs_one_active_per_task`
+          → `ActiveWorkflowRunExists`；child ownership 约束与其它唯一冲突原样抛，
+          由 orchestration 层分类。
         """
         run_id = uuid.uuid4()
         async with self._sessionmaker() as session:
@@ -146,10 +165,15 @@ class Stage5WorkflowRunner:
             )
             try:
                 await run_repo.create(run)
-            except IntegrityError:
-                # 并发创建同一 task 的两个 active run：unique partial index 兜底。
+                if on_run_created is not None:
+                    on_run_created(session, run_id)
+            except IntegrityError as exc:
+                # 并发创建同一 task 的两个 active run：unique partial index 兜底 →
+                # 只转 ActiveWorkflowRunExists；child link 归属冲突原样抛。
                 await session.rollback()
-                raise ActiveWorkflowRunExists() from None
+                if _constraint_name(exc) == "uq_workflow_runs_one_active_per_task":
+                    raise ActiveWorkflowRunExists() from None
+                raise
             await event_repo.create(
                 WorkflowEventModel(
                     run_id=run_id,
@@ -268,7 +292,11 @@ class Stage5WorkflowRunner:
         }
         return await self._run_graph(run_id, thread_id, resume=resume_value)
 
-    async def resume_stage5_for_recovery(self, run_id: UUID) -> dict:
+    async def resume_stage5_for_recovery(
+        self,
+        run_id: UUID,
+        request: Stage5WorkflowRequest | None = None,
+    ) -> dict:
         """失败后内部 durable recovery：FAILED(worker_restarted) → RUNNING，同 run/thread 恢复。
 
         **recovery ≠ retry**：仅用于 Stage 5 worker 重启中断恢复（镜像 Stage 4
@@ -277,6 +305,11 @@ class Stage5WorkflowRunner:
         失败（LLM / 校验 / 终态错误）不在该路径，WAITING_HUMAN 人工裁决走
         `resume_stage5_human`。graph 从最后 checkpoint 继续（无 initial_state），
         `_finalize` 统一处理 interrupt（→ waiting_human）与 terminal。
+
+        **从未执行的 run**（crash 在 `execute_stage5` 之前，无 checkpoint）→
+        复用同 run/thread 重新首启：`request` 由 orchestration 节点从 Stage4
+        checkpoint 投影（与 `execute_stage5` 相同的 initial_state），否则
+        `Stage5InvalidState`（防御性，不该发生）。
         """
         started_at = datetime.now(UTC)
         async with self._sessionmaker() as session:
@@ -308,6 +341,14 @@ class Stage5WorkflowRunner:
             )
             await session.commit()
 
+        checkpointer = await self._checkpoint_manager.get_checkpointer()
+        graph = build_stage5_report_graph(self._dependencies, checkpointer)
+        state = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+        if state is None or not state.values:
+            if request is None:
+                raise Stage5InvalidState("cannot recover unstarted stage5 run without request")
+            initial_state = self._build_initial_state(request, run_id)
+            return await self._run_graph(run_id, thread_id, initial_state=initial_state)
         return await self._run_graph(run_id, thread_id)
 
     # ------------------------------------------------------------------ checkpoint

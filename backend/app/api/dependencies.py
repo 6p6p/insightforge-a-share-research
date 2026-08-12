@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.dependencies import get_db_session
 from app.report_export.service import ReportExportService
 from app.repositories.research_task_repository import ResearchTaskRepository
+from app.research_orchestration.service import ResearchOrchestrationService
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.source_ingestion_service import SourceIngestionService
@@ -43,6 +44,15 @@ def get_research_execution_service(request: Request) -> ResearchExecutionService
     if resources is None or resources.research_execution is None:
         raise RuntimeError("application resources are not initialized; lifespan must create them")
     return resources.research_execution
+
+
+def get_research_orchestration_service(request: Request) -> ResearchOrchestrationService:
+    """顶层编排应用服务（7A.2B.2 spec U）：lifespan 装配的同一实例（绑定
+    stage5_runner + orchestration_runner），API 只做协议层 dispatch。"""
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.research_orchestration is None:
+        raise RuntimeError("application resources are not initialized; lifespan must create them")
+    return resources.research_orchestration
 
 
 def get_task_artifact_service(request: Request) -> TaskArtifactService:

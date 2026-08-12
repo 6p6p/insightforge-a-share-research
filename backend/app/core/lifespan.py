@@ -10,6 +10,8 @@ from app.core.logging import get_logger
 from app.core.resources import ApplicationResources
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.research_orchestration.recovery import ResearchOrchestrationRecoveryCoordinator
+from app.research_orchestration.service import ResearchOrchestrationService
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_recovery import ResearchExecutionRecoveryCoordinator
 from app.services.research_execution_service import ResearchExecutionService
@@ -57,6 +59,35 @@ def _create_research_execution(
     )
 
 
+def _create_research_orchestration(
+    settings,
+    sessionmaker,
+    langgraph: LangGraphCheckpointManager,
+) -> ResearchOrchestrationService:
+    """生产装配顶层编排（7A.2B.2 spec S/T）：构造 0 model call / 0 network。
+
+    复用 fulfillment / stage4 / stage5 production factories + PG Checkpointer；
+    返回绑定 stage5_runner + orchestration_runner 的 service（human action /
+    recovery / API 共用同一批实例）。自动测试不触发（API 测试 override
+    dependencies；本函数只被 lifespan 调用）。
+    """
+    from app.research_orchestration.factory import (
+        create_research_orchestration_dependencies,
+        create_research_orchestration_runner,
+    )
+
+    deps = create_research_orchestration_dependencies(settings, sessionmaker, langgraph)
+    orchestration_runner = create_research_orchestration_runner(
+        settings, sessionmaker, langgraph, dependencies=deps
+    )
+    return ResearchOrchestrationService(
+        sessionmaker=sessionmaker,
+        plan_service=deps.plan_service,
+        stage5_runner=deps.stage5_runner,
+        orchestration_runner=orchestration_runner,
+    )
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     settings = application.state.settings
@@ -81,6 +112,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         sessionmaker=sessionmaker,
     )
     research_execution = _create_research_execution(settings, sessionmaker, langgraph)
+    research_orchestration = _create_research_orchestration(settings, sessionmaker, langgraph)
     raw_storage = LocalRawArtifactStore(
         root=settings.raw_storage_root,
         max_bytes=settings.source_max_file_size_bytes,
@@ -93,6 +125,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         langgraph=langgraph,
         workflow_execution=workflow_execution,
         research_execution=research_execution,
+        research_orchestration=research_orchestration,
         raw_storage=raw_storage,
         export_storage=export_storage,
     )
@@ -110,8 +143,27 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             "orphaned_runs_reconcile_failed",
             error_type=type(exc).__name__,
         )
-    # best-effort 恢复研究链（spec E）：reconcile 之后、接受新执行之前，把
-    # 「Stage4 已完成但 Stage5 未创建」的 task 重新调度 Stage5 续接；失败不阻止启动。
+    # best-effort 恢复顶层 orchestration（7A.2B.2 spec T）：reconcile 之后——
+    # orchestration-owned Stage4/Stage5 child 已被标 FAILED(worker_restarted) →
+    # 从同 orchestration_id + 同顶层 thread 恢复；child 仍 RUNNING（live executor /
+    # rolling restart）跳过；失败不阻止启动。
+    if research_orchestration.orchestration_runner is not None:
+        try:
+            coordinator = ResearchOrchestrationRecoveryCoordinator(
+                sessionmaker, research_orchestration.orchestration_runner
+            )
+            await asyncio.wait_for(
+                coordinator.recover_orchestrations(),
+                timeout=settings.workflow_reconcile_timeout_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_orchestrations_recover_failed",
+                error_type=type(exc).__name__,
+            )
+    # best-effort 恢复研究链（spec E）：legacy coordinator 只处理 non-owned runs
+    # （orchestration child 由 research_orchestration_child_runs 归属，NOT EXISTS
+    # 排除）；失败不阻止启动。
     try:
         coordinator = ResearchExecutionRecoveryCoordinator(sessionmaker, research_execution)
         await asyncio.wait_for(

@@ -22,7 +22,10 @@ from app.db.models.research_orchestration import (
     ResearchOrchestrationChildModel,
     ResearchOrchestrationModel,
 )
-from app.research_orchestration.contracts import ACTIVE_ORCHESTRATION_STATUSES
+from app.research_orchestration.contracts import (
+    ACTIVE_ORCHESTRATION_STATUSES,
+    OrchestrationPhase,
+)
 
 
 class ResearchOrchestrationRepository:
@@ -98,6 +101,16 @@ class ResearchOrchestrationRepository:
         )
         return result.scalars().first()
 
+    async def get_latest_for_task(self, task_id: UUID) -> ResearchOrchestrationModel | None:
+        """同 task 最近一条 orchestration（含 terminal history，`current` 投影用）。"""
+        result = await self._session.execute(
+            select(ResearchOrchestrationModel)
+            .where(ResearchOrchestrationModel.task_id == task_id)
+            .order_by(ResearchOrchestrationModel.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def create_or_get(
         self, orchestration: ResearchOrchestrationModel
     ) -> tuple[ResearchOrchestrationModel, bool]:
@@ -167,7 +180,12 @@ class ResearchOrchestrationRepository:
         self, orchestration_id: UUID, completed_at: datetime
     ) -> ResearchOrchestrationModel | None:
         return await self._set_terminal(
-            orchestration_id, "completed", completed_at, error_code=None, error_message=None
+            orchestration_id,
+            "completed",
+            completed_at,
+            error_code=None,
+            error_message=None,
+            current_phase=OrchestrationPhase.COMPLETED.value,
         )
 
     async def mark_cancelled(
@@ -201,17 +219,21 @@ class ResearchOrchestrationRepository:
         *,
         error_code: str | None,
         error_message: str | None,
+        current_phase: str | None = None,
     ) -> ResearchOrchestrationModel | None:
+        values: dict = {
+            "status": status,
+            "completed_at": completed_at,
+            "error_code": error_code,
+            "error_message": error_message,
+            "updated_at": datetime.now(UTC),
+        }
+        if current_phase is not None:
+            values["current_phase"] = current_phase
         stmt = (
             update(ResearchOrchestrationModel)
             .where(ResearchOrchestrationModel.orchestration_id == orchestration_id)
-            .values(
-                status=status,
-                completed_at=completed_at,
-                error_code=error_code,
-                error_message=error_message,
-                updated_at=datetime.now(UTC),
-            )
+            .values(**values)
             .returning(ResearchOrchestrationModel)
         )
         result = await self._session.execute(stmt)

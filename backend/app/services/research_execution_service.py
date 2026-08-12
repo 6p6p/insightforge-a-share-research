@@ -18,7 +18,7 @@ scheduler 模式；**不是**分布式任务队列）。
 """
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -43,7 +43,7 @@ from app.schemas.research_execution import ResearchExecutionRequest
 from app.schemas.workflow import WorkflowRunResponse
 from app.services.company_identity_service import CompanyIdentityService
 from app.stage4.contracts import Stage4WorkflowRequest
-from app.stage5.contracts import Stage5WorkflowRequest
+from app.stage5.contracts import Stage5RequestBuilder, Stage5WorkflowRequest
 from app.stage5.errors import Stage5WorkflowError
 from app.workflows.checkpoint import LangGraphCheckpointManager
 
@@ -161,11 +161,9 @@ class ResearchExecutionService:
                 )
                 return
 
-            stage5_request = Stage5WorkflowRequest(
+            stage5_request = Stage5RequestBuilder.from_stage4_state(
                 task_id=task_id,
-                company_id=stage4_request.company_id,
-                research_question=stage4_request.research_question,
-                analysis_as_of=stage4_request.analysis_as_of,
+                stage4_state=result,
                 synthesis_result_id=UUID(synthesis_result_id),
             )
             await self._continue_to_stage5(task_id, stage5_request)
@@ -245,11 +243,9 @@ class ResearchExecutionService:
                     stage4_run_id=str(state["stage4_run_id"]),
                 )
                 return
-            stage5_request = Stage5WorkflowRequest(
+            stage5_request = Stage5RequestBuilder.from_stage4_state(
                 task_id=task_id,
-                company_id=UUID(result["company_id"]),
-                research_question=result["research_question"],
-                analysis_as_of=date.fromisoformat(result["analysis_as_of"]),
+                stage4_state=result,
                 synthesis_result_id=UUID(synthesis_result_id),
             )
             await self._continue_to_stage5(task_id, stage5_request)

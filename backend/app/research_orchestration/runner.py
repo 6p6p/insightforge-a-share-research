@@ -1,18 +1,25 @@
-"""Top-level research orchestration runner (stage 7A.2B.1 spec I/M/N/O).
+"""Top-level research orchestration runner (stage 7A.2B.1 spec I/M/N/O + 7A.2B.2 L/M).
 
 跑顶层 orchestration graph，PG Checkpointer、`thread_id = orchestration_id`
 （**顶层线程 != child Stage4/Stage5 线程**——child 仍是 `thread_id = run_id`、
 独立 checkpoint / recovery / action 语义，spec N）。
 
 - **run_orchestration(orchestration_id)**：checkpoint-aware——已有顶层 checkpoint
-  → `graph.astream(None, ...)` 从 checkpoint 恢复；无 checkpoint → 初始 state
-  首启。graph 期间不持有 DB session；
+  → 恢复；无 checkpoint → 初始 state 首启。graph 期间不持有 DB session；
+- **awaiting_stage5 continuation（spec M）**：graph 到 END 暂停（phase=
+  awaiting_stage5、Stage5 child WAITING_HUMAN）。人工裁决 child 后再次
+  `run_orchestration`：`aget_state().next` 为空（graph 已完成）且 phase 仍为
+  awaiting_stage5 → `aupdate_state(as_node=ensure_stage5_child)` 重新进入
+  `run_or_resume_stage5` 重新判定 child 状态（completed → complete /
+  research_required → pause_for_research / 仍 waiting_human → 再次 pause）。
+  **注意 `aupdate_state` 注入的是 fresh 路由值（child 终态由节点重查 DB），
+  不是 stale 的 `stage5_run_status`**；
 - **失败投影（spec M）**：graph 抛异常 → orchestration `status=failed`、phase 保持
-  stage4（child 阶段失败时）`error_code` 用稳定投影（stage4_execution_failed /
-  orchestration_execution_failed），**不吞 child 错误**（child 自身 run 的
-  error_code/message 已由 Stage4 runner 写在 WorkflowRun 行上）；
-- `awaiting_stage5` 是 7A.2B.1 正常 terminal phase（status 保持 running，
-  等 7A.2B.2 接 Stage5），**不是 orchestration completed**。
+  stage4/stage5（child 阶段失败时）`error_code` 用稳定投影（stage4_execution_failed /
+  stage5_execution_failed / orchestration_execution_failed），**不吞 child 错误**
+  （child 自身 run 的 error_code/message 已由 Stage4/5 runner 写在 WorkflowRun 行上）；
+- `awaiting_stage5` **不是** orchestration completed（status=waiting_human，
+  等 Stage5 人工裁决）。
 """
 
 import asyncio
@@ -91,6 +98,18 @@ class ResearchOrchestrationRunner:
         if prior is not None and prior.values:
             phase = prior.values.get("current_phase") or orchestration.current_phase
             await self._mark_running(orchestration_id, phase=phase)
+            if not prior.next and phase == OrchestrationPhase.AWAITING_STAGE5.value:
+                # **awaiting_stage5 continuation（spec M）**：顶层 graph 已到 END
+                # （Stage5 child 人工裁决后）。`aupdate_state(as_node=
+                # ensure_stage5_child)` 把 next 重新指向 run_or_resume_stage5——
+                # 节点重查 child 终态、注入 fresh `stage5_run_status`，条件边重新
+                # 路由（completed → complete / research_required → pause /
+                # 仍 waiting_human → 再次 pause）。
+                await graph.aupdate_state(
+                    config,
+                    {"current_phase": OrchestrationPhase.STAGE5.value},
+                    as_node="ensure_stage5_child",
+                )
             final_state = await self._stream(graph, config, initial_state=None)
         else:
             await self._mark_running(orchestration_id, phase=OrchestrationPhase.PLANNING.value)
@@ -146,7 +165,7 @@ class ResearchOrchestrationRunner:
             await session.commit()
 
     async def _mark_orchestration_failed(self, orchestration_id: UUID, exc: Exception) -> None:
-        """稳定失败投影（spec M）：phase 保持 stage4（child 阶段失败）或当前 phase。"""
+        """稳定失败投影（spec M）：phase 保持 stage4/stage5（child 阶段失败）或当前 phase。"""
         async with self._sessionmaker() as session:
             orchestration = await ResearchOrchestrationRepository(session).get_by_id(
                 orchestration_id
@@ -159,6 +178,8 @@ class ResearchOrchestrationRunner:
             error_code = (
                 "stage4_execution_failed"
                 if phase == OrchestrationPhase.STAGE4.value
+                else "stage5_execution_failed"
+                if phase == OrchestrationPhase.STAGE5.value
                 else "orchestration_execution_failed"
             )
             await ResearchOrchestrationRepository(session).mark_failed(

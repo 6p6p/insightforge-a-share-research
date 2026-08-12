@@ -77,3 +77,30 @@ class Stage5WorkflowRequest(BaseModel):
         if not self.research_question:
             raise ValueError("research_question 不能为空（trim 后）")
         return self
+
+
+class Stage5RequestBuilder:
+    """Stage 4 checkpoint state → `Stage5WorkflowRequest` 的最小 public bridge
+    （Synthesis → Stage5，7A.2B.2 spec J）。
+
+    唯一权威是 **Stage 4 checkpoint state dict**（`execute_stage4` 的 final state 与
+    `read_checkpoint_state` 的 state 形态一致：company_id / research_question /
+    analysis_as_of 均为 checkpoint-safe string）。首启与恢复共用这一条投影路径，
+    不复制逻辑；legacy 链（`ResearchExecutionService`）与顶层 orchestration
+    （`run_or_resume_stage5`）复用同一 builder。
+    """
+
+    @staticmethod
+    def from_stage4_state(
+        *,
+        task_id: UUID,
+        stage4_state: dict,
+        synthesis_result_id: UUID,
+    ) -> Stage5WorkflowRequest:
+        return Stage5WorkflowRequest(
+            task_id=task_id,
+            company_id=UUID(stage4_state["company_id"]),
+            research_question=stage4_state["research_question"],
+            analysis_as_of=date.fromisoformat(stage4_state["analysis_as_of"]),
+            synthesis_result_id=synthesis_result_id,
+        )

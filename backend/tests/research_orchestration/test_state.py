@@ -15,8 +15,11 @@ def test_state_keys_exact() -> None:
         "current_phase",
         "preparation_ready",
         "missing_need_codes",
+        "stage4_child_run_id",
         "current_child_run_id",
         "synthesis_result_id",
+        "stage5_run_status",
+        "research_request_id",
         "error_code",
     }
 
@@ -39,8 +42,11 @@ def test_state_value_types_checkpoint_safe() -> None:
         "task_id",
         "research_plan_id",
         "current_phase",
+        "stage4_child_run_id",
         "current_child_run_id",
         "synthesis_result_id",
+        "stage5_run_status",
+        "research_request_id",
         "error_code",
     ):
         assert types[key] is str

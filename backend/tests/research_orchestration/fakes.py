@@ -116,6 +116,46 @@ class FakeStage4Runner:
         return SimpleNamespace(run_id=self.run_id)
 
 
+class FakeStage5Runner:
+    """fake `Stage5WorkflowRunner`：只暴露 child service 需要的 create_stage5_run。"""
+
+    def __init__(self, *, fail_with: BaseException | None = None) -> None:
+        self.fail_with = fail_with
+        self.child_binds: list = []
+        self.run_id = uuid.uuid4()
+
+    async def create_stage5_run(self, request, *, on_run_created=None):
+        if self.fail_with is not None:
+            raise self.fail_with
+        if on_run_created is not None:
+            session = FakeSession()
+            on_run_created(session, self.run_id)
+            self.child_binds.extend(session.added)
+        return SimpleNamespace(run_id=self.run_id)
+
+
+class FakeActionStage5Runner:
+    """fake Stage5 runner for `act_on_orchestration`（记录 resume_stage5_human）。"""
+
+    def __init__(self) -> None:
+        self.resumes: list[tuple] = []
+
+    async def resume_stage5_human(self, run_id, decision, comment=None):
+        self.resumes.append((run_id, decision, comment))
+        return {"decision": decision}
+
+
+class FakeActionOrchestrationRunner:
+    """fake top-level runner for `act_on_orchestration`（记录 run_orchestration）。"""
+
+    def __init__(self) -> None:
+        self.run_calls: list[UUID] = []
+
+    async def run_orchestration(self, orchestration_id: UUID) -> dict:
+        self.run_calls.append(orchestration_id)
+        return {"current_phase": "awaiting_stage5"}
+
+
 class FakeRecoveryRunner:
     """fake orchestration runner（recovery 协调器只读 checkpoint + 触发 run）。"""
 

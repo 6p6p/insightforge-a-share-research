@@ -1,4 +1,4 @@
-"""Top-level research orchestration recovery (stage 7A.2B.1 spec O).
+"""Top-level research orchestration recovery (stage 7A.2B.1 spec O + 7A.2B.2 Q).
 
 在 `WorkflowRecoveryService.reconcile_orphaned_runs`（把重启时 PENDING/RUNNING
 的 WorkflowRun 标为 FAILED(worker_restarted)）**之后**运行：对每个非终态
@@ -6,15 +6,18 @@ orchestration，用**同 orchestration_id + 同顶层 thread** 从最后 checkpo
 恢复——**绝不新建 orchestration / 绝不换 thread**（spec O）。
 
 - 候选：`research_orchestration_runs` 里 `status IN (pending, running)` 且
-  `current_phase <> 'awaiting_stage5'`（awaiting_stage5 是 7A.2B.1 正常 terminal
-  phase，等 7A.2B.2 接 Stage5，不恢复；waiting_human / waiting_manual 也排除——
-  等人工，不自动恢复）；
-- `phase=stage4` 时先做 **exact child 检查**（spec D：`(orchestration_id, stage4,
-  attempt 1)`，**不用 latest task+graph_name 猜归属**）：child run 仍
-  `running` → 有 live executor 正在执行（rolling restart）→ **跳过，不重复
-  执行**；其余状态（pending / failed(worker_restarted) / completed）→ 交给顶层
-  graph 的 `run_or_resume_stage4` 节点（execute / resume / 跳过 collect），
-  协调器只恢复顶层 graph，不重复实现 child 恢复；
+  `current_phase <> 'awaiting_stage5'`（awaiting_stage5 是正常 terminal pause，
+  等 Stage5 人工裁决，不恢复；waiting_human / waiting_manual / research_backflow
+  也排除——等人工，不自动恢复）；
+- `phase=stage4` / `phase=stage5` 时先做 **exact child 检查**（spec D/Q：
+  `(orchestration_id, stage, attempt 1)`，**不用 latest task+graph_name 猜
+  归属**）：child run 仍 `running` → 有 live executor 正在执行（rolling
+  restart）→ **跳过，不重复执行**；其余状态（pending / failed(worker_restarted)
+  / completed / waiting_human）→ 交给顶层 graph 的 `run_or_resume_stage4` /
+  `run_or_resume_stage5` 节点（execute / resume / 跳过 collect），协调器只恢复
+  顶层 graph，不重复实现 child 恢复。**stage5 的 running 跳过是必须的**：
+  `_stage5_outcome` 对 running child 抛 `ResearchOrchestrationIntegrityError`，
+  若不跳过会把有 live executor 的 orchestration 误标 failed；
 - 每个 orchestration 独立 try/except：单个失败不中止整个 sweep。
 """
 
@@ -27,7 +30,6 @@ from app.core.logging import get_logger
 from app.domain.tasks import WorkflowRunStatus
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
-    ChildStage,
     OrchestrationPhase,
     OrchestrationStatus,
 )
@@ -111,26 +113,27 @@ class ResearchOrchestrationRecoveryCoordinator:
 
         checkpoint = await self._runner.read_orchestration_checkpoint(orchestration_id)
         phase = checkpoint.get("current_phase") or orchestration.current_phase
-        if phase == OrchestrationPhase.STAGE4.value and not await self._child_resumable(
-            orchestration_id
-        ):
+        if phase in (
+            OrchestrationPhase.STAGE4.value,
+            OrchestrationPhase.STAGE5.value,
+        ) and not await self._child_resumable(orchestration_id, phase):
             return False
 
         await self._runner.run_orchestration(orchestration_id)
         return True
 
-    async def _child_resumable(self, orchestration_id: UUID) -> bool:
-        """exact child (orchestration_id, stage4, attempt 1) 是否可恢复。
+    async def _child_resumable(self, orchestration_id: UUID, stage: str) -> bool:
+        """exact child (orchestration_id, stage, attempt 1) 是否可恢复。
 
-        - 无 child（crash 在 ensure_stage4_child 完成前）→ True（graph 重新
+        - 无 child（crash 在 ensure_<stage>_child 完成前）→ True（graph 重新
           ensure / execute）；
         - child `running` → False（live executor / rolling restart，不重复执行）；
-        - pending / failed(worker_restarted) / completed → True（graph 节点
-          execute / resume / collect）。
+        - pending / failed(worker_restarted) / completed / waiting_human → True
+          （graph 节点 execute / resume / 跳过 collect）。
         """
         async with self._sessionmaker() as session:
             child = await ResearchOrchestrationChildRepository(session).get_child(
-                orchestration_id, ChildStage.STAGE4.value, 1
+                orchestration_id, stage, 1
             )
             if child is None:
                 return True

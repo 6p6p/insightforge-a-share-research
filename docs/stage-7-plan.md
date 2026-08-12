@@ -18,7 +18,7 @@
 - **测试（spec R/S/T/U/V）**：executor + E2E 集成 24（document/event 11 + financial/macro/valuation 9 + 全链 service 4；真实 PG + Fake planner / FakeRetrieval / FakeEvidenceExtractionModel，**0 真实 DeepSeek / 0 Retrieval / 0 Chroma / 0 Web**）；Migration 0041 downgrade guard（空表 / v1 new-field-safe 通过，v2 snapshot 拒绝）；全量回归（非集成 1924 + 集成 941）+ ruff + alembic check 干净。
 - **API**：本轮未新增 research-plan API（推迟 7A.2B）。
 
-## 7A.2B：Research Planning API + 规划驱动执行（planned，next；architecture decision frozen 2026-08-12）
+## 7A.2B：Research Planning API + 规划驱动执行（completed；7A.2B.3 next，architecture decision frozen 2026-08-12）
 
 ### 7A.2B architecture decision（方案 D：Top-level LangGraph Orchestrator + 独立 Stage4/Stage5 WorkflowRuns）
 
@@ -32,7 +32,7 @@
 - `POST /research-plan`（触发 create + route）、`GET /research-plan/{id}`、`POST /research-preparation`（或按任务聚合入口）；前端最小入口（如任务详情页展示 research plan / readiness / missing needs）。
 - 规划驱动执行：ready=true 时自动进入 Stage 4 执行；ready=false 时展示 MissingResearchNeeds 供分析师补齐或触发受控的资料获取。
 
-### 7A.2B.1：Orchestration Foundation（completed，本轮 FINAL）
+### 7A.2B.1：Orchestration Foundation（completed，FINAL）
 
 - **Migration 0042 + 模型（spec B/C）**：新增 `research_orchestration_runs`（一等公民，**非 WorkflowRun**）与 `research_orchestration_child_runs`（exact ownership linkage）。`input_fingerprint` CHAR(64) UNIQUE（replay）；partial unique `(task_id) WHERE active`（同 task 至多一个 active orchestration，独立于 `uq_workflow_runs_one_active_per_task`，互不修改）；child `UNIQUE(workflow_run_id)` + `UNIQUE(orchestration_id, stage, attempt_no)`。downgrade guard（spec R）：任一表有行 → 拒绝 rollback。
 - **顶层 LangGraph graph（spec I/N）**：真实 StateGraph `stage7_top_level`，PG Checkpointer、`thread_id = orchestration_id`（**顶层线程 != child Stage4 线程**，child 仍 `thread_id = run_id`）。节点序列 `START → ensure_plan → ensure_route → prepare → (ready: ensure_stage4_child | not_ready: fulfill) → fulfill → prepare_again → (ready: ensure_stage4_child | waiting_manual: waiting_manual END) → ensure_stage4_child → run_or_resume_stage4 → collect_synthesis → awaiting_stage5 END`。`awaiting_stage5` 是 7A.2B.1 正常 terminal phase（status 保持 running，等 7A.2B.2 接 Stage5）；`waiting_manual` 是 fulfill 后仍 not ready 的 terminal（status=waiting_human，0 个 WorkflowRun）。State 只存 ID / 小结构（spec H），节点**复用**既有 services（spec J：create_plan / route / prepare / fulfill / Stage4WorkflowRunner / SynthesisService），全部幂等（replay 安全）。
@@ -43,6 +43,21 @@
 - **Cancel（spec Q）**：minimal + 幂等——先按现有 Stage4/WorkflowRun cancel 语义取消 active child，再 orchestration cancelled；cancelled → 原样返回；completed/failed → `AlreadyFinished`；不直接 SQL 删除 child / orchestration。
 - **测试（spec T/U/S）**：单元 43（fingerprint / state / graph topology / runner 守卫 + 失败投影 / service replay-conflict-cancel-verify / child exact 复用与并发 winner / recovery 跳过与恢复判定，0 DB）+ 集成 6 Cases（happy path → awaiting_stage5、not-ready→fulfill→ready、fulfill 后仍 not-ready → waiting_manual、Stage4 child 失败投影、replay + active 409、worker restart 同 thread 恢复无重复产物；真实 PG + 真实 LangGraph + fake prepare/fulfill，**0 真实 DeepSeek**）。全量回归 + ruff + alembic check 干净。
 - **本轮不做（边界）**：Stage5 auto-execution、HumanReview、ResearchBackflow auto-loop、Web 一键研究、Stage7B Evaluation；lifespan / production factory 未接线（本阶段无 API 入口创建 orchestration，恢复协调器与 legacy 边界已作为 spec'd 交付物落地，待入口接线时一并接入）。
+
+### 7A.2B.2：Stage5 Orchestration Lifecycle（completed）
+
+- **Migration 0043（spec B/C）**：`research_orchestration_runs` 增加重试 schema——`attempt_no INTEGER NOT NULL`（现有 rows 回填 1，CHECK ≥ 1）、`retry_of_orchestration_id UUID NULL`（FK RESTRICT + 不自指 CHECK）；唯一性由 `input_fingerprint UNIQUE` 改为 `UNIQUE(research_plan_id, attempt_no)`（同 plan 的 attempt 1/2/3 允许，active partial unique 不变）；`ResearchOrchestrationService.retry_orchestration` 支持 user retry（新 orchestration_id / 新顶层 thread / attempt 递增 / 同 task 已有 active → 409）；downgrade guard：任一表有行 → 拒绝 rollback。
+- **Stage5 exact child + execute/resume（spec J/K/L/M）**：`Stage5RequestBuilder`（Stage4 checkpoint state → `Stage5WorkflowRequest` 的唯一投影，首启/恢复共用，legacy 链与顶层 orchestration 复用同一 builder）；`ensure_stage5_child` 与 Stage4 同事务模式（WorkflowRun + child link，无 crash 孤儿窗口）；`run_or_resume_stage5` 按 child 状态 execute（pending）/ resume（failed(worker_restarted)；**无 checkpoint 的 run → 同 run/thread 用 request 重建 initial state 重首启**）/ 跳过（completed / waiting_human / running）。顶层 graph v2 接入 Stage5：`route_stage5_result` 纯 state 路由 → completed→complete_orchestration / waiting_human→awaiting_stage5 END / research_required→pause_for_research / failed→stage5_failed / cancelled→stage5_cancelled。
+- **Human lifecycle（spec N-P）**：Stage5 graph 真实 `interrupt()` → run=WAITING_HUMAN、顶层 phase=awaiting_stage5；approve action → `ReviewActionService.resolve_human_request` 持久化 immutable HumanReviewDecision → `Command(resume=...)` **同 Stage5 run/thread** 续接 → orchestration completed（不重复 create）；research_required → pause_for_research（ResearchBackflow request，**不自动执行补充研究**）。
+- **Recovery（spec Q-R）**：`resume_stage5_for_recovery`（failed+worker_restarted 的 run 从 checkpoint 续接）；`_set_terminal` / `mark_completed` 同步 `current_phase`（终态投影一致）；legacy `ResearchExecutionRecoveryCoordinator` 候选 SQL `NOT EXISTS` 排除 orchestration-owned children；顶层恢复同 orchestration_id + 同顶层 thread。
+- **Production wiring（spec S-T）**：`research_orchestration/factory.py`（0 model call / 0 network 装配 deps + runner）；lifespan 装配 orchestration service + reconcile 后 best-effort 恢复顶层编排（child RUNNING 跳过、失败不阻止启动）。
+- **Minimal API（spec U-V）**：`GET /research-orchestrations/{orchestration_id}`、`POST /research-orchestrations/{orchestration_id}/actions`（approve / retry）最小入口；只做协议，业务进 services。
+- **测试（spec W/X）**：集成 7 Cases（真实 PG + PG Checkpointer + 真实 LangGraph + Fake Planner/Stage4/Stage5 models，**0 真实 DeepSeek**）：full chain → Check PASS → Audit PASS → completed；waiting_human → approve → **same Stage5 run resume** → completed；waiting_human → rewrite → revision → complete；research route → ResearchBackflowRequest → phase=research_backflow（不自动 research）；crash 在 Stage4 后 → 同顶层 thread 恢复 → Stage5（不重复 Stage4）；crash 在 Stage5 completed 后 → 恢复（不重复 Stage5）；failed O1 → user retry O2（新 id/thread、attempt=2）→ complete。Migration 0043 downgrade guard（3）+ pip check + ruff check/format + 全量回归（非集成 2034 + 集成 967，0 失败）。
+- **本轮不做（边界）**：live source provider 自动获取、ResearchBackflow 补充研究自动执行、Web 大改、Stage7B Evaluation。
+
+### 7A.2B.3：Research Orchestration Continuation（planned，next）
+
+- 在 7A.2B.2 完整 lifecycle 之上的后续编排能力（本轮未开工；具体 spec 后续定义，不包含自动交易 / 技术分析 / 买卖建议）。
 
 ## 7B：三路评估（3-way Evaluation，planned）
 

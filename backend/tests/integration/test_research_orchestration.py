@@ -6,11 +6,11 @@
 （FakeResearchPlannerModel），prepare/fulfill 注入可控 Fake（readiness 由测试
 控制，不重测 7A.1 / 7A.2A 语义）。全程**零真实 DeepSeek**。
 
-Concentrated Cases 1-6（spec S）：
+Concentrated Cases 1-6（spec S；7A.2B.2 接入 Stage5 后顶层 graph 走到 completed）：
 1. happy path：prepare ready → ensure_stage4_child → 真实 Stage4 → collect_synthesis
-   → **awaiting_stage5**（status=running、phase=awaiting_stage5；恰好 1 个 stage4
-   child + 1 个 exact child link + 1 份 synthesis，无重复产物）；
-2. not ready → fulfill → prepare_again ready → Stage4 → awaiting_stage5；
+   → Stage5 → **completed**（status=completed、phase=completed；恰好 1 stage4 + 1
+   stage5 child + exact child links + 1 份 synthesis，无重复产物）；
+2. not ready → fulfill → prepare_again ready → Stage4 → Stage5 → completed；
 3. fulfill 后仍 not ready → **waiting_manual**（status=waiting_human，0 个
    workflow_run / 0 个 child link）；
 4. Stage4 child 业务失败 → orchestration **failed**（phase=stage4，
@@ -21,7 +21,7 @@ Concentrated Cases 1-6（spec S）：
 6. worker restart（spec O）：顶层 graph 运行中取消（child RUNNING + 部分
    checkpoint）→ 真实 `reconcile_orphaned_runs` 标 FAILED(worker_restarted) →
    `ResearchOrchestrationRecoveryCoordinator` **同 orchestration_id + 同顶层
-   thread** 恢复 → awaiting_stage5，无重复产物。
+   thread** 恢复 → 完整链 Stage5 → completed，无重复产物。
 """
 
 import asyncio
@@ -57,10 +57,13 @@ from app.services.company_identity_service import CompanyIdentityService
 from app.services.source_registry_service import SourceRegistryService
 from app.services.workflow_recovery_service import WorkflowRecoveryService
 from app.stage4.runner import Stage4WorkflowRunner
+from app.stage5.runner import Stage5WorkflowRunner
 from app.storage.raw_store import LocalRawArtifactStore
 from app.synthesis.service import SynthesisService
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from tests.analysis.financial.fakes import FakeFinancialAnalysisModel
+from tests.audit.fakes import FakeAuditModel, pass_decision
+from tests.draft_section.fakes import FakeDraftSectionModel, valid_decision_for
 from tests.integration.test_research_planning_service import (
     _plan_payload,
     _seed_research_task,
@@ -77,8 +80,10 @@ from tests.integration.test_stage4_workflow import (
     _seed_worker_inputs,
     _synthesis_counts,
 )
+from tests.integration.test_stage5_workflow import _stage5_deps
 from tests.integration.test_valuation_claim_service import _seed_company
 from tests.research_planning.fakes import FakeResearchPlannerModel
+from tests.revision.fakes import FakeRevisionWriterModel
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -202,7 +207,21 @@ def _orchestration_deps(
     router = ResearchSourceRouter(sessionmaker, plan_service)
     stage4_deps = _stage4_deps(sessionmaker, models if models is not None else _good_models())
     stage4_runner = Stage4WorkflowRunner(sessionmaker, manager, stage4_deps)
-    child_service = ResearchOrchestrationChildService(sessionmaker, stage4_runner)
+    # 7A.2B.2 起 deps 必填 stage5_runner；7A.2B.1 cases 只到 awaiting_stage5，
+    # runner 仅装配不执行（fake models，0 LLM）。
+    stage5_runner = Stage5WorkflowRunner(
+        sessionmaker,
+        manager,
+        _stage5_deps(
+            sessionmaker,
+            draft_model=FakeDraftSectionModel(decision_factory=valid_decision_for),
+            audit_model=FakeAuditModel(decision_factory=pass_decision),
+            revision_model=FakeRevisionWriterModel(),
+        ),
+    )
+    child_service = ResearchOrchestrationChildService(
+        sessionmaker, stage4_runner, stage5_runner=stage5_runner
+    )
     return ResearchOrchestrationDependencies(
         sessionmaker=sessionmaker,
         plan_service=plan_service,
@@ -212,6 +231,7 @@ def _orchestration_deps(
         child_service=child_service,
         stage4_runner=stage4_runner,
         synthesis_service=SynthesisService(sessionmaker),
+        stage5_runner=stage5_runner,
     )
 
 
@@ -298,22 +318,23 @@ async def test_case1_happy_path_to_awaiting_stage5(env, monkeypatch, connection_
         runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
         final = await runner.run_orchestration(orchestration_id)
 
-        assert final["current_phase"] == "awaiting_stage5"
+        assert final["current_phase"] == "completed"
         assert final["synthesis_result_id"]
         row = await _get_orchestration_row(sessionmaker, orchestration_id)
-        assert row["status"] == "running"
-        assert row["current_phase"] == "awaiting_stage5"
+        assert row["status"] == "completed"
+        assert row["current_phase"] == "completed"
         assert row["error_code"] is None
 
-        # 恰好 1 个 stage4 child run（completed）+ 1 个 exact child link。
+        # 恰好 1 stage4 + 1 stage5 child run（全部 completed），stage4 exact link 在。
         runs = await _runs_for_task(sessionmaker, task_id)
-        assert len(runs) == 1
-        assert runs[0]["graph_name"] == "stage4_analysis"
-        assert runs[0]["status"] == "completed"
+        assert len(runs) == 2
+        assert {r["graph_name"] for r in runs} == {"stage4_analysis", "stage5_report"}
+        assert all(r["status"] == "completed" for r in runs)
         child = await _get_child(sessionmaker, orchestration_id)
         assert child is not None
         assert child["stage"] == "stage4" and child["attempt_no"] == 1
-        assert child["run_id"] == runs[0]["run_id"]
+        stage4_run = next(r for r in runs if r["graph_name"] == "stage4_analysis")
+        assert child["run_id"] == stage4_run["run_id"]
 
         # 真实 Stage4 产物：5 claims + 1 synthesis run + 1 synthesis result。
         assert await _claim_count_for_company(sessionmaker, company_id) == 5
@@ -346,9 +367,9 @@ async def test_case2_not_ready_then_fulfill_then_ready(env, monkeypatch, connect
         runner = ResearchOrchestrationRunner(sessionmaker, manager, deps)
         final = await runner.run_orchestration(orchestration_id)
 
-        assert final["current_phase"] == "awaiting_stage5"
+        assert final["current_phase"] == "completed"
         row = await _get_orchestration_row(sessionmaker, orchestration_id)
-        assert row["current_phase"] == "awaiting_stage5"
+        assert row["current_phase"] == "completed"
         assert deps.fulfillment.calls == 1
         # prepare → fulfill → prepare_again → ensure_stage4_child → run_or_resume。
         assert deps.preparation.calls == 4
@@ -517,14 +538,15 @@ async def test_case6_recovery_same_orchestration_thread(env, monkeypatch, connec
         assert await coordinator.recover_orchestrations() == 1
 
         row = await _get_orchestration_row(sessionmaker, orchestration_id)
-        assert row["status"] == "running"
-        assert row["current_phase"] == "awaiting_stage5"
+        assert row["status"] == "completed"
+        assert row["current_phase"] == "completed"
         assert row["error_code"] is None
 
-        # 无重复产物：仍是 1 个 stage4 run（completed）、1 份 synthesis、5 claims。
+        # 无重复产物：仍 1 stage4 + 1 stage5 run（全部 completed）、1 份 synthesis、5 claims。
         runs = await _runs_for_task(sessionmaker, task_id)
-        assert len(runs) == 1
-        assert runs[0]["status"] == "completed"
+        assert len(runs) == 2
+        assert {r["graph_name"] for r in runs} == {"stage4_analysis", "stage5_report"}
+        assert all(r["status"] == "completed" for r in runs)
         assert await _claim_count_for_company(sessionmaker, company_id) == 5
         s_runs, s_results = await _synthesis_counts(sessionmaker)
         assert (s_runs, s_results) == (1, 1)

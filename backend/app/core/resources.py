@@ -1,6 +1,7 @@
 """Shared application resources created during lifespan."""
 
 from app.db.session import DatabaseManager
+from app.research_orchestration.service import ResearchOrchestrationService
 from app.services.research_execution_service import ResearchExecutionService
 from app.storage.export_store import ExportArtifactStore
 from app.storage.raw_store import LocalRawArtifactStore
@@ -17,6 +18,7 @@ class ApplicationResources:
         langgraph: LangGraphCheckpointManager,
         workflow_execution: WorkflowExecutionManager,
         research_execution: ResearchExecutionService,
+        research_orchestration: ResearchOrchestrationService,
         raw_storage: LocalRawArtifactStore,
         export_storage: ExportArtifactStore,
     ) -> None:
@@ -25,5 +27,6 @@ class ApplicationResources:
         self.langgraph = langgraph
         self.workflow_execution = workflow_execution
         self.research_execution = research_execution
+        self.research_orchestration = research_orchestration
         self.raw_storage = raw_storage
         self.export_storage = export_storage

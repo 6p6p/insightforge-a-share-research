@@ -1,4 +1,4 @@
-"""Research orchestration service (stage 7A.2B.1 spec F/G/K/Q + 7A.2B.2 spec B/C).
+"""Research orchestration service (stage 7A.2B.1 spec F/G/K/Q + 7A.2B.2 spec B/C/N/P).
 
 - **create_or_get_orchestration(task_id)**：经 `ResearchPlanningService.create_plan`
   内部 create/replay ResearchPlan v2（0 次额外 LLM，同输入 replay）→ 取 planner
@@ -20,12 +20,25 @@
   Stage4/WorkflowRun cancel 语义（`WorkflowRunRepository.mark_cancelled`，即
   WorkflowExecutionManager.cancel_run 的 DB 层入口）取消 active child，再
   orchestration status=cancelled；幂等；**不直接 SQL 删除 child / orchestration**
-  （不产生孤儿 WorkflowRun）。
+  （不产生孤儿 WorkflowRun）；
+- **act_on_orchestration(orchestration_id, action, comment)**（7A.2B.2 spec
+  N/O/P）：人工裁决 —— **仅 waiting_human**。`approve`/`rewrite`/`research` 先把
+  immutable human decision 提交到 exact Stage5 child（`resume_stage5_human`），再
+  `run_orchestration` 继续顶层（continuation → `route_stage5_result`：approve →
+  complete / rewrite → 重新 awaiting_stage5 / research → pause_for_research 只
+  持久化 research_request_id + phase=research_backflow，**不做 backflow 循环**，
+  spec P）；`cancel` 委托 `cancel_orchestration`。runners 未绑定 → RuntimeError。
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:  # pragma: no cover — 仅类型注解
+    from app.research_orchestration.runner import ResearchOrchestrationRunner
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,6 +51,7 @@ from app.db.models.research_orchestration import (
 from app.domain.tasks import ACTIVE_WORKFLOW_RUN_STATUSES
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
+    ACTIVE_ORCHESTRATION_STATUSES,
     ORCHESTRATION_SCHEMA_VERSION,
     ORCHESTRATOR_NAME,
     ORCHESTRATOR_VERSION,
@@ -50,7 +64,9 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationActiveConflict,
     ResearchOrchestrationAlreadyFinished,
     ResearchOrchestrationChildConflict,
+    ResearchOrchestrationChildNotFound,
     ResearchOrchestrationIntegrityError,
+    ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
 )
 from app.research_orchestration.repository import (
@@ -59,13 +75,27 @@ from app.research_orchestration.repository import (
 )
 from app.research_planning.repository import ResearchPlanRepository
 from app.research_planning.service import ResearchPlanningService
+from app.review.contracts import (
+    HUMAN_DECISION_APPROVE,
+    HUMAN_DECISION_CANCEL,
+    HUMAN_DECISION_RESEARCH,
+    HUMAN_DECISION_REWRITE,
+)
 from app.stage4.contracts import Stage4WorkflowRequest
 from app.stage4.runner import Stage4WorkflowRunner
+from app.stage5.contracts import Stage5WorkflowRequest
+from app.stage5.runner import Stage5WorkflowRunner
 
 _ACTIVE_RUN_VALUES = {status.value for status in ACTIVE_WORKFLOW_RUN_STATUSES}
 
 # 首次尝试的 attempt_no（replay / create 定位到 attempt=1；user retry 从 2 起）。
 _FIRST_ATTEMPT = 1
+
+# `act_on_orchestration` 中会把 human decision 转发到 Stage5 child resume 的
+# action（spec N/O/P）。cancel 单独委托 cancel_orchestration（含自身幂等规则）。
+_HUMAN_RESUME_ACTIONS = frozenset(
+    {HUMAN_DECISION_APPROVE, HUMAN_DECISION_REWRITE, HUMAN_DECISION_RESEARCH}
+)
 
 # Stage4/5 runner 的 child link 归属约束（spec E）：这些 IntegrityError 在
 # orchestration 层分类为 `ResearchOrchestrationChildConflict`（409），不是
@@ -112,9 +142,25 @@ class ResearchOrchestrationService:
         self,
         sessionmaker: async_sessionmaker,
         plan_service: ResearchPlanningService,
+        stage5_runner: Stage5WorkflowRunner | None = None,
+        orchestration_runner: ResearchOrchestrationRunner | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._plan_service = plan_service
+        # human action（spec N/P）：approve/rewrite/research 需要 Stage5 runner
+        # resume child + 顶层 runner 继续 continuation；未绑定 → RuntimeError
+        # （production factory 绑定，unit 测试可只测 dispatch 守卫）。
+        self._stage5_runner = stage5_runner
+        self._orchestration_runner = orchestration_runner
+
+    @property
+    def orchestration_runner(self) -> ResearchOrchestrationRunner | None:
+        """只读：lifespan recovery coordinator / API 复用同一顶层 runner。
+
+        production factory（`_create_research_orchestration`）绑定；unit 测试不绑
+        → None（dispatch 守卫不触碰）。
+        """
+        return self._orchestration_runner
 
     # ------------------------------------------------------------------ create
 
@@ -178,6 +224,24 @@ class ResearchOrchestrationService:
                 raise
             await session.commit()
             return self._to_result(row, replayed=not created)
+
+    # ------------------------------------------------------------------ start
+
+    async def start_orchestration(self, task_id: UUID) -> ResearchOrchestrationResult:
+        """create/replay → 未终态则顶层 run（spec U：默认自动研究入口）。
+
+        - create 已有 orchestration 时：active（pending/running/waiting_human）
+          → checkpoint-aware continuation（同 orchestration_id + 同顶层 thread，
+          不重建）；terminal（completed/failed/cancelled）→ 原样返回（不重复 run）；
+        - 顶层 run 只由 runner 执行（`_orchestration_runner`，production factory
+          绑定）；未绑定 → RuntimeError（programming error）。
+        """
+        result = await self.create_or_get_orchestration(task_id)
+        if result.status in ACTIVE_ORCHESTRATION_STATUSES:
+            if self._orchestration_runner is None:
+                raise RuntimeError("orchestration runner not bound")
+            await self._orchestration_runner.run_orchestration(result.orchestration_id)
+        return await self.get_orchestration(result.orchestration_id)
 
     # ------------------------------------------------------------------ retry
 
@@ -246,9 +310,7 @@ class ResearchOrchestrationService:
                     # 并发：另一个 retry 抢占了同一 (plan, new_attempt)，或 task
                     # 已有一个 active orchestration。
                     await session.rollback()
-                    winner = await repo.get_by_plan_and_attempt(
-                        old.research_plan_id, new_attempt
-                    )
+                    winner = await repo.get_by_plan_and_attempt(old.research_plan_id, new_attempt)
                     if winner is not None:
                         return self._to_result(winner, replayed=True)
                     active = await repo.get_active_for_task(old.task_id)
@@ -265,6 +327,20 @@ class ResearchOrchestrationService:
             orchestration = await ResearchOrchestrationRepository(session).get_by_id(
                 orchestration_id
             )
+        if orchestration is None:
+            raise ResearchOrchestrationNotFound()
+        return self._to_result(orchestration)
+
+    async def get_current_orchestration(self, task_id: UUID) -> ResearchOrchestrationResult:
+        """task 的 `current` 状态投影（spec U）：active 优先，否则最近一条。
+
+        无任何 orchestration → `ResearchOrchestrationNotFound`（404）。
+        """
+        async with self._sessionmaker() as session:
+            repo = ResearchOrchestrationRepository(session)
+            orchestration = await repo.get_active_for_task(task_id)
+            if orchestration is None:
+                orchestration = await repo.get_latest_for_task(task_id)
         if orchestration is None:
             raise ResearchOrchestrationNotFound()
         return self._to_result(orchestration)
@@ -368,6 +444,61 @@ class ResearchOrchestrationService:
             await session.commit()
             return self._to_result(orchestration)
 
+    # ------------------------------------------------------------------ human actions
+
+    async def act_on_orchestration(
+        self,
+        orchestration_id: UUID,
+        action: str,
+        comment: str | None = None,
+    ) -> ResearchOrchestrationResult:
+        """人工裁决 action（spec N/O/P）：**仅 waiting_human** orchestration。
+
+        - `approve` / `rewrite` / `research`：先把 immutable human decision 提交到
+          exact Stage5 child（`resume_stage5_human`，decision 由 review service 校验
+          枚举），再 `run_orchestration` 继续顶层——continuation 重入
+          `run_or_resume_stage5` 重查 child 终态后条件路由：approve → complete /
+          rewrite → 重新 awaiting_stage5（或再次 interrupt）/ research →
+          pause_for_research **只持久化 research_request_id + phase=research_backflow**
+          （spec P，不做 backflow 循环）；
+        - `cancel`：委托 `cancel_orchestration`（幂等：已 cancelled 原样返回）；
+        - 守卫：orchestration 不存在 → NotFound；status ≠ waiting_human →
+          AlreadyFinished；phase ≠ awaiting_stage5（无 Stage5 child 待裁决）→
+          InvalidAction；未知 action → InvalidAction；runners 未绑定 →
+          RuntimeError（programming error）。
+        """
+        if action == HUMAN_DECISION_CANCEL:
+            return await self.cancel_orchestration(orchestration_id)
+        if action not in _HUMAN_RESUME_ACTIONS:
+            raise ResearchOrchestrationInvalidAction(f"unsupported orchestration action: {action}")
+        async with self._sessionmaker() as session:
+            orchestration = await ResearchOrchestrationRepository(session).get_by_id(
+                orchestration_id
+            )
+        if orchestration is None:
+            raise ResearchOrchestrationNotFound()
+        if orchestration.status != OrchestrationStatus.WAITING_HUMAN.value:
+            raise ResearchOrchestrationAlreadyFinished()
+        if orchestration.current_phase != OrchestrationPhase.AWAITING_STAGE5.value:
+            raise ResearchOrchestrationInvalidAction(
+                "orchestration must be awaiting_stage5 to accept a human decision"
+            )
+        if self._stage5_runner is None or self._orchestration_runner is None:
+            raise RuntimeError("orchestration action runners not bound")
+
+        async with self._sessionmaker() as session:
+            child = await ResearchOrchestrationChildRepository(session).get_child(
+                orchestration_id, ChildStage.STAGE5.value, 1
+            )
+        if child is None:
+            raise ResearchOrchestrationChildNotFound()
+
+        await self._stage5_runner.resume_stage5_human(
+            child.workflow_run_id, decision=action, comment=comment
+        )
+        await self._orchestration_runner.run_orchestration(orchestration_id)
+        return await self.get_orchestration(orchestration_id)
+
     # ------------------------------------------------------------------ internal
 
     @staticmethod
@@ -404,23 +535,24 @@ class ResearchOrchestrationService:
 
 
 @dataclass(frozen=True)
-class ChildStage4Result:
-    """orchestration → Stage4 child 的定位结果（exact run，不含 request 正文）。"""
+class ChildRunResult:
+    """orchestration → child run 的定位结果（exact run，不含 request 正文）。"""
 
     run_id: UUID
     created: bool
 
 
 class ResearchOrchestrationChildService:
-    """orchestration → Stage4 child 的 exact ownership（spec C/D/K，7A.2B.2 spec E/F）。
+    """orchestration → child run 的 exact ownership（spec C/D/K，7A.2B.2 spec E/F/J/K）。
 
-    **ensure_stage4_child**：exact child `(orchestration_id, stage4, attempt 1)`
-    ——**绝不用 `latest task + graph_name` 猜归属**。
+    **ensure_stage4_child / ensure_stage5_child**：exact child
+    `(orchestration_id, stage, attempt 1)`——**绝不用 `latest task + graph_name`
+    猜归属**。
 
     - 已存在 → 返回 exact run（recovery / re-run 复用，不重复 create）；
-    - 不存在 → `Stage4WorkflowRunner.create_stage4_run(on_run_created=...)` **同一
-      事务**创建 WorkflowRun + child link（spec K same-transaction：run create 与
-      link insert 之间无 crash 孤儿窗口）。hook 由本层提供——runner 不 import
+    - 不存在 → runner（stage4/stage5）`create_*_run(on_run_created=...)` **同一事务**
+      创建 WorkflowRun + child link（spec K same-transaction：run create 与 link
+      insert 之间无 crash 孤儿窗口）。hook 由本层提供——runner 不 import
       orchestration model（spec F layering）；
     - 并发：
       - active index 冲突 → runner 转 `ActiveWorkflowRunExists` → 重查 exact child
@@ -435,64 +567,92 @@ class ResearchOrchestrationChildService:
         self,
         sessionmaker: async_sessionmaker,
         runner: Stage4WorkflowRunner,
+        stage5_runner: Stage5WorkflowRunner | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._runner = runner
+        self._stage5_runner = stage5_runner
 
     async def ensure_stage4_child(
         self,
         orchestration_id: UUID,
         stage4_request: Stage4WorkflowRequest,
-    ) -> ChildStage4Result:
+    ) -> ChildRunResult:
+        return await self._ensure_child(orchestration_id, ChildStage.STAGE4.value, stage4_request)
+
+    async def ensure_stage5_child(
+        self,
+        orchestration_id: UUID,
+        stage5_request: Stage5WorkflowRequest,
+    ) -> ChildRunResult:
+        """exact child `(orchestration_id, stage5, attempt 1)`（spec K）。
+
+        stage5 runner 必须绑定（production factory / graph 注入）；未绑定 →
+        RuntimeError（programming error，不猜归属）。
+        """
+        if self._stage5_runner is None:
+            raise RuntimeError("stage5 runner not bound to child service")
+        return await self._ensure_child(orchestration_id, ChildStage.STAGE5.value, stage5_request)
+
+    async def _ensure_child(
+        self,
+        orchestration_id: UUID,
+        stage: str,
+        request,
+    ) -> ChildRunResult:
+        """stage4/stage5 共用的 exact child 逻辑（create 分支按 stage 分发 runner）。"""
         async with self._sessionmaker() as session:
             child_repo = ResearchOrchestrationChildRepository(session)
-            existing = await child_repo.get_child(orchestration_id, ChildStage.STAGE4.value, 1)
+            existing = await child_repo.get_child(orchestration_id, stage, 1)
             if existing is not None:
                 run = await WorkflowRunRepository(session).get_by_id(existing.workflow_run_id)
                 if run is None:
                     raise ResearchOrchestrationIntegrityError("orchestration child run missing")
-                return ChildStage4Result(run_id=run.run_id, created=False)
+                return ChildRunResult(run_id=run.run_id, created=False)
 
         def _attach_child(session: AsyncSession, run_id: UUID) -> None:
             session.add(
                 ResearchOrchestrationChildModel(
                     orchestration_id=orchestration_id,
                     workflow_run_id=run_id,
-                    stage=ChildStage.STAGE4.value,
+                    stage=stage,
                     attempt_no=1,
                 )
             )
 
         try:
-            result = await self._runner.create_stage4_run(
-                stage4_request, on_run_created=_attach_child
-            )
+            if stage == ChildStage.STAGE4.value:
+                result = await self._runner.create_stage4_run(request, on_run_created=_attach_child)
+            else:
+                result = await self._stage5_runner.create_stage5_run(
+                    request, on_run_created=_attach_child
+                )
         except ActiveWorkflowRunExists:
-            # 并发：另一个 active WorkflowRun（可能是本 orchestration 的 stage4
-            # child）已存在 → exact 重查，命中返回 winner。
-            winner = await self._requery_exact_child(orchestration_id)
+            # 并发：另一个 active WorkflowRun（可能是本 orchestration 的 child）
+            # 已存在 → exact 重查，命中返回 winner。
+            winner = await self._requery_exact_child(orchestration_id, stage)
             if winner is not None:
                 return winner
             raise
         except IntegrityError as exc:
             # child link 归属冲突（runner 原样抛）→ 先重查 exact child（并发
             # winner）；确无 child 且约束属于 child ownership → 409，否则原样抛。
-            winner = await self._requery_exact_child(orchestration_id)
+            winner = await self._requery_exact_child(orchestration_id, stage)
             if winner is not None:
                 return winner
             if _constraint_name(exc) in _CHILD_OWNERSHIP_CONSTRAINTS:
                 raise ResearchOrchestrationChildConflict() from None
             raise
-        return ChildStage4Result(run_id=result.run_id, created=True)
+        return ChildRunResult(run_id=result.run_id, created=True)
 
     async def _requery_exact_child(
-        self, orchestration_id: UUID
-    ) -> ChildStage4Result | None:
-        """并发 winner 判定：exact child `(orchestration_id, stage4, attempt 1)`。"""
+        self, orchestration_id: UUID, stage: str
+    ) -> ChildRunResult | None:
+        """并发 winner 判定：exact child `(orchestration_id, stage, attempt 1)`。"""
         async with self._sessionmaker() as session:
             existing = await ResearchOrchestrationChildRepository(session).get_child(
-                orchestration_id, ChildStage.STAGE4.value, 1
+                orchestration_id, stage, 1
             )
         if existing is not None:
-            return ChildStage4Result(run_id=existing.workflow_run_id, created=False)
+            return ChildRunResult(run_id=existing.workflow_run_id, created=False)
         return None
