@@ -24,6 +24,11 @@ FAILED(worker_restarted) 的 Stage5 run → 同 run / thread 从最后 checkpoin
 仍停留在等待 Web 人工 action 的状态，由 `resume_stage5_human` 处理；业务失败
 （LLM / 校验 / 终态错误）也不在候选。
 
+**orchestration-owned children（7A.2B.1 spec E）**：Stage4/Stage5 候选均排除
+`research_orchestration_child_runs` 里的 child（`NOT EXISTS`）——child 的续接 /
+恢复归顶层 orchestration（`ResearchOrchestrationRecoveryCoordinator`），legacy
+协调器**不**为 orchestration-owned child 做 cross-stage continuation。
+
 无消息队列：复用 WorkflowRun 状态机 + PG Checkpointer + 既有 runner。
 """
 
@@ -58,6 +63,10 @@ _CANDIDATES_SQL = text(
               AND r5.graph_name = :stage5_graph
               AND r5.created_at >= r4.created_at
       )
+      AND NOT EXISTS (
+            SELECT 1 FROM research_orchestration_child_runs roc
+            WHERE roc.workflow_run_id = r4.run_id
+      )
     ORDER BY r4.task_id, r4.created_at DESC
     """
 )
@@ -73,6 +82,7 @@ _STAGE5_CANDIDATES_SQL = text(
     WITH ranked AS (
         SELECT task_id::text        AS task_id,
                run_id::text         AS stage5_run_id,
+               run_id               AS run_id,
                status,
                error_code,
                row_number() OVER (
@@ -87,6 +97,10 @@ _STAGE5_CANDIDATES_SQL = text(
     WHERE rn = 1
       AND status = 'failed'
       AND error_code = :error_code
+      AND NOT EXISTS (
+            SELECT 1 FROM research_orchestration_child_runs roc
+            WHERE roc.workflow_run_id = ranked.run_id
+      )
     """
 )
 

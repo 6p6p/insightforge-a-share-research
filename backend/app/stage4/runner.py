@@ -13,6 +13,7 @@ business IDs；不记录 Evidence text / prompt / raw response / reasoning_conte
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from app.core.errors import (
     WorkflowRunAlreadyStarted,
     WorkflowRunNotFound,
 )
+from app.db.models.research_orchestration import ResearchOrchestrationChildModel
 from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
 from app.domain.tasks import (
@@ -84,7 +86,12 @@ class Stage4WorkflowRunner:
 
     # ------------------------------------------------------------------ create
 
-    async def create_stage4_run(self, request: Stage4WorkflowRequest) -> WorkflowRunResponse:
+    async def create_stage4_run(
+        self,
+        request: Stage4WorkflowRequest,
+        *,
+        child_bind: Callable[[UUID], ResearchOrchestrationChildModel] | None = None,
+    ) -> WorkflowRunResponse:
         """创建 Stage 4 工作流 run（必须绑定一个真实 ResearchTask）。
 
         - 真实 PG 校验 task 存在 → 缺失 `Stage4ResearchTaskNotFound`（不猜任务、
@@ -92,7 +99,15 @@ class Stage4WorkflowRunner:
         - active-run 不变式：同一 task 同时只能存在一个 active WorkflowRun——
           先查 `get_active_for_task`，再靠 partial unique index
           `uq_workflow_runs_one_active_per_task` 兜底并发（IntegrityError →
-          `ActiveWorkflowRunExists`）。
+          `ActiveWorkflowRunExists`）；
+        - `child_bind`（orchestration ownership，spec K）：可选 factory
+          `run_id → ResearchOrchestrationChildModel`。**WorkflowRun 行 + child
+          link 在同一事务提交**（7A.2B.1 选择 same-transaction，而非
+          runner self-commit 后补 link）——run create 与 child link insert 之间
+          无 crash 孤儿窗口；任一唯一约束冲突（active index /
+          `UNIQUE(workflow_run_id)` / `UNIQUE(orchestration_id, stage, attempt_no)`）
+          → 整个事务回滚，`ActiveWorkflowRunExists` 交调用方
+          （`ensure_stage4_child` 重查 exact child → 返回 winner）。
         """
         run_id = uuid.uuid4()
         async with self._sessionmaker() as session:
@@ -115,24 +130,29 @@ class Stage4WorkflowRunner:
             )
             try:
                 await run_repo.create(run)
+                if child_bind is not None:
+                    session.add(child_bind(run_id))
+                await event_repo.create(
+                    WorkflowEventModel(
+                        run_id=run_id,
+                        event_type=WorkflowEventType.RUN_CREATED.value,
+                        stage=TaskStage.ANALYZING.value,
+                        progress=0,
+                        message="Stage 4 分析工作流已创建",
+                        payload={
+                            "graph_name": STAGE4_GRAPH_NAME,
+                            "graph_version": STAGE4_GRAPH_VERSION,
+                        },
+                    )
+                )
+                await session.commit()
             except IntegrityError:
-                # 并发创建同一 task 的两个 active run：unique partial index 兜底。
+                # 并发创建同一 task 的两个 active run（unique partial index）或
+                # orchestration child link 归属冲突（UNIQUE(workflow_run_id) /
+                # UNIQUE(orchestration_id, stage, attempt_no)）：整个事务回滚，
+                # 由调用方（ensure_stage4_child）重查 exact child → 返回 winner。
                 await session.rollback()
                 raise ActiveWorkflowRunExists() from None
-            await event_repo.create(
-                WorkflowEventModel(
-                    run_id=run_id,
-                    event_type=WorkflowEventType.RUN_CREATED.value,
-                    stage=TaskStage.ANALYZING.value,
-                    progress=0,
-                    message="Stage 4 分析工作流已创建",
-                    payload={
-                        "graph_name": STAGE4_GRAPH_NAME,
-                        "graph_version": STAGE4_GRAPH_VERSION,
-                    },
-                )
-            )
-            await session.commit()
             return WorkflowRunResponse.model_validate(run)
 
     # ------------------------------------------------------------------ execute

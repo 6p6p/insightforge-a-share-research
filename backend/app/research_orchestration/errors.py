@@ -1,0 +1,73 @@
+"""Research orchestration error tree (stage 7A.2B.1).
+
+- `ResearchOrchestrationError`：领域错误基类（继承 `app.core.errors.DomainError`）；
+- `ResearchOrchestrationNotFound`：orchestration 不存在（404）；
+- `ResearchOrchestrationActiveConflict`：同 task 已存在 active orchestration（409）
+  —— 新 fingerprint 的 create 在已有 active orchestration 时拒绝；
+- `ResearchOrchestrationIntegrityError`：orchestration 完整性校验失败（tamper /
+  上游 mismatch，409）；
+- `ResearchOrchestrationChildNotFound`：exact child `(orchestration_id, stage,
+  attempt_no)` 不存在（404）；
+- `ResearchOrchestrationChildConflict`：child 已存在 / 已被其他 orchestration 拥有
+  （409，UNIQUE(workflow_run_id) / UNIQUE(orchestration_id, stage, attempt_no)）；
+- `ResearchOrchestrationAlreadyFinished`：对 terminal orchestration 执行 cancel /
+  重新执行（409）。
+"""
+
+from app.core.errors import DomainError
+
+
+class ResearchOrchestrationError(DomainError):
+    """research orchestration 领域错误基类。"""
+
+    code = "research_orchestration_error"
+    http_status = 500
+    message = "研究编排错误"
+
+
+class ResearchOrchestrationNotFound(ResearchOrchestrationError):
+    """research_orchestration_runs 不存在。"""
+
+    code = "research_orchestration_not_found"
+    http_status = 404
+    message = "研究编排不存在"
+
+
+class ResearchOrchestrationActiveConflict(ResearchOrchestrationError):
+    """同 task 已存在 active orchestration（partial unique index 兜底）。"""
+
+    code = "research_orchestration_active_conflict"
+    http_status = 409
+    message = "该任务已存在进行中的研究编排"
+
+
+class ResearchOrchestrationIntegrityError(ResearchOrchestrationError):
+    """orchestration 完整性校验失败（fingerprint mismatch / 上游 mismatch）。"""
+
+    code = "research_orchestration_integrity_error"
+    http_status = 409
+    message = "研究编排完整性校验失败"
+
+
+class ResearchOrchestrationChildNotFound(ResearchOrchestrationError):
+    """exact child (orchestration_id, stage, attempt_no) 不存在。"""
+
+    code = "research_orchestration_child_not_found"
+    http_status = 404
+    message = "研究编排子工作流不存在"
+
+
+class ResearchOrchestrationChildConflict(ResearchOrchestrationError):
+    """child 归属冲突：WorkflowRun 已被其他 orchestration 拥有 / 同 scope 重复。"""
+
+    code = "research_orchestration_child_conflict"
+    http_status = 409
+    message = "研究编排子工作流归属冲突"
+
+
+class ResearchOrchestrationAlreadyFinished(ResearchOrchestrationError):
+    """orchestration 已结束（completed/failed/cancelled），不能重复 cancel/执行。"""
+
+    code = "research_orchestration_already_finished"
+    http_status = 409
+    message = "研究编排已结束，不能重复执行"
