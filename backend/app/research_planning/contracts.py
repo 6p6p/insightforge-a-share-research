@@ -8,8 +8,10 @@ bounded vocabulary（spec E，不让模型无限创造字符串）：
 - `research_scope` / `analysis_modules` 只允许当前已实现 Analyst 的域；
 - `document_needs.source_type` 复用项目真实 source vocabulary
   （SourceDocumentType 值 + macro_dataset）；
-- `financial_needs.metric_code` 复用 `app.financial.contracts.MetricCode`
-  （FinancialMetricObservation 真实支持的 11 个科目）；
+- `financial_needs.calculation_code` 复用 `FinancialCalculation` 正式支持集合
+  （真实 CalculationCode enum）；growth 类额外受控 `metric_code`
+  （`app.financial.contracts.MetricCode` 的 11 个科目）指定目标 metric；程序根据
+  calculation_code 推导所需 observations，Planner 不输出 observation/metric ID；
 - `valuation_needs.metric_code` 只允许 pe_ttm / pb_mrq / ps_ttm
   （relative_valuation_comparisons 表 CHECK 冻结集合）；
 - 所有列表有明确 max 数量；Macro topic / purpose / focus 为受控短文本（长度 +
@@ -29,13 +31,20 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.claims.contracts import ClaimAnalysisDomain
+from app.financial.calculations.contracts import CalculationCode
 from app.financial.contracts import MetricCode
 
 # ---------------------------------------------------------------- schema 版本
 
 # research_plans.plan_schema_version 的当前值（改 payload 结构时递增；已有计划
 # 原样保留，新语义 → 新 fingerprint → 新行）。
-RESEARCH_PLAN_SCHEMA_VERSION = 1
+# v2 = 冻结 creation-time PlannerInputSnapshot（spec A）：verify 只重放 stored
+# snapshot，不再把 master-data 演化误判成 tamper。
+RESEARCH_PLAN_SCHEMA_VERSION = 2
+
+# research_plans.planner_input_schema_version 的当前值（PlannerInputSnapshot 结构
+# 版本；v2 行必须携带该 snapshot）。
+PLANNER_INPUT_SNAPSHOT_SCHEMA_VERSION = 1
 
 # planner prompt / 策略版本（spec H：prompt/strategy 版本进入 input fingerprint；
 # 改 prompt → 新 fingerprint → 新计划，旧行保留）。
@@ -212,6 +221,69 @@ class ResearchPlannerRequest(BaseModel):
         return self
 
 
+class ResearchPlannerInputSnapshot(BaseModel):
+    """Planner 输入的 **creation-time 冻结快照**（schema v1，spec A）。
+
+    `create_plan` 在生成计划那一刻从真实 ResearchTask / Company / aliases 构造，
+    持久化到 `research_plans.planner_input_payload`。`verify_research_plan_integrity`
+    的 v2 路径**只重放 stored snapshot** 重建 input fingerprint，不再读当前
+    Company / aliases——公司别名、short_name 等 master-data 的正常演化不会被误判
+    成 tamper。
+
+    - task_id / company_id：结果归属的 FK identity（verify 与 row 交叉核对）；
+    - security_code / official_name / short_name(optional) / exchange / board：
+      公司语义身份；
+    - aliases：CompanyAliasModel 的**稳定排序字符串列表**（不含 short_name；
+      short_name 单独存，避免 None / 重复进 fingerprint）；
+    - research_question / analysis_as_of：planner 输入。
+
+    **不存** API key / prompt / model response / DB metadata / created_at。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: int = PLANNER_INPUT_SNAPSHOT_SCHEMA_VERSION
+    task_id: UUID
+    company_id: UUID
+    security_code: str
+    official_name: str
+    short_name: str | None = None
+    exchange: str
+    board: str
+    aliases: list[str] = Field(default_factory=list)
+    research_question: str
+    analysis_as_of: date
+
+    @field_validator("security_code", "official_name", "exchange", "board")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("company identity 字段不能为空（trim 后）")
+        return text
+
+    @model_validator(mode="after")
+    def _validate_question(self) -> "ResearchPlannerInputSnapshot":
+        question = self.research_question.strip()
+        if not question:
+            raise ValueError("research_question 不能为空（trim 后）")
+        _reject_internal_ids(question)
+        return self
+
+    def company_identity(self) -> "CompanyIdentitySnapshot":
+        """由 frozen snapshot 派生 LLM 用 CompanyIdentitySnapshot（short_name 前置去重）。"""
+        names = list(self.aliases)
+        if self.short_name:
+            names = list(dict.fromkeys([self.short_name, *names]))
+        return CompanyIdentitySnapshot(
+            security_code=self.security_code,
+            official_name=self.official_name,
+            exchange=self.exchange,
+            board=self.board,
+            aliases=names,
+        )
+
+
 # ---------------------------------------------------------------- plan needs
 
 
@@ -259,10 +331,32 @@ class DocumentNeed(_NeedBase):
         return period
 
 
-class FinancialNeed(_NeedBase):
-    """financial_needs：需要哪个财务科目（metric_code 复用 MetricCode）。"""
+# growth 类 calculation：CURRENT/BASELINE 的 metric 无固定值（由输入一致决定），
+# 必须由 planner 显式指定目标 metric（spec B）。
+_GROWTH_CALCULATION_CODES = frozenset(
+    (
+        CalculationCode.ABSOLUTE_CHANGE_CNY,
+        CalculationCode.YOY_GROWTH_RATE,
+        CalculationCode.QOQ_GROWTH_RATE,
+    )
+)
 
-    metric_code: MetricCode
+
+class FinancialNeed(_NeedBase):
+    """financial_needs：需要哪个财务**派生计算**（calculation-centric，spec B）。
+
+    - `calculation_code`：复用 `FinancialCalculation` 正式支持集合（真实
+      CalculationCode enum）。程序根据 calculation_code 推导所需 observations
+      （input roles），Planner **不输出 observation ID / metric ID**；
+    - `metric_code`：growth 类（absolute_change / yoy / qoq）**必须**指定目标
+      metric（CURRENT/BASELINE 的 metric 由输入一致决定，无固定值）；margin /
+      ratio 类由 formula 固定 input roles → `metric_code` 必须为空
+      （Pydantic validator 按 calculation policy 强制）；
+    - `period`：4 位年度（target/current 期间）或 None。
+    """
+
+    calculation_code: CalculationCode
+    metric_code: MetricCode | None = None
     period: str | None = None
 
     @field_validator("period")
@@ -274,6 +368,20 @@ class FinancialNeed(_NeedBase):
         if not _PERIOD_PATTERN.fullmatch(period):
             raise ValueError("period 必须是 4 位年度（如 2023）或 None")
         return period
+
+    @model_validator(mode="after")
+    def _validate_metric_policy(self) -> "FinancialNeed":
+        if self.calculation_code in _GROWTH_CALCULATION_CODES:
+            if self.metric_code is None:
+                raise ValueError(
+                    f"{self.calculation_code.value} 必须指定 metric_code（目标 metric）"
+                )
+        elif self.metric_code is not None:
+            raise ValueError(
+                f"{self.calculation_code.value} 的 metric_code 必须为空"
+                "（input roles 由 formula 固定）"
+            )
+        return self
 
 
 class MacroNeed(_NeedBase):

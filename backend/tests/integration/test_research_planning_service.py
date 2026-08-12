@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import json
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
@@ -33,6 +34,7 @@ from app.core.runtime import configure_asyncio_runtime
 from app.db.models.company import CompanyModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.session import DatabaseManager
+from app.financial.calculations.contracts import CalculationCode, InputRole
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.research_planning.contracts import (
     ResearchPlanPayload,
@@ -53,10 +55,14 @@ from app.research_planning.router import (
     ResearchSourceRouter,
     SourceRouteType,
 )
-from app.research_planning.service import ResearchPlanningService
+from app.research_planning.service import (
+    ResearchPlanningService,
+    compute_plan_fingerprint,
+)
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.source_registry_service import SourceRegistryService
 from app.storage.raw_store import LocalRawArtifactStore
+from tests.integration.test_financial_claim_service import _calc
 from tests.integration.test_stage4_workflow import _seed_worker_inputs
 from tests.integration.test_valuation_claim_service import _seed_company
 from tests.research_planning.fakes import FakeResearchPlannerModel
@@ -80,7 +86,12 @@ def _plan_payload(**overrides) -> ResearchPlanPayload:
             {"need_code": "news_docs", "purpose": "需要公司新闻", "source_type": "news_article"}
         ],
         "financial_needs": [
-            {"need_code": "revenue", "purpose": "需要营收数据", "metric_code": "revenue"}
+            {
+                "need_code": "revenue_change",
+                "purpose": "需要营收绝对变化",
+                "calculation_code": "absolute_change_cny",
+                "metric_code": "revenue",
+            }
         ],
         "macro_needs": [
             {"need_code": "macro_gdp", "purpose": "需要宏观数据", "topic_or_indicator": "中国GDP"}
@@ -294,7 +305,12 @@ async def test_tampered_payload_fails_integrity(env) -> None:
         await service.verify_research_plan_integrity(result.research_plan_id)
 
 
-async def test_tampered_task_question_fails_integrity(env) -> None:
+async def test_v2_task_question_change_not_tamper(env) -> None:
+    """spec A：v2 冻结 creation-time input → task question 后期变化不是 tamper。
+
+    旧 v1 verify 会重读 task questions 重算 input fingerprint → 误判；v2 只重放
+    stored snapshot，question 已冻结，verify 仍通过。
+    """
     fake = FakeResearchPlannerModel(_plan_payload())
     service = _planner(env["sessionmaker"], fake)
     result = await service.create_plan(env["task_id"])
@@ -306,8 +322,172 @@ async def test_tampered_task_question_fails_integrity(env) -> None:
             ).bindparams(tid=env["task_id"])
         )
         await session.commit()
+    # question 冻结在 snapshot → verify 通过（0 次额外 LLM）。
+    await service.verify_research_plan_integrity(result.research_plan_id)
+    assert len(fake.calls) == 1
+
+
+# ================================================================ Gate A：creation-time snapshot
+
+
+async def test_v2_create_persists_input_snapshot(env) -> None:
+    """spec A1/A3：v2 create 持久化 planner_input_payload，verify 通过。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    result = await service.create_plan(env["task_id"])
+    assert result.replayed is False
+    assert result.plan_schema_version == 2
+    async with env["sessionmaker"]() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT plan_schema_version, planner_input_schema_version, "
+                    "       planner_input_payload "
+                    "FROM research_plans WHERE research_plan_id = :pid"
+                ).bindparams(pid=result.research_plan_id)
+            )
+        ).one()
+    assert row[0] == 2
+    assert row[1] == 1
+    snapshot = row[2]
+    assert isinstance(snapshot, dict)
+    assert snapshot["task_id"] == str(env["task_id"])
+    assert snapshot["company_id"] == str(env["company_id"])
+    assert snapshot["security_code"] == "600519"
+    assert snapshot["research_question"] == _QUESTION
+    assert snapshot["analysis_as_of"] == "2026-08-10"
+    assert snapshot["aliases"] == []  # _seed_company 无 alias 行
+    assert snapshot["short_name"] == "600519"
+    # verify 通过（0 次额外 LLM）。
+    await service.verify_research_plan_integrity(result.research_plan_id)
+    assert len(fake.calls) == 1
+
+
+async def test_v2_add_company_alias_verify_still_passes(env) -> None:
+    """spec A：新增 CompanyAlias（master-data 演化）→ v2 verify 仍通过。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    result = await service.create_plan(env["task_id"])
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "INSERT INTO company_aliases "
+                "(alias_id, company_id, alias, normalized_alias, alias_type, "
+                " source_provider_key, source_url) "
+                "VALUES (CAST(:aid AS uuid), CAST(:cid AS uuid), :alias, :alias, "
+                " 'short_name', 'sse', 'https://www.sse.com.cn')"
+            ).bindparams(aid=uuid4(), cid=env["company_id"], alias="茅台国酒")
+        )
+        await session.commit()
+    # 不再重读当前 aliases → 新 alias 不改变 input fingerprint。
+    await service.verify_research_plan_integrity(result.research_plan_id)
+    assert len(fake.calls) == 1
+
+
+async def test_v2_tampered_input_snapshot_fails_integrity(env) -> None:
+    """spec A：修改 stored planner_input_payload → input fingerprint mismatch。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    result = await service.create_plan(env["task_id"])
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE research_plans SET planner_input_payload = "
+                "jsonb_set(planner_input_payload, '{research_question}', "
+                "'\"被篡改的问题\"'::jsonb) WHERE research_plan_id = :pid"
+            ).bindparams(pid=result.research_plan_id)
+        )
+        await session.commit()
     with pytest.raises(ResearchPlanIntegrityError):
         await service.verify_research_plan_integrity(result.research_plan_id)
+
+
+async def test_v2_tampered_company_id_fails_integrity(env) -> None:
+    """spec A：改 row company_id → snapshot identity / task-company 交叉核对失败。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    result = await service.create_plan(env["task_id"])
+    peer = env["peer_company_ids"][0]
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE research_plans SET company_id = CAST(:cid AS uuid) "
+                "WHERE research_plan_id = :pid"
+            ).bindparams(cid=peer, pid=result.research_plan_id)
+        )
+        await session.commit()
+    with pytest.raises(ResearchPlanIntegrityError):
+        await service.verify_research_plan_integrity(result.research_plan_id)
+
+
+async def test_v2_tampered_task_id_fails_integrity(env, sessionmaker) -> None:
+    """spec A：改 row task_id → snapshot identity 交叉核对失败。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    result = await service.create_plan(env["task_id"])
+    other_task_id = await _seed_research_task(sessionmaker, questions=["另一个问题"])
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE research_plans SET task_id = CAST(:tid AS uuid) "
+                "WHERE research_plan_id = :pid"
+            ).bindparams(tid=other_task_id, pid=result.research_plan_id)
+        )
+        await session.commit()
+    with pytest.raises(ResearchPlanIntegrityError):
+        await service.verify_research_plan_integrity(result.research_plan_id)
+
+
+async def _seed_v1_legacy_plan(env) -> UUID:
+    """直接插入一条满足 v1 约束的 legacy plan 行（无 input snapshot）。"""
+    plan_payload = {
+        "research_scope": ["business"],
+        "document_needs": [
+            {"need_code": "news_docs", "purpose": "需要新闻", "source_type": "news_article"}
+        ],
+        "financial_needs": [],
+        "macro_needs": [],
+        "event_needs": [],
+        "valuation_needs": [],
+        "analysis_modules": ["business_event"],
+        "research_focus": ["经营质量"],
+    }
+    input_fp = "a" * 64
+    plan_fp = compute_plan_fingerprint(planner_input_fingerprint=input_fp, payload=plan_payload)
+    plan_id = uuid4()
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "INSERT INTO research_plans "
+                "(research_plan_id, task_id, company_id, plan_schema_version, "
+                " planner_name, planner_version, model_id, "
+                " planner_input_fingerprint, plan_payload, plan_fingerprint) "
+                "VALUES (CAST(:pid AS uuid), CAST(:tid AS uuid), "
+                " CAST(:cid AS uuid), 1, 'research_planner', 1, 'test:fake-model', "
+                " :input_fp, CAST(:payload AS jsonb), :plan_fp)"
+            ).bindparams(
+                pid=plan_id,
+                tid=env["task_id"],
+                cid=env["company_id"],
+                input_fp=input_fp,
+                payload=json.dumps(plan_payload, ensure_ascii=False),
+                plan_fp=plan_fp,
+            )
+        )
+        await session.commit()
+    return plan_id
+
+
+async def test_v1_legacy_fixture_verify_passes(env) -> None:
+    """spec A5：v1 legacy 行（无 snapshot）仍可 verify（不重读当前 alias）。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    plan_id = await _seed_v1_legacy_plan(env)
+    plan = await service.verify_research_plan_integrity(plan_id)
+    assert plan.plan_schema_version == 1
+    assert plan.planner_input_payload is None
+    # v1 legacy 不触发 LLM。
+    assert len(fake.calls) == 0
 
 
 async def test_malformed_output_propagates(env) -> None:
@@ -362,14 +542,78 @@ async def test_route_mapping_and_provider_snapshot(env) -> None:
     plan = await plan_service.create_plan(env["task_id"])
     routed = await router.route_research_plan(plan.research_plan_id)
     entries = {e["need_code"]: e for e in routed.route_payload["entries"]}
-    assert list(entries) == ["news_docs", "revenue", "macro_gdp", "events", "pe_valuation"]
+    assert list(entries) == ["news_docs", "revenue_change", "macro_gdp", "events", "pe_valuation"]
     assert entries["news_docs"]["route_type"] == SourceRouteType.NEWS_ARTICLE.value
     assert entries["news_docs"]["provider_keys"]  # xinhuanet 等 enabled provider 快照
-    assert entries["revenue"]["route_type"] == SourceRouteType.COMPANY_ANNOUNCEMENT.value
+    assert entries["revenue_change"]["route_type"] == SourceRouteType.COMPANY_ANNOUNCEMENT.value
     assert entries["macro_gdp"]["route_type"] == SourceRouteType.MACRO_DATA.value
     assert entries["events"]["route_type"] == SourceRouteType.NEWS_ARTICLE.value
     assert entries["pe_valuation"]["route_type"] == SourceRouteType.COMPANY_ANNOUNCEMENT.value
     assert entries["pe_valuation"]["provider_keys"]
+
+
+async def test_route_snapshot_survives_registry_change(env) -> None:
+    """spec D：route 是创建时的 registry 快照；禁用/新增 provider 后旧 route verify 仍 PASS。
+
+    verify 只重放 stored route payload + plan fingerprint（不重新 route / 不查
+    registry），因此 provider 快照不因 registry 演化而失效。
+    """
+    fake = FakeResearchPlannerModel(_plan_payload())
+    plan_service = _planner(env["sessionmaker"], fake)
+    router = ResearchSourceRouter(env["sessionmaker"], plan_service)
+    plan = await plan_service.create_plan(env["task_id"])
+    routed = await router.route_research_plan(plan.research_plan_id)
+    news_keys = [
+        e["provider_keys"] for e in routed.route_payload["entries"] if e["need_code"] == "news_docs"
+    ][0]
+    assert "xinhuanet" in news_keys
+
+    # registry 演化：禁用 xinhuanet + 新增一个 news_article provider。
+    try:
+        async with env["sessionmaker"]() as session:
+            await session.execute(
+                text("UPDATE source_providers SET enabled = false WHERE provider_key = 'xinhuanet'")
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO source_providers (provider_key, display_name, provider_type, "
+                    "authority_tier, homepage_url, allowed_domains, capabilities, "
+                    "acquisition_methods) VALUES (:key, :name, 'professional_media', 3, :url, "
+                    "CAST(:domains AS jsonb), CAST(:caps AS jsonb), CAST(:methods AS jsonb))"
+                ).bindparams(
+                    key="test_new_provider",
+                    name="测试新增 Provider",
+                    url="https://example.com",
+                    domains='["example.com"]',
+                    caps='["news_article"]',
+                    methods='["public_html"]',
+                )
+            )
+            await session.commit()
+
+        # 旧 route verify 仍 PASS，且 stored provider 快照不变。
+        route = await router.verify_research_plan_route_integrity(plan.research_plan_id)
+        assert route.route_fingerprint == routed.route_fingerprint
+        stored_keys = [
+            e["provider_keys"]
+            for e in route.route_payload["entries"]
+            if e["need_code"] == "news_docs"
+        ][0]
+        assert stored_keys == news_keys  # 快照仍含 xinhuanet（注册表变化不影响）
+
+        # 重新 route 也 replay 同一行（同 plan + router_version 已存在）。
+        rerouted = await router.route_research_plan(plan.research_plan_id)
+        assert rerouted.replayed is True
+    finally:
+        # 恢复 registry，避免污染后续测试（共享 DB）。
+        async with env["sessionmaker"]() as session:
+            await session.execute(
+                text("UPDATE source_providers SET enabled = true WHERE provider_key = 'xinhuanet'")
+            )
+            await session.execute(
+                text("DELETE FROM source_providers WHERE provider_key = 'test_new_provider'")
+            )
+            await session.commit()
 
 
 async def test_route_tamper_fails_integrity(env) -> None:
@@ -437,7 +681,7 @@ async def test_route_issuer_ir_provider_unavailable(env) -> None:
 
 
 async def test_prepare_ready_true_valid_stage4_request(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(_plan_payload())
     plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
     result = await preparation.prepare_research(plan_result.research_plan_id)
@@ -466,7 +710,7 @@ async def test_prepare_ready_true_valid_stage4_request(env, monkeypatch) -> None
 
 
 async def test_prepare_missing_document_ready_false(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(
         _plan_payload(
             document_needs=[
@@ -489,11 +733,17 @@ async def test_prepare_missing_document_ready_false(env, monkeypatch) -> None:
 
 
 async def test_prepare_missing_financial_ready_false(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
+    # 库中只有 revenue 观察（+ absolute_change calc）；gross_margin 需要
+    # operating_cost 观察 → MISSING_METRIC，不误 ready。
     fake = FakeResearchPlannerModel(
         _plan_payload(
             financial_needs=[
-                {"need_code": "net_profit", "purpose": "需要净利润", "metric_code": "net_profit"}
+                {
+                    "need_code": "gross_margin",
+                    "purpose": "需要毛利率",
+                    "calculation_code": "gross_margin",
+                }
             ]
         )
     )
@@ -501,11 +751,45 @@ async def test_prepare_missing_financial_ready_false(env, monkeypatch) -> None:
     result = await preparation.prepare_research(plan_result.research_plan_id)
     assert result.ready_for_analysis is False
     missing = {n.need_code: n.reason_code for n in result.missing_needs}
-    assert missing["net_profit"] == MissingReasonCode.MISSING_METRIC
+    assert missing["gross_margin"] == MissingReasonCode.MISSING_METRIC
+
+
+async def test_prepare_revenue_yoy_does_not_satisfy_gross_margin_need(env, monkeypatch) -> None:
+    """spec B：库里有 revenue yoy calc，但 plan 要 gross_margin → 缺 financial，不误 ready。"""
+    ids = await _seed_worker_inputs(env, monkeypatch)
+    # 用既有 absolute_change calc 的同一对 observation 追加一条 revenue yoy 派生
+    # calculation（观察指纹确定性 → 不能重复 insert 相同观察，直接复用）。
+    async with env["sessionmaker"]() as session:
+        rows = await session.execute(
+            text(
+                "SELECT input_role, metric_observation_id FROM financial_calculation_inputs "
+                "WHERE calculation_id = :cid"
+            ).bindparams(cid=ids["calc"])
+        )
+        obs_by_role = {InputRole(row.input_role): row.metric_observation_id for row in rows}
+    await _calc(env, obs_by_role, code=CalculationCode.YOY_GROWTH_RATE)
+    fake = FakeResearchPlannerModel(
+        _plan_payload(
+            financial_needs=[
+                {
+                    "need_code": "gross_margin",
+                    "purpose": "需要毛利率",
+                    "calculation_code": "gross_margin",
+                }
+            ]
+        )
+    )
+    plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
+    result = await preparation.prepare_research(plan_result.research_plan_id)
+    assert result.ready_for_analysis is False
+    missing = {n.need_code: n.reason_code for n in result.missing_needs}
+    assert missing["gross_margin"] == MissingReasonCode.MISSING_METRIC
+    # gross_margin 未解析 → financial module 也不该拿到 calc。
+    assert not any(n.need_code == "gross_margin" for n in result.resolved)
 
 
 async def test_prepare_missing_macro_ready_false(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(_plan_payload(macro_needs=[]))
     plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
     result = await preparation.prepare_research(plan_result.research_plan_id)
@@ -516,7 +800,7 @@ async def test_prepare_missing_macro_ready_false(env, monkeypatch) -> None:
 
 
 async def test_prepare_missing_valuation_ready_false(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     # 只 seed 了 pe_ttm comparison；plan 要 ps_ttm → MISSING_VALUATION_COMPARISON。
     fake = FakeResearchPlannerModel(
         _plan_payload(valuation_needs=[{"need_code": "ps_valuation", "metric_code": "ps_ttm"}])
@@ -529,7 +813,7 @@ async def test_prepare_missing_valuation_ready_false(env, monkeypatch) -> None:
 
 
 async def test_prepare_future_evidence_excluded(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     # 加一张 future 新闻卡（published_at 晚于 as_of → no-lookahead 排除）。
     future_card = await _seed_future_doc_card(env)
     fake = FakeResearchPlannerModel(_plan_payload())
@@ -543,7 +827,7 @@ async def test_prepare_future_evidence_excluded(env, monkeypatch) -> None:
 
 
 async def test_prepare_wrong_company_evidence_excluded(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     other_card = await _seed_other_company_doc_card(env)
     fake = FakeResearchPlannerModel(_plan_payload())
     plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
@@ -554,7 +838,7 @@ async def test_prepare_wrong_company_evidence_excluded(env, monkeypatch) -> None
 
 
 async def test_prepare_critical_ineligible_not_boosted(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(_plan_payload())
     plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
     result = await preparation.prepare_research(plan_result.research_plan_id)
@@ -566,7 +850,7 @@ async def test_prepare_critical_ineligible_not_boosted(env, monkeypatch) -> None
 
 
 async def test_prepare_provider_unavailable_not_ready(env, monkeypatch) -> None:
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(
         _plan_payload(
             document_needs=[
@@ -589,7 +873,7 @@ async def test_prepare_requires_route_before_resolution(env, monkeypatch) -> Non
     """preparation 必须等 route 持久化；未 route → ResearchPlanRouteNotFound。"""
     from app.research_planning.errors import ResearchPlanRouteNotFound
 
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(_plan_payload())
     plan_service = _planner(env["sessionmaker"], fake)
     router = ResearchSourceRouter(env["sessionmaker"], plan_service)
@@ -597,6 +881,30 @@ async def test_prepare_requires_route_before_resolution(env, monkeypatch) -> Non
     plan_result = await plan_service.create_plan(env["task_id"])
     with pytest.raises(ResearchPlanRouteNotFound):
         await preparation.prepare_research(plan_result.research_plan_id)
+
+
+async def test_prepare_document_evidence_question_mismatch_not_ready(env, monkeypatch) -> None:
+    """spec C：同一公司同一 source，卡片提取问题 != 任务研究问题 → 不满足 → ready=false。
+
+    卡片用问题 A（worker seed 默认），任务研究问题用 B（不同问题）。source 存在、
+    时间可得，但 EvidenceCard 的 research_question_sha256 不匹配 → 证据不计入。
+    """
+    await _seed_worker_inputs(env, monkeypatch)  # 卡片 research_question = A
+    task_b = await _seed_research_task(
+        env["sessionmaker"],
+        questions=["评估公司治理结构与股东回报水平。"],
+    )
+    fake = FakeResearchPlannerModel(_plan_payload())
+    plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, task_b)
+    result = await preparation.prepare_research(plan_result.research_plan_id)
+    assert result.ready_for_analysis is False
+    missing = {n.need_code: n.reason_code for n in result.missing_needs}
+    assert missing["news_docs"] == MissingReasonCode.INSUFFICIENT_EVIDENCE
+    detail = next(n.detail for n in result.missing_needs if n.need_code == "news_docs")
+    assert "研究问题" in detail
+    # 问题不匹配的证据不能进入 document 证据池 → business/risk module 无输入。
+    assert missing["module:business"] == MissingReasonCode.INSUFFICIENT_EVIDENCE
+    assert missing["module:risk"] == MissingReasonCode.INSUFFICIENT_EVIDENCE
 
 
 # ---------------------------------------------------------------- seed helpers

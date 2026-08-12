@@ -31,6 +31,7 @@ from app.stage4.runner import Stage4WorkflowRunner
 from app.storage.raw_store import LocalRawArtifactStore
 from app.workflows.checkpoint import LangGraphCheckpointManager
 from tests.integration.test_research_planning_service import (
+    _QUESTION,
     _cleanup,
     _plan_payload,
     _seed_research_task,
@@ -116,7 +117,7 @@ async def test_e2e_planner_router_preparation_to_stage4_synthesis(
     env, monkeypatch, connection_uri
 ) -> None:
     """ready=true → 有效 Stage4 request → 真实 Stage4 runner → SynthesisResult。"""
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(_plan_payload())
     preparation = _preparation(env["sessionmaker"], fake)
     plan_service = _planner(env["sessionmaker"], fake)
@@ -158,7 +159,7 @@ async def test_e2e_planner_router_preparation_to_stage4_synthesis(
 
 async def test_e2e_missing_valuation_ready_false_no_stage4(env, monkeypatch) -> None:
     """需要 ps_ttm comparison 但没有 → ready=false、无 stage4_request、0 条 workflow_runs。"""
-    await _seed_worker_inputs(env, monkeypatch)
+    await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(
         _plan_payload(valuation_needs=[{"need_code": "ps_valuation", "metric_code": "ps_ttm"}])
     )

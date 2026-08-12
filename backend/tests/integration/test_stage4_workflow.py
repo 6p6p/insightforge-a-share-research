@@ -215,22 +215,33 @@ async def _seed_research_task(sessionmaker) -> UUID:
 # ---------------------------------------------------------------- worker inputs
 
 
-async def _seed_worker_inputs(env: dict, monkeypatch) -> dict:
+async def _seed_worker_inputs(
+    env: dict, monkeypatch, *, research_question: str = _QUESTION
+) -> dict:
     """seed 5 类 worker 的输入，返回 (item 构造所需 IDs)。
 
     - business / risk：document EvidenceCard（ClaimAnalysisService）；
     - financial：financial_calculation（source card = business 卡）；
     - macro：macro_observation card + company document card；
     - valuation：relative_valuation_comparison。
+
+    `research_question` 决定 document 卡提取时绑定的研究问题（Gate C 要求
+    document 证据卡与任务研究问题一致才算 ready 输入）。
     """
     biz = await _seed_claim_doc_card(
-        env, statement="2024年贵州茅台营业收入同比增长15%。", source_url=_URL_B
+        env,
+        statement="2024年贵州茅台营业收入同比增长15%。",
+        source_url=_URL_B,
+        research_question=research_question,
     )
     risk = await _seed_claim_doc_card(
-        env, statement="白酒行业竞争加剧或影响公司毛利率。", source_url=_URL_R
+        env,
+        statement="白酒行业竞争加剧或影响公司毛利率。",
+        source_url=_URL_R,
+        research_question=research_question,
     )
     macro_card, _ = await _seed_macro_card(env, monkeypatch)
-    company_doc = await _seed_macro_doc_card(env)
+    company_doc = await _seed_macro_doc_card(env, research_question=research_question)
     # financial calc 的 source evidence card = business 卡（env["evidence_card_id"] 约定）。
     env["evidence_card_id"] = biz["evidence_card_id"]
     obs = await _annual_revenue_pair(env)

@@ -45,7 +45,8 @@ def _payload(**overrides) -> dict:
         "financial_needs": [
             {
                 "need_code": "revenue_2024",
-                "purpose": "需要营收数据",
+                "purpose": "需要营收绝对变化",
+                "calculation_code": "absolute_change_cny",
                 "metric_code": "revenue",
                 "period": "2024",
             }
@@ -95,21 +96,75 @@ def test_invalid_analysis_module_rejected() -> None:
         ResearchPlanPayload.model_validate(_payload(analysis_modules=["trading"]))
 
 
-def test_invalid_financial_metric_rejected() -> None:
-    """financial_needs.metric_code 只接受 MetricCode 冻结集合。"""
+def test_invalid_financial_calculation_code_rejected() -> None:
+    """financial_needs.calculation_code 只接受 CalculationCode 冻结集合（spec B）。"""
     with pytest.raises(ValidationError):
         ResearchPlanPayload.model_validate(
             _payload(
-                financial_needs=[{"need_code": "pe", "purpose": "x", "metric_code": "pe_ratio"}]
+                financial_needs=[
+                    {"need_code": "pe", "purpose": "x", "calculation_code": "pe_ratio"}
+                ]
             )
         )
 
 
-def test_financial_metric_accepts_real_metric_code() -> None:
+def test_growth_calculation_requires_metric_code() -> None:
+    """growth 类（absolute_change/yoy/qoq）必须指定目标 metric_code（spec B）。"""
+    for code in ("absolute_change_cny", "yoy_growth_rate", "qoq_growth_rate"):
+        with pytest.raises(ValidationError):
+            ResearchPlanPayload.model_validate(
+                _payload(
+                    financial_needs=[{"need_code": "g", "purpose": "x", "calculation_code": code}]
+                )
+            )
+
+
+def test_margin_calculation_rejects_metric_code() -> None:
+    """margin / ratio 类 metric_code 必须为空（input roles 由 formula 固定，spec B）。"""
+    for code in ("gross_margin", "operating_margin", "net_margin_parent", "debt_to_assets_ratio"):
+        with pytest.raises(ValidationError):
+            ResearchPlanPayload.model_validate(
+                _payload(
+                    financial_needs=[
+                        {
+                            "need_code": "m",
+                            "purpose": "x",
+                            "calculation_code": code,
+                            "metric_code": "revenue",
+                        }
+                    ]
+                )
+            )
+
+
+def test_financial_calculation_accepts_growth_with_metric_code() -> None:
     payload = ResearchPlanPayload.model_validate(
-        _payload(financial_needs=[{"need_code": "np", "purpose": "x", "metric_code": "net_profit"}])
+        _payload(
+            financial_needs=[
+                {
+                    "need_code": "np",
+                    "purpose": "x",
+                    "calculation_code": "yoy_growth_rate",
+                    "metric_code": "net_profit",
+                }
+            ]
+        )
     )
-    assert payload.financial_needs[0].metric_code.value == "net_profit"
+    need = payload.financial_needs[0]
+    assert need.calculation_code.value == "yoy_growth_rate"
+    assert need.metric_code.value == "net_profit"
+
+
+def test_financial_calculation_accepts_margin_without_metric_code() -> None:
+    payload = ResearchPlanPayload.model_validate(
+        _payload(
+            financial_needs=[
+                {"need_code": "gm", "purpose": "x", "calculation_code": "gross_margin"}
+            ]
+        )
+    )
+    assert payload.financial_needs[0].calculation_code.value == "gross_margin"
+    assert payload.financial_needs[0].metric_code is None
 
 
 def test_valuation_metric_constraint() -> None:
@@ -170,7 +225,12 @@ def test_max_need_counts() -> None:
         ResearchPlanPayload.model_validate(
             _payload(
                 financial_needs=[
-                    {"need_code": f"f{i}", "purpose": "x", "metric_code": "revenue"}
+                    {
+                        "need_code": f"f{i}",
+                        "purpose": "x",
+                        "calculation_code": "absolute_change_cny",
+                        "metric_code": "revenue",
+                    }
                     for i in range(13)
                 ]
             )
@@ -258,7 +318,14 @@ def test_need_code_global_unique() -> None:
                 document_needs=[
                     {"need_code": "shared", "purpose": "x", "source_type": "annual_report"}
                 ],
-                financial_needs=[{"need_code": "shared", "purpose": "x", "metric_code": "revenue"}],
+                financial_needs=[
+                    {
+                        "need_code": "shared",
+                        "purpose": "x",
+                        "calculation_code": "absolute_change_cny",
+                        "metric_code": "revenue",
+                    }
+                ],
             )
         )
 

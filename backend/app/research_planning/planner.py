@@ -35,8 +35,10 @@ from app.research_planning.errors import (
 PLANNER_STRATEGY_VERSION = 1
 
 # planner 身份（persisted planner_name / planner_version）。
+# v2 = 冻结 creation-time PlannerInputSnapshot（spec A）——新 create 只产生 v2；
+# v1 行原样保留（legacy verifier 显式处理）。
 PLANNER_NAME = "research_planner"
-PLANNER_VERSION = 1
+PLANNER_VERSION = 2
 
 
 @runtime_checkable
@@ -79,10 +81,15 @@ _SYSTEM_RULES = """你是 InsightForge 的研究计划制定器。任务：为�
 8. document_needs.source_type 只允许：annual_report / semiannual_report /
    quarterly_report / company_announcement / issuer_ir_material / prospectus /
    news_article / macro_dataset / other。
-9. financial_needs.metric_code 只允许：revenue / operating_cost /
-   operating_profit / profit_before_tax / net_profit / net_profit_parent /
-   net_profit_parent_excl_nonrecurring / operating_cash_flow_net /
-   total_assets / total_liabilities / equity_parent。
+9. financial_needs 只声明财务**派生计算**（calculation_code 只允许：
+   absolute_change_cny / yoy_growth_rate / qoq_growth_rate / gross_margin /
+   operating_margin / net_margin_parent / debt_to_assets_ratio）。growth 类
+   （absolute_change / yoy / qoq）必须同时指定目标 metric_code（revenue /
+   operating_cost / operating_profit / profit_before_tax / net_profit /
+   net_profit_parent / net_profit_parent_excl_nonrecurring /
+   operating_cash_flow_net / total_assets / total_liabilities / equity_parent）；
+   margin / ratio 类（gross_margin / operating_margin / net_margin_parent /
+   debt_to_assets_ratio）不需要 metric_code。不输出 observation ID / metric ID。
 10. valuation_needs.metric_code 只允许：pe_ttm / pb_mrq / ps_ttm；
     peer_policy 只允许 peer_median。
 11. period 只允许 4 位年度（如 2023）或省略。

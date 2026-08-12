@@ -183,6 +183,7 @@ async def _seed_document_card(
     critical_claim_eligible: bool = False,
     statement: str = _STATEMENT,
     source_url: str | None = None,
+    research_question: str = _QUESTION,
 ) -> dict:
     """真实 HTML 链 → EvidenceCardService 创建 document EvidenceCard。
 
@@ -195,7 +196,7 @@ async def _seed_document_card(
     )
     chunk = chunks[0]
     draft = EvidenceCardDraft(
-        research_question=_QUESTION,
+        research_question=research_question,
         evidence_statement=statement,
         evidence_type=EvidenceType.METRIC,
         chunk_id=chunk.chunk_id,

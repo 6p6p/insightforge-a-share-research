@@ -59,9 +59,19 @@ from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.relative_valuation_comparison import RelativeValuationComparisonModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.source_record import SourceRecordModel
-from app.evidence.contracts import EvidenceOrigin
+from app.evidence.contracts import EvidenceOrigin, compute_research_question_sha256
+from app.financial.calculations.contracts import (
+    CalculationCode,
+    InputRole,
+    calculation_input_roles,
+    expected_metric_code,
+)
 from app.repositories.research_task_repository import ResearchTaskRepository
-from app.research_planning.contracts import ResearchDocumentNeedType, ResearchPlanPayload
+from app.research_planning.contracts import (
+    _GROWTH_CALCULATION_CODES,
+    ResearchDocumentNeedType,
+    ResearchPlanPayload,
+)
 from app.research_planning.router import (
     ResearchSourceRouter,
     validate_route_payload,
@@ -201,6 +211,12 @@ class ResearchPreparationService:
 
         task = await self._load_task(plan.task_id)
         analysis_as_of = task.research_end_date
+        # Gate C：document EvidenceCard 只有在其 research_question 与当前任务研究
+        # 问题一致（sha256）时才算 ready 输入；不匹配 → 该证据不计入解析。
+        questions = list(task.questions or [])
+        target_question_sha256 = (
+            compute_research_question_sha256(questions[0]) if questions else None
+        )
 
         provider_keys_by_code = {
             entry.need_code: entry.provider_keys for entry in route_payload.entries
@@ -246,6 +262,7 @@ class ResearchPreparationService:
                 source_type=need.source_type.value,
                 period=need.period,
                 analysis_as_of=analysis_as_of,
+                research_question_sha256=target_question_sha256,
             )
             if reason is None:
                 doc_evidence_pool.update(card.evidence_card_id for card in cards)
@@ -269,7 +286,8 @@ class ResearchPreparationService:
                 continue
             calcs, reason, detail = self._resolve_financial(
                 data,
-                metric_code=need.metric_code.value,
+                calculation_code=need.calculation_code.value,
+                metric_code=need.metric_code.value if need.metric_code is not None else None,
                 period=need.period,
             )
             if reason is None:
@@ -323,6 +341,7 @@ class ResearchPreparationService:
                 source_type="news_article",
                 period=None,
                 analysis_as_of=analysis_as_of,
+                research_question_sha256=target_question_sha256,
             )
             if reason is None:
                 event_evidence_pool.update(card.evidence_card_id for card in cards)
@@ -405,8 +424,15 @@ class ResearchPreparationService:
         source_type: str,
         period: str | None,
         analysis_as_of: date,
+        research_question_sha256: str | None,
     ) -> tuple[list[EvidenceCardModel], MissingReasonCode | None, str | None]:
-        """document need：按 document_type / period / availability 解析 evidence 卡。"""
+        """document need：按 document_type / period / availability / **研究问题一致性**
+        （Gate C）解析 evidence 卡。
+
+        只有当卡提取时的 research_question 与当前任务研究问题 sha256 一致时，
+        该 EvidenceCard 才算 ready 输入——同一 source 为另一个研究问题提取的证据
+        不能冒充本任务证据（不误 ready）。
+        """
         candidates = (
             list(data.source_by_id.values())
             if source_type == ResearchDocumentNeedType.OTHER.value
@@ -431,38 +457,132 @@ class ResearchPreparationService:
         available = [source for source in candidates if _source_available(source, analysis_as_of)]
         if not available:
             return [], MissingReasonCode.INSUFFICIENT_EVIDENCE, "无在基准日之前可得的 source"
-        cards = [
+        all_cards = [
             card for source in available for card in data.cards_by_source.get(source.source_id, [])
         ]
-        if not cards:
+        if not all_cards:
             return [], MissingReasonCode.INSUFFICIENT_EVIDENCE, "source 存在但无已提取 evidence"
+        cards = [
+            card
+            for card in all_cards
+            if research_question_sha256 is None
+            or card.research_question_sha256 == research_question_sha256
+        ]
+        if not cards:
+            return (
+                [],
+                MissingReasonCode.INSUFFICIENT_EVIDENCE,
+                "source 存在但证据研究问题与当前任务不一致",
+            )
         return cards, None, None
 
     def _resolve_financial(
         self,
         data: _ResolutionData,
         *,
-        metric_code: str,
+        calculation_code: str,
+        metric_code: str | None,
         period: str | None,
     ) -> tuple[list[FinancialCalculationModel], MissingReasonCode | None, str | None]:
-        """financial need：metric observation → 派生 calculation。"""
-        observations = [obs for obs in data.observations if obs.metric_code == metric_code]
-        if not observations:
-            return [], MissingReasonCode.MISSING_METRIC, f"无 metric={metric_code} 的 observation"
+        """financial need（calculation-centric，spec B）：从既有 calculations 解析。
+
+        程序根据 calculation_code 推导所需 observations（input roles + 期望
+        metric），只匹配**同一 calculation_code + 满足 metric/period 语义**的
+        calculation——有 revenue yoy 但 plan 要 gross_margin → 不匹配（不误 ready）。
+        """
+        try:
+            code = CalculationCode(calculation_code)
+        except ValueError:
+            return (
+                [],
+                MissingReasonCode.UNSUPPORTED_NEED,
+                f"不支持的 calculation_code={calculation_code}",
+            )
+
+        calc_inputs_map = self._calc_observation_map(data)
+        calcs = [calc for calc in data.calculations if calc.calculation_code == calculation_code]
+        matched = [
+            calc
+            for calc in calcs
+            if self._calc_matches(
+                calc_inputs_map.get(calc.calculation_id, {}), code, metric_code, period
+            )
+        ]
+        if matched:
+            return matched, None, None
+
+        if not self._observations_sufficient_for_calc(data, code, metric_code):
+            return (
+                [],
+                MissingReasonCode.MISSING_METRIC,
+                f"无 {calculation_code} 所需的 observation",
+            )
+        return (
+            [],
+            MissingReasonCode.INSUFFICIENT_EVIDENCE,
+            f"observation 存在但无 {calculation_code} calculation",
+        )
+
+    @staticmethod
+    def _calc_observation_map(
+        data: _ResolutionData,
+    ) -> dict[UUID, dict[str, FinancialMetricObservationModel]]:
+        """calc_id → {input_role: observation}（一次构建，供多次 need 解析复用）。"""
+        obs_by_id = {obs.metric_observation_id: obs for obs in data.observations}
+        mapping: dict[UUID, dict[str, FinancialMetricObservationModel]] = {}
+        for row in data.calc_inputs:
+            obs = obs_by_id.get(row.metric_observation_id)
+            if obs is not None:
+                mapping.setdefault(row.calculation_id, {})[row.input_role] = obs
+        return mapping
+
+    @staticmethod
+    def _calc_matches(
+        inputs: dict[str, FinancialMetricObservationModel],
+        code: CalculationCode,
+        metric_code: str | None,
+        period: str | None,
+    ) -> bool:
+        """一条 calculation 是否满足该 need 的 metric/period 语义。"""
+        roles = calculation_input_roles(code)
+        if set(inputs) != {role.value for role in roles}:
+            return False
+        for role in roles:
+            obs = inputs.get(role.value)
+            if obs is None:
+                return False
+            expected = expected_metric_code(role)
+            if expected is None:
+                if metric_code is not None and obs.metric_code != metric_code:
+                    return False
+            elif obs.metric_code != expected.value:
+                return False
         if period:
-            period_obs = [obs for obs in observations if obs.period_end.year == int(period)]
-            if not period_obs:
-                return [], MissingReasonCode.MISSING_PERIOD, f"无 {period} 年的 {metric_code}"
-            observations = period_obs
-        obs_ids = {obs.metric_observation_id for obs in observations}
-        calc_ids = {
-            row.calculation_id for row in data.calc_inputs if row.metric_observation_id in obs_ids
-        }
-        calcs = [calc for calc in data.calculations if calc.calculation_id in calc_ids]
-        if not calcs:
-            detail = "observation 存在但无派生 calculation"
-            return [], MissingReasonCode.INSUFFICIENT_EVIDENCE, detail
-        return calcs, None, None
+            target_year = int(period)
+            if code in _GROWTH_CALCULATION_CODES:
+                current = inputs.get(InputRole.CURRENT.value)
+                if current is None or current.period_end.year != target_year:
+                    return False
+            else:
+                first = next(iter(inputs.values()))
+                if first.period_end.year != target_year:
+                    return False
+        return True
+
+    @staticmethod
+    def _observations_sufficient_for_calc(
+        data: _ResolutionData,
+        code: CalculationCode,
+        metric_code: str | None,
+    ) -> bool:
+        """所需 observations（按 calculation_code 推导）是否在库中存在。"""
+        obs_metrics = {obs.metric_code for obs in data.observations}
+        for role in calculation_input_roles(code):
+            expected = expected_metric_code(role)
+            need_metric = expected.value if expected is not None else metric_code
+            if need_metric is None or need_metric not in obs_metrics:
+                return False
+        return True
 
     def _resolve_macro_driver(
         self,

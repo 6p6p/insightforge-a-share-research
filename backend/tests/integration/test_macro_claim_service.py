@@ -229,6 +229,7 @@ async def _seed_document_card(
     document_type: str = "news_article",
     evidence_type: EvidenceType = EvidenceType.METRIC,
     statement: str = "2024年贵州茅台营业收入同比增长15%。",
+    research_question: str = _QUESTION,
 ) -> UUID:
     """真实 HTML 链 → EvidenceCardService 创建一张 document_chunk EvidenceCard。"""
     source_id, parsed_id, cs_id, chunks = await _seed_html_source(
@@ -241,7 +242,7 @@ async def _seed_document_card(
     )
     chunk = chunks[0]
     draft = EvidenceCardDraft(
-        research_question=_QUESTION,
+        research_question=research_question,
         evidence_statement=statement,
         evidence_type=evidence_type,
         chunk_id=chunk.chunk_id,

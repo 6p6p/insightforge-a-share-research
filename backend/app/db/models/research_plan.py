@@ -71,6 +71,17 @@ class ResearchPlanModel(Base):
             "jsonb_typeof(plan_payload) = 'object'",
             name="ck_research_plans_plan_payload_object",
         ),
+        # v2 行（plan_schema_version >= 2）必须携带 creation-time input snapshot
+        # （spec A）：payload + schema_version 双 NOT NULL。v1 行允许 NULL，不回填。
+        CheckConstraint(
+            "NOT (plan_schema_version >= 2) OR "
+            "(planner_input_payload IS NOT NULL AND planner_input_schema_version >= 1)",
+            name="ck_research_plans_v2_input_snapshot",
+        ),
+        CheckConstraint(
+            "(planner_input_payload IS NULL) OR (jsonb_typeof(planner_input_payload) = 'object')",
+            name="ck_research_plans_planner_input_payload_object",
+        ),
         UniqueConstraint(
             "planner_input_fingerprint",
             name="uq_research_plans_planner_input_fingerprint",
@@ -99,6 +110,9 @@ class ResearchPlanModel(Base):
     planner_version: Mapped[int] = mapped_column(Integer, nullable=False)
     model_id: Mapped[str] = mapped_column(String(200), nullable=False)
     planner_input_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    # creation-time PlannerInputSnapshot（v2 行必填，v1 行 NULL——不回填 legacy）。
+    planner_input_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    planner_input_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     plan_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     plan_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
