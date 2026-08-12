@@ -44,6 +44,10 @@ from app.db.models.research_backflow import (
     ResearchBackflowFulfillmentModel,
     ResearchBackflowRequestModel,
 )
+from app.db.models.research_plan import (
+    ResearchPlanModel,
+    ResearchPlanRouteModel,
+)
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.review_action import (
     HumanReviewDecisionModel,
@@ -99,6 +103,8 @@ __all__ = [
     "ReportOutlineModel",
     "ResearchBackflowFulfillmentModel",
     "ResearchBackflowRequestModel",
+    "ResearchPlanModel",
+    "ResearchPlanRouteModel",
     "HumanReviewDecisionModel",
     "HumanReviewRequestModel",
     "ReportReviewActionModel",
