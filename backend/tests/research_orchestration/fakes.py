@@ -21,6 +21,7 @@ class FakeSession:
     def __init__(self) -> None:
         self.committed = False
         self.rolled_back = False
+        self.added: list = []
 
     async def __aenter__(self) -> "FakeSession":
         return self
@@ -33,6 +34,9 @@ class FakeSession:
 
     async def rollback(self) -> None:
         self.rolled_back = True
+
+    def add(self, model) -> None:
+        self.added.append(model)
 
 
 class FakeSessionMaker:
@@ -52,12 +56,16 @@ def make_orchestration(
     research_plan_id: UUID | None = None,
     input_fingerprint: str | None = None,
     error_code: str | None = None,
+    attempt_no: int = 1,
+    retry_of_orchestration_id: UUID | None = None,
 ) -> ResearchOrchestrationModel:
     """构造可用于 fake repo 的 orchestration 行（不落库，值不校验 DB 约束）。"""
     return ResearchOrchestrationModel(
         orchestration_id=orchestration_id or UUID("00000000-0000-0000-0000-000000000001"),
         task_id=task_id or UUID("00000000-0000-0000-0000-000000000002"),
         research_plan_id=research_plan_id,
+        attempt_no=attempt_no,
+        retry_of_orchestration_id=retry_of_orchestration_id,
         orchestration_schema_version=ORCHESTRATION_SCHEMA_VERSION,
         orchestrator_name=ORCHESTRATOR_NAME,
         orchestrator_version=ORCHESTRATOR_VERSION,
@@ -96,11 +104,15 @@ class FakeStage4Runner:
         self.child_binds: list = []
         self.run_id = uuid.uuid4()
 
-    async def create_stage4_run(self, request, *, child_bind=None):
+    async def create_stage4_run(self, request, *, on_run_created=None):
         if self.fail_with is not None:
             raise self.fail_with
-        if child_bind is not None:
-            self.child_binds.append(child_bind(self.run_id))
+        if on_run_created is not None:
+            # 模拟 runner 的事务：hook 收到 (session, run_id)，把 child link 加入
+            # session；fake 记录 session.added 供断言。
+            session = FakeSession()
+            on_run_created(session, self.run_id)
+            self.child_binds.extend(session.added)
         return SimpleNamespace(run_id=self.run_id)
 
 

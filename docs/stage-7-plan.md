@@ -44,10 +44,21 @@
 - **测试（spec T/U/S）**：单元 43（fingerprint / state / graph topology / runner 守卫 + 失败投影 / service replay-conflict-cancel-verify / child exact 复用与并发 winner / recovery 跳过与恢复判定，0 DB）+ 集成 6 Cases（happy path → awaiting_stage5、not-ready→fulfill→ready、fulfill 后仍 not-ready → waiting_manual、Stage4 child 失败投影、replay + active 409、worker restart 同 thread 恢复无重复产物；真实 PG + 真实 LangGraph + fake prepare/fulfill，**0 真实 DeepSeek**）。全量回归 + ruff + alembic check 干净。
 - **本轮不做（边界）**：Stage5 auto-execution、HumanReview、ResearchBackflow auto-loop、Web 一键研究、Stage7B Evaluation；lifespan / production factory 未接线（本阶段无 API 入口创建 orchestration，恢复协调器与 legacy 边界已作为 spec'd 交付物落地，待入口接线时一并接入）。
 
-## 7B：受控资料获取（planned）
+## 7B：三路评估（3-way Evaluation，planned）
 
-- 对 `MissingResearchNeed` 提供受控获取入口：官方披露下载、新闻采集、宏观数据刷新、财务 / 估值对比补齐——全部经 router 能力白名单 + 人工确认（不自动静默抓取）。
+- 对自动编排产出的最终研究报告做**三路独立评估并汇合**，不伪造数据、不越过既有证据链：
+  1. **事实核查评估**：复用 Stage5 Report Audit / Check 结果——issue 分布、severity、
+     `recommended_route` 与最终修订是否闭合；
+  2. **证据链评估**：Source → Evidence → Claim → Report → Audit 全程可追溯——
+     report 关键论断逐条定位到 Evidence 与 Source，缺失/断裂回退为显式 gap；
+  3. **人工/分析师复核**：分析师对证据充分性、判断稳健性与表述准确性给出独立判定。
+- 三路汇合 → 结构化评估结论（每路 pass / needs_revision / blocked），持久化为一等公民
+  evaluation artifact。
+- **本轮不做**：7B 实现（含其依赖的 Stage7 全链自动执行），明确排期到后续阶段。
 
-## 7C：Stage 7 整体闭环（planned）
+## 7C：受控资料获取 + Stage 7 整体闭环（planned）
 
-- 自动 Source Planning → 自动研究 → 报告 → 审核的端到端编排；ResearchBackflow 与规划反馈回路（不足的证据需求回流为新的研究计划）。
+- 对 `MissingResearchNeed` 提供受控获取入口：官方披露下载、新闻采集、宏观数据刷新、
+  财务 / 估值对比补齐——全部经 router 能力白名单 + 人工确认（不自动静默抓取）。
+- 自动 Source Planning → 自动研究 → 报告 → 审核 → 三路评估的端到端编排；
+  ResearchBackflow 与规划反馈回路（不足的证据需求回流为新的研究计划）。

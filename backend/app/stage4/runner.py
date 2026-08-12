@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import (
     ActiveWorkflowRunExists,
@@ -26,7 +26,6 @@ from app.core.errors import (
     WorkflowRunAlreadyStarted,
     WorkflowRunNotFound,
 )
-from app.db.models.research_orchestration import ResearchOrchestrationChildModel
 from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
 from app.domain.tasks import (
@@ -71,6 +70,12 @@ def _sanitize_error(exc: Exception) -> str:
     return type(exc).__name__[:_MAX_ERROR_MESSAGE_LENGTH]
 
 
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """从 PostgreSQL Diagnostics 取违反的约束名（无 diag / 非约束错误 → None）。"""
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    return getattr(diag, "constraint_name", None) if diag is not None else None
+
+
 class Stage4WorkflowRunner:
     """Runs a Stage 4 analysis graph without holding any DB transaction while it runs."""
 
@@ -90,7 +95,7 @@ class Stage4WorkflowRunner:
         self,
         request: Stage4WorkflowRequest,
         *,
-        child_bind: Callable[[UUID], ResearchOrchestrationChildModel] | None = None,
+        on_run_created: Callable[[AsyncSession, UUID], None] | None = None,
     ) -> WorkflowRunResponse:
         """创建 Stage 4 工作流 run（必须绑定一个真实 ResearchTask）。
 
@@ -100,14 +105,17 @@ class Stage4WorkflowRunner:
           先查 `get_active_for_task`，再靠 partial unique index
           `uq_workflow_runs_one_active_per_task` 兜底并发（IntegrityError →
           `ActiveWorkflowRunExists`）；
-        - `child_bind`（orchestration ownership，spec K）：可选 factory
-          `run_id → ResearchOrchestrationChildModel`。**WorkflowRun 行 + child
-          link 在同一事务提交**（7A.2B.1 选择 same-transaction，而非
-          runner self-commit 后补 link）——run create 与 child link insert 之间
-          无 crash 孤儿窗口；任一唯一约束冲突（active index /
-          `UNIQUE(workflow_run_id)` / `UNIQUE(orchestration_id, stage, attempt_no)`）
-          → 整个事务回滚，`ActiveWorkflowRunExists` 交调用方
-          （`ensure_stage4_child` 重查 exact child → 返回 winner）。
+        - `on_run_created`（orchestration ownership，spec K/F）：可选 transaction
+          hook `(AsyncSession, run_id) → None`。**WorkflowRun 行 + hook 副作用
+          在同一事务提交**（7A.2B.1 选择 same-transaction，而非 runner
+          self-commit 后补 link）——run create 与 child link insert 之间无 crash
+          孤儿窗口。runner **不 import orchestration 层**：hook 由调用方提供
+          （`ensure_stage4_child` 用它 add child link）；
+        - **IntegrityError 分类（spec E）**：只有 `uq_workflow_runs_one_active_per_task`
+          → `ActiveWorkflowRunExists`（调用方重查 exact child → winner）；child
+          ownership 约束（`UNIQUE(workflow_run_id)` /
+          `UNIQUE(orchestration_id, stage, attempt_no)`）与其它唯一冲突**原样抛**
+          IntegrityError——runner 不猜测语义，由 orchestration 层分类为 409。
         """
         run_id = uuid.uuid4()
         async with self._sessionmaker() as session:
@@ -130,8 +138,8 @@ class Stage4WorkflowRunner:
             )
             try:
                 await run_repo.create(run)
-                if child_bind is not None:
-                    session.add(child_bind(run_id))
+                if on_run_created is not None:
+                    on_run_created(session, run_id)
                 await event_repo.create(
                     WorkflowEventModel(
                         run_id=run_id,
@@ -146,13 +154,14 @@ class Stage4WorkflowRunner:
                     )
                 )
                 await session.commit()
-            except IntegrityError:
-                # 并发创建同一 task 的两个 active run（unique partial index）或
-                # orchestration child link 归属冲突（UNIQUE(workflow_run_id) /
-                # UNIQUE(orchestration_id, stage, attempt_no)）：整个事务回滚，
-                # 由调用方（ensure_stage4_child）重查 exact child → 返回 winner。
+            except IntegrityError as exc:
+                # 并发创建同一 task 的两个 active run（unique partial index）→
+                # 只转 ActiveWorkflowRunExists；child link 归属冲突原样抛，
+                # 由调用方（ensure_stage4_child）分类 / 重查 exact child。
                 await session.rollback()
-                raise ActiveWorkflowRunExists() from None
+                if _constraint_name(exc) == "uq_workflow_runs_one_active_per_task":
+                    raise ActiveWorkflowRunExists() from None
+                raise
             return WorkflowRunResponse.model_validate(run)
 
     # ------------------------------------------------------------------ execute

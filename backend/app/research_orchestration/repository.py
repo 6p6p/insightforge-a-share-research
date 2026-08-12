@@ -40,10 +40,51 @@ class ResearchOrchestrationRepository:
         return result.scalar_one_or_none()
 
     async def get_by_input_fingerprint(self, fingerprint: str) -> ResearchOrchestrationModel | None:
+        """按 fingerprint 查询（**非唯一**：user retry 后同 fingerprint 可多行）。
+
+        只用于确认"存在任意一次该输入的尝试"；**replay / retry 定位必须用
+        `get_by_plan_and_attempt` / `get_latest_for_plan`**（spec D/B 精确边界）。
+        """
         result = await self._session.execute(
             select(ResearchOrchestrationModel).where(
                 ResearchOrchestrationModel.input_fingerprint == fingerprint
             )
+        )
+        return result.scalars().first()
+
+    async def get_by_plan_and_attempt(
+        self, research_plan_id: UUID, attempt_no: int
+    ) -> ResearchOrchestrationModel | None:
+        """精确 replay / retry 定位：同 research_plan + attempt 至多一个
+        orchestration（`uq_research_orchestration_runs_plan_attempt`）。"""
+        result = await self._session.execute(
+            select(ResearchOrchestrationModel).where(
+                ResearchOrchestrationModel.research_plan_id == research_plan_id,
+                ResearchOrchestrationModel.attempt_no == attempt_no,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_latest_for_plan(
+        self, research_plan_id: UUID
+    ) -> ResearchOrchestrationModel | None:
+        """同 plan 最大 attempt 的 orchestration（retry 计算 new attempt 用）。"""
+        result = await self._session.execute(
+            select(ResearchOrchestrationModel)
+            .where(ResearchOrchestrationModel.research_plan_id == research_plan_id)
+            .order_by(ResearchOrchestrationModel.attempt_no.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_id_for_update(
+        self, orchestration_id: UUID
+    ) -> ResearchOrchestrationModel | None:
+        """`SELECT ... FOR UPDATE`：串行化并发 retry（同 old → 最终只有一个新 attempt）。"""
+        result = await self._session.execute(
+            select(ResearchOrchestrationModel)
+            .where(ResearchOrchestrationModel.orchestration_id == orchestration_id)
+            .with_for_update()
         )
         return result.scalar_one_or_none()
 
@@ -60,12 +101,16 @@ class ResearchOrchestrationRepository:
     async def create_or_get(
         self, orchestration: ResearchOrchestrationModel
     ) -> tuple[ResearchOrchestrationModel, bool]:
-        """INSERT ... ON CONFLICT(input_fingerprint) DO NOTHING RETURNING。
+        """INSERT ... ON CONFLICT(research_plan_id, attempt_no) DO NOTHING RETURNING。
 
-        同 input（相同 input fingerprint）→ replay 同一行；并发最终只 1 行。
-        task_id 的 active partial unique 冲突**不在** ON CONFLICT arbiter 上 →
-        IntegrityError 抛给调用方（service 捕获 → 409 或重查）。
+        同 plan 同 attempt → replay 已有行（并发最终只 1 行）。**input_fingerprint
+        不再 UNIQUE**（7A.2B.2 spec B：user retry 同 fingerprint 多行并存）；
+        唯一性由 `uq_research_orchestration_runs_plan_attempt` 承担。task_id 的
+        active partial unique 冲突**不在** ON CONFLICT arbiter 上 → IntegrityError
+        抛给调用方（service 捕获 → 409 或重查）。
         """
+        if orchestration.research_plan_id is None:
+            raise ValueError("research orchestration requires a research plan id")
         # orchestration_id 的 default=uuid.uuid4 是 Python-side：逐列取值会显式传
         # None 绕过默认 → 排除 PK，让 Core INSERT 应用列默认。created_at /
         # updated_at 有 server_default now()，同样排除。
@@ -78,14 +123,21 @@ class ResearchOrchestrationRepository:
         stmt = (
             insert(ResearchOrchestrationModel)
             .values(**values)
-            .on_conflict_do_nothing(index_elements=[ResearchOrchestrationModel.input_fingerprint])
+            .on_conflict_do_nothing(
+                index_elements=[
+                    ResearchOrchestrationModel.research_plan_id,
+                    ResearchOrchestrationModel.attempt_no,
+                ]
+            )
             .returning(ResearchOrchestrationModel)
         )
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
         if row is not None:
             return row, True
-        existing = await self.get_by_input_fingerprint(orchestration.input_fingerprint)
+        existing = await self.get_by_plan_and_attempt(
+            orchestration.research_plan_id, orchestration.attempt_no
+        )
         if existing is None:
             raise RuntimeError("research orchestration conflict without existing row")
         return existing, False

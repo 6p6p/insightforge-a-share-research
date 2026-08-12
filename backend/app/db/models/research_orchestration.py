@@ -1,22 +1,26 @@
-"""SQLAlchemy models for top-level research orchestration (stage 7A.2B.1).
+"""SQLAlchemy models for top-level research orchestration (stage 7A.2B.1/7A.2B.2).
 
 `research_orchestration_runs` 是一次 **top-level orchestration** 的一等公民记录
 （**不是 WorkflowRun**）：research task 从 Plan → Route → Prepare → Fulfill →
-Stage4 child 的整个生命周期。它与 `workflow_runs` 完全分离——因此不与
+Stage4 → Stage5 的整个生命周期。它与 `workflow_runs` 完全分离——因此不与
 `uq_workflow_runs_one_active_per_task` / `uq_workflow_runs_thread_id` 冲突。
 
-- `input_fingerprint` CHAR(64) **UNIQUE**：schema + task_id + planner input
-  fingerprint + orchestrator 身份的 SHA-256（spec F；不含 API key / created_at）。
-  replay（同 task + 同 plan input + 同 orchestrator → 同一 orchestration）由该
-  UNIQUE 保证；并发 create → 最终 1 行。
+- `input_fingerprint` CHAR(64)（**非 UNIQUE**，7A.2B.2 起）：schema + task_id +
+  planner input fingerprint + orchestrator 身份的 SHA-256（spec F；不含 API key /
+  created_at）。同 fingerprint 可对应 attempt 1/2/3（user retry，spec B）。
+- `attempt_no` INTEGER NOT NULL（>=1）+ `retry_of_orchestration_id` UUID NULL
+  （FK 本表 RESTRICT；不能指向自己）：同 ResearchPlan 的 user retry → **NEW
+  orchestration_id + NEW top-level thread**，即使 research input 完全相同；
+  old orchestration 完全不改，attempt 1/2/3 允许并存历史。
+- **唯一性由 `UNIQUE(research_plan_id, attempt_no)` 承担**：replay（同 plan +
+  attempt=1）与并发 retry（同 plan 同 attempt → 最终 1 行）由此保证。
 - **partial unique（task_id）WHERE active**：同 task 至多一个 active orchestration
   （pending/running/waiting_human）——与 workflow_runs 的 active invariant 并列，
   独立表、互不修改。
 - `current_phase`：planning → routing → preparing → (fulfilling → preparing) →
-  stage4 → awaiting_stage5（7A.2B.1 本轮正常 terminal phase；status 保持 running
-  等 7A.2B.2 接 Stage5）→ … stage5 / research_backflow / completed（未来）。
-- `research_plan_id` NULL-able：ensure_plan 之后才绑定（本轮 create_or_get 已建
-  plan，实际总是非 NULL；保留 NULL 语义以覆盖恢复边界）。
+  stage4 → stage5 →（completed / waiting_human / research_backflow）。
+- `research_plan_id` NULL-able：ensure_plan 之后才绑定（create_or_get 已建 plan，
+  实际总是非 NULL；保留 NULL 语义以覆盖恢复边界）。
 
 `research_orchestration_child_runs` 是 orchestration → child WorkflowRun 的
 **persisted ownership linkage**（spec D 最重要 correctness boundary）：
@@ -69,7 +73,18 @@ class ResearchOrchestrationModel(Base):
         CheckConstraint(_ORCH_STATUS, name="ck_ro_status"),
         CheckConstraint(_ORCH_PHASE, name="ck_ro_current_phase"),
         CheckConstraint(f"input_fingerprint {_SHA256_CHECK}", name="ck_ro_input_fingerprint"),
-        UniqueConstraint("input_fingerprint", name="uq_research_orchestration_runs_input_fp"),
+        # user retry（7A.2B.2 spec B）：attempt 从 1 开始；retry 不能指向自己。
+        CheckConstraint("attempt_no >= 1", name="ck_ro_attempt_no"),
+        CheckConstraint(
+            "retry_of_orchestration_id IS NULL OR retry_of_orchestration_id <> orchestration_id",
+            name="ck_ro_retry_of_not_self",
+        ),
+        # 唯一性由 (research_plan_id, attempt_no) 承担（fingerprint 不再 UNIQUE）。
+        UniqueConstraint(
+            "research_plan_id",
+            "attempt_no",
+            name="uq_research_orchestration_runs_plan_attempt",
+        ),
         # 同 task 至多一个 active orchestration（独立表，不修改 workflow_runs 的
         # uq_workflow_runs_one_active_per_task）。
         Index(
@@ -93,6 +108,12 @@ class ResearchOrchestrationModel(Base):
     research_plan_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("research_plans.research_plan_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    retry_of_orchestration_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("research_orchestration_runs.orchestration_id", ondelete="RESTRICT"),
         nullable=True,
     )
     orchestration_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)

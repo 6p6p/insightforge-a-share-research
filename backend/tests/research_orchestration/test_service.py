@@ -1,13 +1,16 @@
-"""Research orchestration service unit tests（spec F/P/Q，0 DB）。
+"""Research orchestration service unit tests（spec F/P/Q + 7A.2B.2 spec B/C，0 DB）。
 
-- `create_or_get_orchestration`：fingerprint replay（同输入 → 同 id + replayed=True）；
-  新 fingerprint + task 已有 active → `ResearchOrchestrationActiveConflict`（409）；
-  全新 → replayed=False；
+- `create_or_get_orchestration`：同 plan + attempt=1 replay（同输入 → 同 id +
+  replayed=True）；新 fingerprint + task 已有 active → `ResearchOrchestrationActiveConflict`
+  （409）；全新 → replayed=False；
+- `retry_orchestration`（7A.2B.2 spec C）：failed/cancelled → **NEW orchestration_id**、
+  attempt+1、retry_of=old、fingerprint 相同、old 不变；completed/active → reject；
+  并发 retry（latest.attempt>old.attempt 且 retry_of=old）→ 返回 winner；
 - `cancel_orchestration`：minimal + 幂等（spec Q）——cancelled 原样返回、
   completed/failed → `AlreadyFinished`、active 时先取消 active child 再取消
   orchestration（不直接 SQL 删除）；
 - `verify_orchestration_integrity`：重放 stored plan 的 planner fingerprint →
-  不匹配 → `ResearchOrchestrationIntegrityError`。
+  不匹配 → `ResearchOrchestrationIntegrityError`；retry_of 必须同 task/plan（spec B）。
 """
 
 from types import SimpleNamespace
@@ -27,6 +30,7 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationActiveConflict,
     ResearchOrchestrationAlreadyFinished,
     ResearchOrchestrationIntegrityError,
+    ResearchOrchestrationNotFound,
 )
 from app.research_orchestration.repository import (
     ResearchOrchestrationChildRepository,
@@ -46,6 +50,18 @@ _OID = UUID("00000000-0000-0000-0000-000000000001")
 _TASK_ID = UUID("00000000-0000-0000-0000-000000000002")
 _PLAN_ID = UUID("00000000-0000-0000-0000-000000000003")
 _FINGERPRINT = "b" * 64
+_RETRY_ID = UUID("00000000-0000-0000-0000-00000000000a")
+
+
+def _stored_fp(planner_fp: str = "p" * 64) -> str:
+    """与 `_plan_stub` 默认 planner fp 匹配的 orchestration input fingerprint。"""
+    return compute_orchestration_input_fingerprint(
+        orchestration_schema_version=ORCHESTRATION_SCHEMA_VERSION,
+        task_id=_TASK_ID,
+        planner_input_fingerprint=planner_fp,
+        orchestrator_name=ORCHESTRATOR_NAME,
+        orchestrator_version=ORCHESTRATOR_VERSION,
+    )
 
 
 def _service(sessionmaker) -> ResearchOrchestrationService:
@@ -55,17 +71,20 @@ def _service(sessionmaker) -> ResearchOrchestrationService:
 # ------------------------------------------------------------------ create / replay
 
 
-async def test_create_or_get_replays_same_fingerprint(monkeypatch) -> None:
-    """同输入（同 task + 同 plan input + 同 orchestrator）→ replay 同一 orchestration。"""
+async def test_create_or_get_replays_same_plan_attempt1(monkeypatch) -> None:
+    """同输入（同 plan + attempt=1）→ replay 同一 orchestration（replayed=True）。"""
     sessionmaker = FakeSessionMaker()
     existing = make_orchestration(
         orchestration_id=_OID, task_id=_TASK_ID, research_plan_id=_PLAN_ID
     )
 
-    async def fake_get_by_fp(self, fingerprint):
+    async def fake_get_by_plan_attempt(self, research_plan_id, attempt_no):
+        assert attempt_no == 1
         return existing
 
-    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_input_fingerprint", fake_get_by_fp)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_plan_and_attempt", fake_get_by_plan_attempt
+    )
     result = await _service(sessionmaker).create_or_get_orchestration(_TASK_ID)
     assert result.replayed is True
     assert result.orchestration_id == _OID
@@ -73,13 +92,13 @@ async def test_create_or_get_replays_same_fingerprint(monkeypatch) -> None:
     assert result.current_phase == "planning"
 
 
-async def test_create_or_get_new_fingerprint_no_active(monkeypatch) -> None:
+async def test_create_or_get_new_plan_no_active(monkeypatch) -> None:
     sessionmaker = FakeSessionMaker()
     created_row = make_orchestration(
         orchestration_id=_OID, task_id=_TASK_ID, research_plan_id=_PLAN_ID
     )
 
-    async def fake_get_by_fp(self, fingerprint):
+    async def fake_get_by_plan_attempt(self, research_plan_id, attempt_no):
         return None
 
     async def fake_get_active(self, task_id):
@@ -88,7 +107,9 @@ async def test_create_or_get_new_fingerprint_no_active(monkeypatch) -> None:
     async def fake_create_or_get(self, orchestration):
         return created_row, True
 
-    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_input_fingerprint", fake_get_by_fp)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_plan_and_attempt", fake_get_by_plan_attempt
+    )
     monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_get_active)
     monkeypatch.setattr(ResearchOrchestrationRepository, "create_or_get", fake_create_or_get)
     result = await _service(sessionmaker).create_or_get_orchestration(_TASK_ID)
@@ -98,19 +119,206 @@ async def test_create_or_get_new_fingerprint_no_active(monkeypatch) -> None:
 
 
 async def test_create_or_get_active_conflict(monkeypatch) -> None:
-    """新 fingerprint（真 user retry）+ task 已有 active orchestration → 409。"""
+    """新 plan + task 已有 active orchestration → 409。"""
     sessionmaker = FakeSessionMaker()
 
-    async def fake_get_by_fp(self, fingerprint):
+    async def fake_get_by_plan_attempt(self, research_plan_id, attempt_no):
         return None
 
     async def fake_get_active(self, task_id):
         return make_orchestration(status=OrchestrationStatus.RUNNING.value)
 
-    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_input_fingerprint", fake_get_by_fp)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_plan_and_attempt", fake_get_by_plan_attempt
+    )
     monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_get_active)
     with pytest.raises(ResearchOrchestrationActiveConflict):
         await _service(sessionmaker).create_or_get_orchestration(_TASK_ID)
+
+
+# ------------------------------------------------------------------ retry
+
+
+async def test_retry_creates_new_attempt(monkeypatch) -> None:
+    """failed old → retry → NEW orchestration_id、attempt=2、retry_of=old、
+    fingerprint/task/plan 相同、status=pending、old 行不被修改。"""
+    sessionmaker = FakeSessionMaker()
+    old = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        status=OrchestrationStatus.FAILED.value,
+        input_fingerprint=_stored_fp(),
+        attempt_no=1,
+    )
+    new_row = make_orchestration(
+        orchestration_id=_RETRY_ID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        status=OrchestrationStatus.PENDING.value,
+        input_fingerprint=_stored_fp(),
+        attempt_no=2,
+        retry_of_orchestration_id=_OID,
+    )
+    created_rows: list = []
+
+    async def fake_get(self, orchestration_id):
+        return old
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    async def fake_get_for_update(self, orchestration_id):
+        return old
+
+    async def fake_get_latest(self, research_plan_id):
+        return old  # max attempt = 1 → new_attempt = 2
+
+    async def fake_create_or_get(self, orchestration):
+        assert orchestration.orchestration_id != _OID
+        assert orchestration.task_id == _TASK_ID
+        assert orchestration.research_plan_id == _PLAN_ID
+        assert orchestration.attempt_no == 2
+        assert orchestration.retry_of_orchestration_id == _OID
+        assert orchestration.input_fingerprint == _stored_fp()
+        assert orchestration.status == OrchestrationStatus.PENDING.value
+        assert orchestration.current_phase == "planning"
+        created_rows.append(orchestration)
+        return new_row, True
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_id_for_update", fake_get_for_update
+    )
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_plan", fake_get_latest)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "create_or_get", fake_create_or_get)
+
+    result = await _service(sessionmaker).retry_orchestration(_OID)
+    assert result.replayed is False
+    assert result.orchestration_id == _RETRY_ID
+    assert result.attempt_no == 2
+    assert result.retry_of_orchestration_id == _OID
+    assert len(created_rows) == 1
+    # old 行未被修改（fake 只读；断言值未变）。
+    assert old.attempt_no == 1
+    assert old.retry_of_orchestration_id is None
+
+
+async def test_retry_concurrent_returns_existing_attempt(monkeypatch) -> None:
+    """并发 retry（同 old）：latest.attempt > old.attempt 且 retry_of=old →
+    返回 winner，不再创建 attempt=2。"""
+    sessionmaker = FakeSessionMaker()
+    old = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        status=OrchestrationStatus.FAILED.value,
+        input_fingerprint=_stored_fp(),
+        attempt_no=1,
+    )
+    winner = make_orchestration(
+        orchestration_id=_RETRY_ID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        status=OrchestrationStatus.PENDING.value,
+        input_fingerprint=_stored_fp(),
+        attempt_no=2,
+        retry_of_orchestration_id=_OID,
+    )
+
+    async def fake_get(self, orchestration_id):
+        return old
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    async def fake_get_for_update(self, orchestration_id):
+        return old
+
+    async def fake_get_latest(self, research_plan_id):
+        return winner
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_id_for_update", fake_get_for_update
+    )
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_latest_for_plan", fake_get_latest)
+
+    result = await _service(sessionmaker).retry_orchestration(_OID)
+    assert result.replayed is True
+    assert result.orchestration_id == winner.orchestration_id
+    assert result.attempt_no == 2
+
+
+async def test_retry_rejects_completed(monkeypatch) -> None:
+    sessionmaker = FakeSessionMaker()
+    old = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        status=OrchestrationStatus.COMPLETED.value,
+        input_fingerprint=_stored_fp(),
+    )
+
+    async def fake_get(self, orchestration_id):
+        return old
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    async def fake_get_for_update(self, orchestration_id):
+        return old
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_id_for_update", fake_get_for_update
+    )
+    with pytest.raises(ResearchOrchestrationAlreadyFinished):
+        await _service(sessionmaker).retry_orchestration(_OID)
+
+
+async def test_retry_rejects_active(monkeypatch) -> None:
+    """active（running）→ 拒绝（不是 failed/cancelled）。"""
+    sessionmaker = FakeSessionMaker()
+    old = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        status=OrchestrationStatus.RUNNING.value,
+        input_fingerprint=_stored_fp(),
+    )
+
+    async def fake_get(self, orchestration_id):
+        return old
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    async def fake_get_for_update(self, orchestration_id):
+        return old
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    monkeypatch.setattr(
+        ResearchOrchestrationRepository, "get_by_id_for_update", fake_get_for_update
+    )
+    with pytest.raises(ResearchOrchestrationAlreadyFinished):
+        await _service(sessionmaker).retry_orchestration(_OID)
+
+
+async def test_retry_missing_orchestration(monkeypatch) -> None:
+    """orchestration 不存在 → NotFound（verify 阶段）。"""
+    sessionmaker = FakeSessionMaker()
+
+    async def fake_get(self, orchestration_id):
+        return None
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(ResearchOrchestrationNotFound):
+        await _service(sessionmaker).retry_orchestration(_OID)
 
 
 # ------------------------------------------------------------------ cancel
@@ -250,3 +458,96 @@ async def test_verify_integrity_missing_plan(monkeypatch) -> None:
     monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
     with pytest.raises(ResearchOrchestrationIntegrityError):
         await _service(sessionmaker).verify_orchestration_integrity(_OID)
+
+
+async def test_verify_integrity_retry_parent_ok(monkeypatch) -> None:
+    """retry row 的 retry_of 同 task/plan → 通过（spec B）。"""
+    sessionmaker = FakeSessionMaker()
+    stored_fp = _stored_fp()
+    parent = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        input_fingerprint=stored_fp,
+        attempt_no=1,
+    )
+    row = make_orchestration(
+        orchestration_id=_RETRY_ID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        input_fingerprint=stored_fp,
+        attempt_no=2,
+        retry_of_orchestration_id=_OID,
+    )
+
+    async def fake_get(self, orchestration_id):
+        if orchestration_id == row.orchestration_id:
+            return row
+        return parent
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    result = await _service(sessionmaker).verify_orchestration_integrity(row.orchestration_id)
+    assert result is row
+
+
+async def test_verify_integrity_retry_parent_task_mismatch(monkeypatch) -> None:
+    """retry_of 与行同 plan 但 task 不同 → integrity error（spec B）。"""
+    sessionmaker = FakeSessionMaker()
+    stored_fp = _stored_fp()
+    row = make_orchestration(
+        orchestration_id=_RETRY_ID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        input_fingerprint=stored_fp,
+        attempt_no=2,
+        retry_of_orchestration_id=_OID,
+    )
+    parent = make_orchestration(
+        orchestration_id=_OID,
+        task_id=UUID("00000000-0000-0000-0000-00000000000b"),
+        research_plan_id=_PLAN_ID,
+    )
+
+    async def fake_get(self, orchestration_id):
+        if orchestration_id == row.orchestration_id:
+            return row
+        return parent
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    with pytest.raises(ResearchOrchestrationIntegrityError):
+        await _service(sessionmaker).verify_orchestration_integrity(row.orchestration_id)
+
+
+async def test_verify_integrity_retry_parent_missing(monkeypatch) -> None:
+    """retry_of 指向不存在的 orchestration → integrity error。"""
+    sessionmaker = FakeSessionMaker()
+    stored_fp = _stored_fp()
+    row = make_orchestration(
+        orchestration_id=_RETRY_ID,
+        task_id=_TASK_ID,
+        research_plan_id=_PLAN_ID,
+        input_fingerprint=stored_fp,
+        attempt_no=2,
+        retry_of_orchestration_id=_OID,
+    )
+
+    async def fake_get(self, orchestration_id):
+        if orchestration_id == row.orchestration_id:
+            return row
+        return None
+
+    async def fake_plan_get(self, research_plan_id):
+        return _plan_stub()
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    monkeypatch.setattr(ResearchPlanRepository, "get_by_id", fake_plan_get)
+    with pytest.raises(ResearchOrchestrationIntegrityError):
+        await _service(sessionmaker).verify_orchestration_integrity(row.orchestration_id)
