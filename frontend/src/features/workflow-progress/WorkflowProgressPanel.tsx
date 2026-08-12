@@ -43,9 +43,18 @@ interface Props {
   run: WorkflowRunResponse | null;
   events: WorkflowEventResponse[];
   /** 有事件/有 run 时渲染；否则显示空态。 */
+  /** 编排 awaiting_stage5 时由 OrchestrationHumanActionCard 接管人工决策，
+   * 此处隐藏基于 workflow-runs actions 的 HumanActionCard（避免错误 dispatch
+   * 到 /workflow-runs/{id}/actions 而不继续顶层编排）。 */
+  suppressHumanAction?: boolean;
 }
 
-export function WorkflowProgressPanel({ task, run, events }: Props): React.JSX.Element {
+export function WorkflowProgressPanel({
+  task,
+  run,
+  events,
+  suppressHumanAction = false,
+}: Props): React.JSX.Element {
   if (!run) {
     return (
       <Card title="工作流进度">
@@ -100,7 +109,7 @@ export function WorkflowProgressPanel({ task, run, events }: Props): React.JSX.E
           />
         ) : null}
 
-        {run.status === 'waiting_human' || run.pending_action ? (
+        {!suppressHumanAction && (run.status === 'waiting_human' || run.pending_action) ? (
           <HumanActionCard run={run} />
         ) : null}
 

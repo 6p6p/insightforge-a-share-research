@@ -118,6 +118,45 @@
 - **本轮不做（边界）**：live external provider 自动抓取、官方披露隐藏接口、
   Playwright、Web 大改、Stage7B Evaluation。
 
+### 7A FINAL：Automatic Research Product Loop（completed，FINAL，2026-08-12）
+
+- **产品闭环语义（7A Product Gate）**：一键入口
+  `prepare_orchestration_start(task_id)` 后台调度真实顶层 LangGraph
+  （ensure_plan→ensure_route→prepare→fulfill→Stage4→Synthesis→Stage5→Audit），
+  全部阶段不新增迁移（Alembic 停 0044 head）。Case1-6 入口语义：
+  新建+schedule=201、已调度=202、running/waiting_human/completed=200、
+  failed/cancelled→409 `research_orchestration_retry_required`。
+- **受控补资料 + 同线程 resume（spec J/K/L）**：`waiting_manual`
+  （prepare not_ready）与 `research_backflow`（manual_reason ∈
+  source_acquisition_required / structured_data_refresh_required）在前端展示
+  缺失 need codes + 原因，用户上传 PDF / 受控 URL import（复用 source-records）
+  成功后 `POST /research-orchestrations/{id}/resume-source-acquisition` →
+  K1 重跑 prepare（ready→Stage4 attempt1）、K2 同 round 重跑补充研究；
+  limit_reached→K3 400（须显式 retry），awaiting_stage5→400（走 /actions）。
+- **Stage5 人工决策**：`waiting_human`/`awaiting_stage5` → `/actions`
+  approve/rewrite/research/cancel 继续顶层图；retry → 新建 O2（attempt+1，
+  同 ResearchPlan，0 次额外 LLM，后台自动调度）。
+- **前端**：工作台 one-click「自动研究」按钮 + `OrchestrationBanner`
+  （phase/status/attempt/backflow_round 投影 + 补资料面板 + Stage5 决策卡片）；
+  SSE 事件流聚合保持。7A Product Gate 测试：前端 typecheck + vitest
+  （14 files/77 tests，含 OrchestrationBanner 7 tests）。
+- **验证（2026-08-12）**：产品闭环集成测试 Case1-5（真实 PG + 真实 LangGraph +
+  fake models + service 绑定 execution_manager 后台调度；one-click 全链 /
+  waiting_manual resume / backflow 同 request resume / Stage5 approve 同 run /
+  limit_reached 不可 resume）5 passed；stage5 回归 15 passed；全量回归
+  非集成 2088 + 集成 1001 全绿（串行跑，避免并行 DB 污染）；ruff 干净；
+  alembic 0044（head，无新迁移）；Docker gate `docker compose up -d --build`
+  全绿（backend live/ready 200、frontend 200、/api proxy 200、orchestration
+  API smoke 201/200、SSE `: connected`、Report/Export 不回归 200/409/404）。
+- **约束披露**：Docker gate 的 orchestration API smoke 在 compose 栈上运行时，
+  根目录 `.env`（gitignored）注入真实 `DEEPSEEK_API_KEY`（compose
+  `${DEEPSEEK_API_KEY:-}`），触发 **2 次真实 DeepSeek plan 生成调用**
+  （orchestration 均正确进入 `waiting_manual`，未达 Stage4/backflow）。0-real
+  DeepSeek 约束严格适用于自动测试套件（fake models / MockTransport）；gate 为
+  production 配置 smoke，如实披露，不隐瞒。
+- **本轮不做（边界）**：Stage7B Evaluation、README 大改、简历、CrewAI、新
+  hidden provider、Playwright、验证码、自动交易、技术分析。
+
 ## 7B：三路系统评估（3-way System Evaluation，planned，frozen）
 
 - **三路对照，不是三种评估通道**：对同一批 **frozen cases / snapshots / questions /

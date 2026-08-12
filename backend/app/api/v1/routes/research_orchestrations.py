@@ -10,7 +10,11 @@ application service（`get_research_orchestration_service`），**不执行业�
 - `POST /research-orchestrations/{orchestration_id}/actions`：action dispatch
   （approve / rewrite / research / cancel → `act_on_orchestration`；retry →
   `retry_and_schedule`——创建 O2 **并自动后台调度**，Gate E）。comment 只对
-  human decision 生效。
+  human decision 生效；
+- `POST /research-orchestrations/{orchestration_id}/resume-source-acquisition`
+  （7A Product Gate spec J/K/L）：受控补资料后同线程恢复
+  （`resume_after_source_acquisition`）——waiting_manual → K1；research_backflow
+  且 reason ∈ resumable set → K2；limit_reached / awaiting_stage5 → 400 拒绝。
 
 现有 advanced WorkPlan execute 保持兼容（spec U）；SSE 聚合 / Web 一键按钮留
 7A.2B.3（spec V）。
@@ -109,4 +113,26 @@ async def act_on_orchestration(
         result = await service.act_on_orchestration(
             orchestration_id, payload.action, payload.comment
         )
+    return _to_response(result)
+
+
+@orchestrations_router.post(
+    "/research-orchestrations/{orchestration_id}/resume-source-acquisition",
+    response_model=ResearchOrchestrationResponse,
+)
+async def resume_source_acquisition(
+    orchestration_id: UUID,
+    service: Annotated[ResearchOrchestrationService, Depends(get_research_orchestration_service)],
+) -> ResearchOrchestrationResponse:
+    """受控补资料后同线程恢复（7A Product Gate spec J/K/L）。
+
+    用户在 Workspace 补 PDF / approved URL import 成功后调用：
+    - waiting_manual → K1（补资料后 prepare 重路由 → Stage4 attempt 1 / 仍缺）；
+    - research_backflow 且 reason ∈ resumable set（source_acquisition_required /
+      structured_data_refresh_required）→ K2（同 round 重跑补充研究）；
+    - reason=research_backflow_limit_reached → K3 拒绝（400，须 retry 新
+      orchestration）；
+    - awaiting_stage5 → 400（L：与 HumanReviewDecision 分开，走 /actions）。
+    返回**调度后**的状态投影（后端后台执行，前端轮询）。"""
+    result = await service.resume_after_source_acquisition(orchestration_id)
     return _to_response(result)

@@ -31,6 +31,30 @@ MAX_BACKFLOW_RESEARCH_ROUNDS = 2
 RESEARCH_BACKFLOW_LIMIT_REACHED = "research_backflow_limit_reached"
 RESEARCH_BACKFLOW_NO_PROGRESS = "research_backflow_no_progress"
 
+# 7A Product Gate spec K2：可**受控补资料后同线程恢复**的 backflow manual reason
+# 集合（对应 executor 级 `backflow_executor_manual_reasons`）：
+#   - source_acquisition_required：缺 eligible source（用户补 PDF / approved URL
+#     import 后可恢复，K1 走 prepare 重路由，K2 走同 round 重跑补充研究）；
+#   - structured_data_refresh_required：结构化 financial/macro/valuation refresh
+#     不在 automatic 文档补充研究范围（7A.2B.3 scope 冻结）——同样走 K2 重跑
+#     已有 Source Library。
+# `research_backflow_limit_reached` **不在此集合**（K3：不能绕过 MAX rounds）。
+RESUME_BACKFLOW_MANUAL_REASONS = frozenset(
+    {
+        "source_acquisition_required",
+        "structured_data_refresh_required",
+    }
+)
+
+# resume_after_source_acquisition 的 continuation kind（spec J/K）：
+#   - "prepare"：waiting_manual → 从 ensure_route 后重跑 prepare（K1，补资料后
+#     重路由，route_readiness 重新判定 → ready→Stage4 a1 | 仍缺→waiting_manual）；
+#   - "supplemental_research"：research_backflow → 从 plan_supplemental_research
+#     后继重跑 execute_supplemental_research（K2，同 research_request_id + 同
+#     backflow_round，不 round+1、不新建 SupplementalPlan）。
+RESUME_KIND_PREPARE = "prepare"
+RESUME_KIND_SUPPLEMENTAL_RESEARCH = "supplemental_research"
+
 
 class OrchestrationStatus(StrEnum):
     """一次 top-level orchestration 的状态（独立表，不改 workflow_runs 语义）。"""

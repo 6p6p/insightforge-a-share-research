@@ -27,8 +27,13 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
   const init: RequestInit = { method, headers: { ...headers } };
   if (body !== undefined) {
-    init.headers = { ...init.headers, 'Content-Type': 'application/json' };
-    init.body = JSON.stringify(body);
+    if (body instanceof FormData) {
+      // multipart/form-data：不手动设 Content-Type，fetch 会带上 boundary。
+      init.body = body;
+    } else {
+      init.headers = { ...init.headers, 'Content-Type': 'application/json' };
+      init.body = JSON.stringify(body);
+    }
   }
 
   const response = await fetch(url, init);

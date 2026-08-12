@@ -162,10 +162,12 @@ class FakeActionOrchestrationRunner:
 
 
 class FakeExecutionManager:
-    """fake `ResearchOrchestrationExecutionManager`（记录 schedule / cancel_local）。"""
+    """fake `ResearchOrchestrationExecutionManager`（记录 schedule / schedule_resume /
+    cancel_local）。"""
 
     def __init__(self) -> None:
         self.scheduled: list[UUID] = []
+        self.resumed: list[tuple[UUID, str]] = []
         self.cancelled: list[UUID] = []
         self._scheduled_set: set[UUID] = set()
 
@@ -174,6 +176,13 @@ class FakeExecutionManager:
             return False
         self._scheduled_set.add(orchestration_id)
         self.scheduled.append(orchestration_id)
+        return True
+
+    def schedule_resume(self, orchestration_id: UUID, kind: str) -> bool:
+        if orchestration_id in self._scheduled_set:
+            return False
+        self._scheduled_set.add(orchestration_id)
+        self.resumed.append((orchestration_id, kind))
         return True
 
     def is_scheduled(self, orchestration_id: UUID) -> bool:

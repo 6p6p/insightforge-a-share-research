@@ -13,6 +13,7 @@
   不匹配 → `ResearchOrchestrationIntegrityError`；retry_of 必须同 task/plan（spec B）。
 """
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -23,6 +24,8 @@ from app.research_orchestration.contracts import (
     ORCHESTRATION_SCHEMA_VERSION,
     ORCHESTRATOR_NAME,
     ORCHESTRATOR_VERSION,
+    RESUME_KIND_PREPARE,
+    RESUME_KIND_SUPPLEMENTAL_RESEARCH,
     OrchestrationStatus,
     compute_orchestration_input_fingerprint,
 )
@@ -30,6 +33,7 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationActiveConflict,
     ResearchOrchestrationAlreadyFinished,
     ResearchOrchestrationIntegrityError,
+    ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
     ResearchOrchestrationRetryRequired,
 )
@@ -898,3 +902,391 @@ async def test_get_current_none_raises_not_found(monkeypatch) -> None:
 
     with pytest.raises(ResearchOrchestrationNotFound):
         await _service(sessionmaker).get_current_orchestration(_TASK_ID)
+
+
+# ------------------------------------- checkpoint projection（7A Product Gate spec O）
+
+
+class _ProjectionRunner:
+    """fake orchestration runner：`read_orchestration_checkpoint` 返回指定 dict。"""
+
+    def __init__(
+        self,
+        checkpoint: dict | None = None,
+        *,
+        fail_with: BaseException | None = None,
+    ) -> None:
+        self.checkpoint = checkpoint if checkpoint is not None else {}
+        self.fail_with = fail_with
+        self.read_calls: list[UUID] = []
+
+    async def read_orchestration_checkpoint(self, orchestration_id: UUID) -> dict:
+        self.read_calls.append(orchestration_id)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.checkpoint
+
+
+async def test_projection_unbound_runner_returns_none_derived_fields(monkeypatch) -> None:
+    """runner 未绑定（unit 测试场景）→ checkpoint 派生字段全 None（纯 row 投影）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    result = await _service(sessionmaker).get_current_orchestration(_TASK_ID)
+    assert result.orchestration_id == _OID
+    assert result.current_child_run_id is None
+    assert result.backflow_round is None
+    assert result.research_request_id is None
+    assert result.manual_reason is None
+    assert result.missing_need_codes is None
+    assert result.updated_at is None
+
+
+async def test_projection_merges_checkpoint_when_runner_bound(monkeypatch) -> None:
+    """runner 绑定 + checkpoint 有值 → 投影 checkpoint 派生字段（str→UUID 转换）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="research_backflow",
+    )
+    runner = _ProjectionRunner(
+        {
+            "current_child_run_id": "00000000-0000-0000-0000-000000000009",
+            "backflow_round": 1,
+            "research_request_id": "00000000-0000-0000-0000-00000000000a",
+            "backflow_manual_reason": "structured_data_refresh_required",
+            "missing_need_codes": ["unsupported_by_evidence", "weak_source_quality"],
+        }
+    )
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), orchestration_runner=runner
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    result = await service.get_current_orchestration(_TASK_ID)
+    assert runner.read_calls == [_OID]
+    assert result.status == "waiting_human"
+    assert result.current_child_run_id == UUID("00000000-0000-0000-0000-000000000009")
+    assert result.backflow_round == 1
+    assert result.research_request_id == UUID("00000000-0000-0000-0000-00000000000a")
+    assert result.manual_reason == "structured_data_refresh_required"
+    assert result.missing_need_codes == ["unsupported_by_evidence", "weak_source_quality"]
+
+
+async def test_projection_invalid_child_run_id_is_none(monkeypatch) -> None:
+    """checkpoint 的 current_child_run_id 非法 → None（`_uuid_or_none` 兜底）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="research_backflow"
+    )
+    runner = _ProjectionRunner({"current_child_run_id": "not-a-uuid", "backflow_round": 2})
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), orchestration_runner=runner
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    result = await service.get_current_orchestration(_TASK_ID)
+    assert result.current_child_run_id is None
+    assert result.backflow_round == 2
+
+
+async def test_projection_checkpoint_read_failure_falls_back_to_row(monkeypatch) -> None:
+    """checkpoint 读取异常 → 不降级为错误；派生字段保持 None（row 权威）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+    runner = _ProjectionRunner(fail_with=RuntimeError("checkpoint down"))
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), orchestration_runner=runner
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    result = await service.get_current_orchestration(_TASK_ID)
+    assert result.orchestration_id == _OID
+    assert result.status == "running"
+    assert result.current_child_run_id is None
+    assert result.backflow_round is None
+    assert result.research_request_id is None
+    assert result.manual_reason is None
+
+
+async def test_projection_updated_at_from_row(monkeypatch) -> None:
+    """updated_at 取 row（不来自 checkpoint），tz-aware 投影。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+    active.updated_at = datetime.now(UTC)
+    runner = _ProjectionRunner({})
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), orchestration_runner=runner
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+    result = await service.get_current_orchestration(_TASK_ID)
+    assert result.updated_at is not None
+    assert result.updated_at.tzinfo is not None
+
+
+async def test_projection_merges_into_prepare_start_waiting_human(monkeypatch) -> None:
+    """prepare_orchestration_start Case 4（waiting_human）→ 投影 checkpoint 派生字段
+    （前端 phase banner / 补资料 UI 的关键路径）。"""
+    sessionmaker = FakeSessionMaker()
+    manager = FakeExecutionManager()
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="research_backflow",
+    )
+    runner = _ProjectionRunner(
+        {
+            "backflow_manual_reason": "source_acquisition_required",
+            "missing_need_codes": ["unsupported_by_evidence"],
+        }
+    )
+    service = ResearchOrchestrationService(
+        sessionmaker, FakePlanService(), orchestration_runner=runner, execution_manager=manager
+    )
+
+    async def fake_active(self, task_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_active_for_task", fake_active)
+
+    outcome = await service.prepare_orchestration_start(_TASK_ID)
+    assert outcome.created is False
+    assert outcome.scheduled is False
+    assert outcome.orchestration.manual_reason == "source_acquisition_required"
+    assert outcome.orchestration.missing_need_codes == ["unsupported_by_evidence"]
+
+
+# ------------------- resume after source acquisition（7A Product Gate spec J/K/L）
+
+
+def _resume_service(runner, manager) -> ResearchOrchestrationService:
+    """绑定 runner（checkpoint 读取）+ manager（schedule_resume 记录）的 service。"""
+    return ResearchOrchestrationService(
+        FakeSessionMaker(),
+        FakePlanService(),
+        orchestration_runner=runner,
+        execution_manager=manager,
+    )
+
+
+async def test_resume_waiting_manual_schedules_prepare(monkeypatch) -> None:
+    """K1：waiting_manual（补资料后）→ schedule_resume(kind=prepare) 后台恢复。"""
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="waiting_manual",
+    )
+    runner = _ProjectionRunner({"current_phase": "waiting_manual"})
+    manager = FakeExecutionManager()
+    service = _resume_service(runner, manager)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    result = await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == [(_OID, RESUME_KIND_PREPARE)]
+    assert result.orchestration_id == _OID
+
+
+async def test_resume_research_backflow_source_required_schedules_supplemental(monkeypatch) -> None:
+    """K2：research_backflow + reason=source_acquisition_required →
+    schedule_resume(kind=supplemental_research)（同 round 重跑补充研究）。"""
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="research_backflow",
+    )
+    runner = _ProjectionRunner(
+        {
+            "current_phase": "research_backflow",
+            "backflow_manual_reason": "source_acquisition_required",
+        }
+    )
+    manager = FakeExecutionManager()
+    service = _resume_service(runner, manager)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    result = await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == [(_OID, RESUME_KIND_SUPPLEMENTAL_RESEARCH)]
+    assert result.orchestration_id == _OID
+
+
+async def test_resume_structured_refresh_schedules_supplemental(monkeypatch) -> None:
+    """K2：reason=structured_data_refresh_required 同样可恢复（走已有 Source Library
+    重跑补充研究）。"""
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="research_backflow",
+    )
+    runner = _ProjectionRunner(
+        {
+            "current_phase": "research_backflow",
+            "backflow_manual_reason": "structured_data_refresh_required",
+        }
+    )
+    manager = FakeExecutionManager()
+    service = _resume_service(runner, manager)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    result = await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == [(_OID, RESUME_KIND_SUPPLEMENTAL_RESEARCH)]
+    assert result.orchestration_id == _OID
+
+
+async def test_resume_limit_reached_rejected(monkeypatch) -> None:
+    """K3：reason=research_backflow_limit_reached → InvalidAction（MAX rounds 不可
+    绕过，须 retry 新 orchestration）；不调度。"""
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="research_backflow",
+    )
+    runner = _ProjectionRunner(
+        {
+            "current_phase": "research_backflow",
+            "backflow_manual_reason": "research_backflow_limit_reached",
+        }
+    )
+    manager = FakeExecutionManager()
+    service = _resume_service(runner, manager)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == []
+
+
+async def test_resume_awaiting_stage5_rejected(monkeypatch) -> None:
+    """L：phase=awaiting_stage5（Stage5 人工裁决）→ InvalidAction，**与
+    HumanReviewDecision 分开**（走 act_on_orchestration / /actions）；不调度。"""
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="awaiting_stage5",
+    )
+    runner = _ProjectionRunner({"current_phase": "awaiting_stage5"})
+    manager = FakeExecutionManager()
+    service = _resume_service(runner, manager)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == []
+
+
+async def test_resume_no_progress_rejected(monkeypatch) -> None:
+    """reason=research_backflow_no_progress（genuine no-progress，非缺资料）→
+    不可恢复（InvalidAction）。"""
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="research_backflow",
+    )
+    runner = _ProjectionRunner(
+        {
+            "current_phase": "research_backflow",
+            "backflow_manual_reason": "research_backflow_no_progress",
+        }
+    )
+    manager = FakeExecutionManager()
+    service = _resume_service(runner, manager)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == []
+
+
+async def test_resume_not_waiting_human_rejected(monkeypatch) -> None:
+    """status ≠ waiting_human（running/completed…）→ AlreadyFinished（与 action 一致）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID, task_id=_TASK_ID, status="running", current_phase="stage4"
+    )
+    service = _service(sessionmaker)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(ResearchOrchestrationAlreadyFinished):
+        await service.resume_after_source_acquisition(_OID)
+
+
+async def test_resume_missing_orchestration_raises_not_found(monkeypatch) -> None:
+    service = _service(FakeSessionMaker())
+
+    async def fake_get(self, orchestration_id):
+        return None
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(ResearchOrchestrationNotFound):
+        await service.resume_after_source_acquisition(_OID)
+
+
+async def test_resume_unbound_runners_raises_runtime_error(monkeypatch) -> None:
+    """runner / manager 未绑定（unit 场景）→ RuntimeError（production factory 绑定）。"""
+    sessionmaker = FakeSessionMaker()
+    active = make_orchestration(
+        orchestration_id=_OID,
+        task_id=_TASK_ID,
+        status="waiting_human",
+        current_phase="waiting_manual",
+    )
+    service = _service(sessionmaker)
+
+    async def fake_get(self, orchestration_id):
+        return active
+
+    monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
+    with pytest.raises(RuntimeError):
+        await service.resume_after_source_acquisition(_OID)

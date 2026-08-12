@@ -25,9 +25,17 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.repositories.workflow_run_repository import WorkflowRunRepository
-from app.research_orchestration.contracts import OrchestrationPhase, OrchestrationStatus
+from app.research_orchestration.contracts import (
+    RESUME_KIND_PREPARE,
+    RESUME_KIND_SUPPLEMENTAL_RESEARCH,
+    OrchestrationPhase,
+    OrchestrationStatus,
+)
 from app.research_orchestration.dependencies import ResearchOrchestrationDependencies
-from app.research_orchestration.errors import ResearchOrchestrationAlreadyFinished
+from app.research_orchestration.errors import (
+    ResearchOrchestrationAlreadyFinished,
+    ResearchOrchestrationInvalidAction,
+)
 from app.research_orchestration.repository import ResearchOrchestrationRepository
 from app.research_orchestration.runner import ResearchOrchestrationRunner
 from app.research_orchestration.service import ChildRunResult
@@ -203,16 +211,24 @@ class _FakeChildService:
 
 class _FakeBackflowService:
     """backflow 节点的最小 fake：create_or_get_plan / verify request / fulfill /
-    build continuation request 全部确定性返回。"""
+    build continuation request 全部确定性返回。
+
+    `create_or_get_plan` 幂等 replay（7A.2B.3 spec：同 research_request_id → 同
+    plan id，**不新建 SupplementalPlan**）——K2 resume 断言据此。
+    """
 
     def __init__(self, plan_payload: dict | None = None) -> None:
         self.plan_requests: list = []
         self.fulfillments: list = []
+        self.plan_ids: list[UUID] = []
+        self._plan_ids: dict[UUID, UUID] = {}
         self.plan_payload = plan_payload if plan_payload is not None else {"need_specs": []}
 
     async def create_or_get_plan(self, research_backflow_request_id):
         self.plan_requests.append(research_backflow_request_id)
-        return SimpleNamespace(backflow_plan_id=uuid4(), plan_payload=self.plan_payload)
+        plan_id = self._plan_ids.setdefault(research_backflow_request_id, uuid4())
+        self.plan_ids.append(plan_id)
+        return SimpleNamespace(backflow_plan_id=plan_id, plan_payload=self.plan_payload)
 
     async def verify_research_request_integrity(self, research_request_id):
         return SimpleNamespace()  # fake executor 不读字段
@@ -232,15 +248,38 @@ class _FakeBackflowService:
 
 
 class _FakeBackflowExecutor:
-    """fake executor：返回配置的"新增"证据卡 id（verify_progress 据此判定）。"""
+    """fake executor：返回配置的"新增"证据卡 id + per-need manual reasons。
 
-    def __init__(self, *, new_card_ids: tuple[str, ...] = ()) -> None:
+    attempts 投影 `manual_required_reason`（7A Product Gate spec I）——executor
+    级 reasons 进 `backflow_executor_manual_reasons` state key；不配置 → attempts
+    空（既有 no_progress / structured 路径不变）。
+    """
+
+    def __init__(
+        self,
+        *,
+        new_card_ids: tuple[str, ...] = (),
+        manual_required_reasons: tuple[str, ...] = (),
+    ) -> None:
         self._new_card_ids = new_card_ids
+        self._manual_required_reasons = manual_required_reasons
         self.calls = 0
 
     async def execute_supplemental_research(self, verified_request, plan_payload):
         self.calls += 1
-        return SimpleNamespace(new_evidence_card_ids=tuple(UUID(c) for c in self._new_card_ids))
+        return SimpleNamespace(
+            new_evidence_card_ids=tuple(UUID(c) for c in self._new_card_ids),
+            attempts=tuple(
+                SimpleNamespace(
+                    need_code=f"need_{i}",
+                    status="manual_required",
+                    created_evidence_card_ids=(),
+                    replayed_evidence_card_ids=(),
+                    manual_required_reason=reason,
+                )
+                for i, reason in enumerate(self._manual_required_reasons)
+            ),
+        )
 
 
 class _Harness:
@@ -252,6 +291,8 @@ class _Harness:
         stage5_outcome: str,
         backflow_new_cards: tuple[str, ...] = (),
         backflow_plan_payload: dict | None = None,
+        preparation_ready: bool = True,
+        backflow_executor_manual_reasons: tuple[str, ...] = (),
     ) -> None:
         self.runs = _Runs()
         self.stage4_run_id = uuid4()
@@ -264,12 +305,16 @@ class _Harness:
         )
         self.child_service = _FakeChildService(self.stage4_run_id, self.stage5_run_id)
         self.backflow_service = _FakeBackflowService(plan_payload=backflow_plan_payload)
-        self.backflow_executor = _FakeBackflowExecutor(new_card_ids=backflow_new_cards)
+        self.backflow_executor = _FakeBackflowExecutor(
+            new_card_ids=backflow_new_cards,
+            manual_required_reasons=backflow_executor_manual_reasons,
+        )
+        self.preparation = _FakePreparation(ready=preparation_ready)
         self.deps = ResearchOrchestrationDependencies(
             sessionmaker=FakeSessionMaker(),
             plan_service=FakePlanService(),
             router=_FakeRouter(),
-            preparation=_FakePreparation(),
+            preparation=self.preparation,
             fulfillment=_FakeFulfillment(),
             child_service=self.child_service,
             stage4_runner=self.stage4_runner,
@@ -505,6 +550,202 @@ async def test_research_required_structured_manual_reason(monkeypatch) -> None:
     # structured manual → 不进入 Stage4/Stage5 backflow attempt（与 no_progress 同路径）。
     assert harness.child_service.stage4_attempts == [1]
     assert harness.child_service.stage5_attempts == [1]
+
+
+@pytest.mark.asyncio
+async def test_executor_source_acquisition_reason_propagates(monkeypatch) -> None:
+    """7A Product Gate spec I：executor 级 manual reason（缺 eligible source →
+    source_acquisition_required）投影进 `backflow_executor_manual_reasons`，
+    verify_progress 给稳定 reason source_acquisition_required（**不误报
+    research_backflow_no_progress**）→ resume API 可依此分类 K2。"""
+    harness = _Harness(
+        stage5_outcome="research_required",
+        backflow_new_cards=(),
+        backflow_executor_manual_reasons=("source_acquisition_required",),
+    )
+    harness.bind(monkeypatch)
+    final = await harness.runner().run_orchestration(_ORCH_ID)
+
+    assert harness.terminal_status is None
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.RESEARCH_BACKFLOW.value,
+    )
+    assert final["backflow_manual_reason"] == "source_acquisition_required"
+    assert final["backflow_round"] == 1
+    assert harness.backflow_executor.calls == 1
+    # 无新增卡 → 不进入 Stage4/Stage5 backflow attempt（与 no_progress 同路径）。
+    assert harness.child_service.stage4_attempts == [1]
+    assert harness.child_service.stage5_attempts == [1]
+
+
+@pytest.mark.asyncio
+async def test_k1_resume_waiting_manual_to_stage4(monkeypatch) -> None:
+    """K1（spec J）：waiting_manual（补资料前 not ready）→ 补资料后
+    resume_after_source_acquisition(kind=prepare) → prepare **重算** readiness →
+    ready → Stage4 attempt 1 → Stage5 → awaiting_stage5 暂停。同 thread 同
+    orchestration，不消耗 backflow round。"""
+    harness = _Harness(stage5_outcome="waiting_human", preparation_ready=False)
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    # 首启：prepare 不 ready → fulfill → prepare_again 仍 not ready → waiting_manual END。
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.WAITING_MANUAL.value,
+    )
+    assert final["current_phase"] == OrchestrationPhase.WAITING_MANUAL.value
+    assert harness.child_service.stage4_attempts == []
+    assert harness.child_service.stage5_attempts == []
+
+    # 补资料后 prepare ready → resume（kind=prepare）。
+    harness.preparation.ready = True
+    final2 = await runner.resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_PREPARE)
+
+    assert harness.terminal_status is None
+    assert final2["current_phase"] == OrchestrationPhase.AWAITING_STAGE5.value
+    assert final2["stage5_run_status"] == "waiting_human"
+    # 重路由 → Stage4 attempt 1 → Stage5 attempt 1（不重建、不重复）。
+    assert harness.child_service.stage4_attempts == [1]
+    assert harness.child_service.stage5_attempts == [1]
+    assert harness.stage4_runner.execute_calls == 1
+    assert harness.stage5_runner.execute_calls == 1
+    # 无 backflow：round 从未设置。
+    assert final2.get("backflow_round") is None
+
+
+@pytest.mark.asyncio
+async def test_k1_resume_still_not_ready_stays_waiting_manual(monkeypatch) -> None:
+    """K1 仍缺资料：resume(kind=prepare) 后 prepare 仍 not ready → 再次
+    waiting_manual END（不创建任何 child、不进入 Stage4）。"""
+    harness = _Harness(stage5_outcome="waiting_human", preparation_ready=False)
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert final["current_phase"] == OrchestrationPhase.WAITING_MANUAL.value
+
+    # 仍未补足资料 → resume 后仍 waiting_manual。
+    final2 = await runner.resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_PREPARE)
+    assert harness.terminal_status is None
+    assert final2["current_phase"] == OrchestrationPhase.WAITING_MANUAL.value
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.WAITING_MANUAL.value,
+    )
+    assert harness.child_service.stage4_attempts == []
+    assert harness.child_service.stage5_attempts == []
+    assert harness.stage4_runner.execute_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_k2_resume_same_round_no_progress(monkeypatch) -> None:
+    """K2（spec J/K2）：research_backflow + reason=source_acquisition_required →
+    resume(kind=supplemental_research) 同 research_request_id + 同 backflow_round
+    重跑 execute_supplemental_research（不 round+1、不新建 plan）。仍无新增卡 →
+    再次 research_backflow_manual，round 保持 1。"""
+    harness = _Harness(
+        stage5_outcome="research_required",
+        backflow_new_cards=(),
+        backflow_executor_manual_reasons=("source_acquisition_required",),
+    )
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert final["backflow_manual_reason"] == "source_acquisition_required"
+    assert final["backflow_round"] == 1
+
+    # 补资料后重跑（executor 仍无新增卡 → 再 manual_required）。
+    final2 = await runner.resume_after_source_acquisition(
+        _ORCH_ID, RESUME_KIND_SUPPLEMENTAL_RESEARCH
+    )
+    assert harness.terminal_status is None
+    assert final2["backflow_round"] == 1  # 同 round，不 round+1
+    assert final2["backflow_manual_reason"] == "source_acquisition_required"
+    assert harness.backflow_executor.calls == 2
+    assert harness.child_service.stage4_attempts == [1]
+    assert harness.child_service.stage5_attempts == [1]
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.RESEARCH_BACKFLOW.value,
+    )
+    # create_or_get_plan replay：两次执行同一 plan id（不新建 SupplementalPlan）。
+    assert len(set(harness.backflow_service.plan_ids)) == 1
+
+
+@pytest.mark.asyncio
+async def test_k2_resume_progress_consumes_same_plan(monkeypatch) -> None:
+    """K2 progress：resume 后 executor 产出新增卡 → verify_progress 有进度 →
+    prepare_updated_analysis 创建 Stage4 attempt 2（同 round 内消费新增证据）→
+    继续正常 backflow loop。plan replay 不新建（同一 plan id），最终仍受 MAX
+    rounds 限制落到 limit_reached（K3 语义保留，不绕过）。"""
+    harness = _Harness(
+        stage5_outcome="research_required",
+        backflow_new_cards=(),
+        backflow_executor_manual_reasons=("source_acquisition_required",),
+    )
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert final["backflow_manual_reason"] == "source_acquisition_required"
+    assert final["backflow_round"] == 1
+
+    # 补资料 → executor 开始产出新增证据卡（manual reason 清空）。
+    harness.backflow_executor._new_card_ids = ("00000000-0000-0000-0000-0000000000b1",)
+    harness.backflow_executor._manual_required_reasons = ()
+
+    final2 = await runner.resume_after_source_acquisition(
+        _ORCH_ID, RESUME_KIND_SUPPLEMENTAL_RESEARCH
+    )
+    # 有进度 → Stage4 attempt 2 → Stage5 attempt 2 又 research_required → round 2 →
+    # 继续 → 达 MAX → limit_reached END（K3 不绕过）。
+    assert final2["backflow_manual_reason"] == "research_backflow_limit_reached"
+    assert final2["backflow_round"] == 2
+    assert harness.child_service.stage4_attempts == [1, 2, 3]
+    assert harness.child_service.stage5_attempts == [1, 2, 3]
+    assert harness.backflow_executor.calls == 3  # 首启 + resume + round2
+    # create_or_get_plan replay 幂等：全部同一 plan id（不新建 SupplementalPlan）。
+    assert len(set(harness.backflow_service.plan_ids)) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_terminal_rejected(monkeypatch) -> None:
+    """terminal orchestration → resume 拒绝（AlreadyFinished），与 run 一致。"""
+    harness = _Harness(stage5_outcome="completed")
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    await runner.run_orchestration(_ORCH_ID)
+    assert harness.terminal_status == "completed"
+
+    with pytest.raises(ResearchOrchestrationAlreadyFinished):
+        await runner.resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_PREPARE)
+
+
+@pytest.mark.asyncio
+async def test_resume_unsupported_kind_rejected(monkeypatch) -> None:
+    """未知 resume kind → InvalidAction（runner 层防御；正常 kind 由 service 分类）。"""
+    harness = _Harness(stage5_outcome="waiting_human", preparation_ready=False)
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert final["current_phase"] == OrchestrationPhase.WAITING_MANUAL.value
+
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await runner.resume_after_source_acquisition(_ORCH_ID, "bogus_kind")
+
+
+@pytest.mark.asyncio
+async def test_resume_without_checkpoint_rejected(monkeypatch) -> None:
+    """无顶层 checkpoint（从未跑过）→ resume 拒绝（InvalidAction，无可续接）。"""
+    harness = _Harness(stage5_outcome="waiting_human")
+    harness.bind(monkeypatch)
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await harness.runner().resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_PREPARE)
 
 
 @pytest.mark.asyncio

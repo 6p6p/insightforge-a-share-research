@@ -562,6 +562,15 @@ def make_execute_supplemental_research_node(deps: ResearchOrchestrationDependenc
             OrchestrationStatus.RUNNING.value,
             _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         )
+        # 7A Product Gate spec I：executor 级 per-need manual reasons 聚合投影
+        # （保留首次出现的稳定顺序；不保存 attempt 明细 / query）。与 plan 级
+        # `backflow_manual_reasons` 分开——verify_progress 理由优先级：
+        # plan reasons > executor reasons > research_backflow_no_progress。
+        executor_reasons = [
+            attempt.manual_required_reason
+            for attempt in result.attempts
+            if attempt.manual_required_reason is not None
+        ]
         return {
             "backflow_new_evidence_card_ids": [
                 str(card_id) for card_id in result.new_evidence_card_ids
@@ -571,6 +580,7 @@ def make_execute_supplemental_research_node(deps: ResearchOrchestrationDependenc
             # 使其给稳定 manual reason（structured_data_refresh_required）而非
             # 误报 research_backflow_no_progress。
             "backflow_manual_reasons": plan.plan_payload.get("manual_required_reasons", []),
+            "backflow_executor_manual_reasons": executor_reasons,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         }
 
@@ -592,15 +602,24 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
 
     async def verify_progress(state) -> dict:
         has_progress = bool(state.get("backflow_new_evidence_card_ids"))
-        # 7A.2B.3 scope 冻结：无新增证据卡且 plan 已投影 structured 需求
-        # （financial/macro/valuation refresh）→ 给稳定 manual reason
-        # （structured_data_refresh_required），**不误报 research_backflow_no_progress**；
-        # 否则维持 research_backflow_no_progress。
+        # 无进度 → manual_required 稳定 reason，优先级：
+        #   plan 级 structured 需求（backflow_manual_reasons）>
+        #   executor 级 manual reasons（backflow_executor_manual_reasons，7A Product
+        #     Gate spec I/J：缺 eligible source → source_acquisition_required、
+        #     index/evidence 未就绪 → 对应 reason）>
+        #   research_backflow_no_progress。
+        # 不误报 no_progress——resume_after_source_acquisition 依此区分
+        # source_acquisition_required（可补资料后同线程恢复）与 genuine no-progress。
         manual_reasons = state.get("backflow_manual_reasons") or []
+        executor_reasons = state.get("backflow_executor_manual_reasons") or []
         manual_reason = (
             manual_reasons[0]
             if (not has_progress and manual_reasons)
-            else (None if has_progress else RESEARCH_BACKFLOW_NO_PROGRESS)
+            else (
+                executor_reasons[0]
+                if (not has_progress and executor_reasons)
+                else (None if has_progress else RESEARCH_BACKFLOW_NO_PROGRESS)
+            )
         )
         await _persist_phase(
             deps.sessionmaker,

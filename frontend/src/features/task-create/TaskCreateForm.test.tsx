@@ -8,6 +8,7 @@ import { TaskCreateForm } from './TaskCreateForm';
 const mocks = vi.hoisted(() => ({
   createTask: vi.fn(),
   executeTask: vi.fn(),
+  createOrchestration: vi.fn(),
 }));
 
 vi.mock('../../api/tasks', () => ({
@@ -21,6 +22,10 @@ vi.mock('../../api/tasks', () => ({
   },
 }));
 
+vi.mock('../../api/orchestrations', () => ({
+  createOrchestration: mocks.createOrchestration,
+}));
+
 async function setRangeDate(placeholder: string, value: string): Promise<void> {
   const input = screen.getByPlaceholderText(placeholder);
   await userEvent.clear(input);
@@ -31,10 +36,11 @@ async function setRangeDate(placeholder: string, value: string): Promise<void> {
 beforeEach(() => {
   mocks.createTask.mockClear();
   mocks.executeTask.mockClear();
+  mocks.createOrchestration.mockClear();
 });
 
-describe('TaskCreateForm（spec J）', () => {
-  it('填写基础字段后提交 → createTask 收到正确 payload 并回调 onCreated', async () => {
+describe('TaskCreateForm（spec J + 7A Product Gate spec M）', () => {
+  it('填写基础字段后提交 → createTask + 默认「自动开始研究」（createOrchestration）', async () => {
     mocks.createTask.mockResolvedValue({
       task_id: 'task-1',
       company_query: '贵州茅台',
@@ -50,6 +56,7 @@ describe('TaskCreateForm（spec J）', () => {
       created_at: '2026-08-11T00:00:00Z',
       updated_at: '2026-08-11T00:00:00Z',
     });
+    mocks.createOrchestration.mockResolvedValue({ orchestration_id: 'orch-1' });
     const onCreated = vi.fn();
 
     renderWithProviders(<TaskCreateForm onCreated={onCreated} />);
@@ -68,7 +75,8 @@ describe('TaskCreateForm（spec J）', () => {
 
     await userEvent.type(screen.getByLabelText('研究问题'), '2026年营收是否合理？');
 
-    await userEvent.click(screen.getByRole('button', { name: '创建任务' }));
+    // autoStart 默认 ON → 按钮文案「创建并自动研究」。
+    await userEvent.click(screen.getByRole('button', { name: '创建并自动研究' }));
 
     await waitFor(() => expect(mocks.createTask).toHaveBeenCalledTimes(1));
     expect(mocks.createTask).toHaveBeenCalledWith({
@@ -80,11 +88,35 @@ describe('TaskCreateForm（spec J）', () => {
       include_relative_valuation: false,
       require_plan_approval: true,
     });
+    await waitFor(() => expect(mocks.createOrchestration).toHaveBeenCalledWith('task-1'));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith('task-1'));
     expect(mocks.executeTask).not.toHaveBeenCalled();
   });
 
-  it('启用执行研究后提交 → 追加 executeTask 调用', async () => {
+  it('关闭「自动开始研究」→ 仅创建任务，不启动编排', async () => {
+    mocks.createTask.mockResolvedValue({ task_id: 'task-3' });
+    const onCreated = vi.fn();
+
+    renderWithProviders(<TaskCreateForm onCreated={onCreated} />);
+
+    await userEvent.click(screen.getByRole('switch', { name: '是否自动开始研究' }));
+    await userEvent.type(screen.getByLabelText('公司名称 / 代码'), '贵州茅台');
+    await setRangeDate('开始日期', '2023-01-01');
+    await setRangeDate('结束日期', '2026-08-10');
+    const combobox = screen.getByRole('combobox', { name: '研究模块' });
+    await userEvent.click(combobox);
+    await screen.findByText('财务');
+    await userEvent.click(screen.getByText('财务'));
+
+    await userEvent.click(screen.getByRole('button', { name: '创建任务' }));
+
+    await waitFor(() => expect(mocks.createTask).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('task-3'));
+    expect(mocks.createOrchestration).not.toHaveBeenCalled();
+    expect(mocks.executeTask).not.toHaveBeenCalled();
+  });
+
+  it('启用显式 work plan 后提交 → executeTask 优先，不调用自动编排', async () => {
     mocks.createTask.mockResolvedValue({ task_id: 'task-2' });
     mocks.executeTask.mockResolvedValue({ run_id: 'run-1', status: 'running' });
     const onCreated = vi.fn();
@@ -128,5 +160,6 @@ describe('TaskCreateForm（spec J）', () => {
         },
       ],
     });
+    expect(mocks.createOrchestration).not.toHaveBeenCalled();
   });
 });

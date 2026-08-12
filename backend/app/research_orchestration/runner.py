@@ -31,12 +31,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.research_backflow.errors import ResearchBackflowNoProgress
 from app.research_orchestration.contracts import (
     RESEARCH_BACKFLOW_NO_PROGRESS,
+    RESUME_KIND_PREPARE,
+    RESUME_KIND_SUPPLEMENTAL_RESEARCH,
     OrchestrationPhase,
     OrchestrationStatus,
 )
 from app.research_orchestration.dependencies import ResearchOrchestrationDependencies
 from app.research_orchestration.errors import (
     ResearchOrchestrationAlreadyFinished,
+    ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
 )
 from app.research_orchestration.graph import (
@@ -127,6 +130,68 @@ class ResearchOrchestrationRunner:
             }
             final_state = await self._stream(graph, config, initial_state=initial_state)
 
+        if final_state is not None and not final_state.values:
+            return {}
+        return dict(final_state.values) if final_state is not None else {}
+
+    async def resume_after_source_acquisition(self, orchestration_id: UUID, kind: str) -> dict:
+        """受控补资料后同线程恢复（7A Product Gate spec J/K；K1/K2/K3）。
+
+        `run_orchestration` 的 awaiting_stage5 continuation 之外的另一条恢复入口，
+        **不换顶层 thread / 不新建 orchestration**（spec O）：
+        - kind=RESUME_KIND_PREPARE（K1，waiting_manual）：`aupdate_state(as_node=
+          ensure_route)` 把 next 重新指向 prepare，prepare body **重算** readiness
+          → ready→Stage4 attempt 1 | 仍缺→waiting_manual END（不消耗新 round）；
+        - kind=RESUME_KIND_SUPPLEMENTAL_RESEARCH（K2，research_backflow）：
+          `aupdate_state(as_node=plan_supplemental_research)` 把 next 重新指向
+          execute_supplemental_research，body 重跑——`create_or_get_plan` replay
+          不新建 plan、注入 `{}` **不递增 backflow_round**（同 research_request_id
+          + 同 round，spec K2）。
+        terminal 守卫与 run_orchestration 一致（terminal → AlreadyFinished）；无
+        顶层 checkpoint → InvalidAction（无可续接状态）。kind 由 service 按
+        checkpoint 分类显式传入（K3 limit_reached / awaiting_stage5 等不可恢复
+        场景在 service 层拦截，不进入这里）。
+        """
+        async with self._sessionmaker() as session:
+            orchestration = await ResearchOrchestrationRepository(session).get_by_id(
+                orchestration_id
+            )
+        if orchestration is None:
+            raise ResearchOrchestrationNotFound()
+        if orchestration.status in _TERMINAL_ORCHESTRATION_STATUSES:
+            raise ResearchOrchestrationAlreadyFinished()
+
+        checkpointer = await self._checkpoint_manager.get_checkpointer()
+        graph = build_top_level_research_orchestration_graph(self._dependencies, checkpointer)
+        config = {"configurable": {"thread_id": str(orchestration_id)}}
+
+        prior = await graph.aget_state(config)
+        if prior is None or not prior.values:
+            # 防御直接调用：waiting_manual / research_backflow 必然已有顶层
+            # checkpoint（service 分类也会拦截）。
+            raise ResearchOrchestrationInvalidAction("no top-level checkpoint to resume from")
+
+        phase = prior.values.get("current_phase") or orchestration.current_phase
+        await self._mark_running(orchestration_id, phase=phase)
+        if kind == RESUME_KIND_PREPARE:
+            # K1：next → prepare（注入 ensure_route 的真实输出 current_phase 值）。
+            await graph.aupdate_state(
+                config,
+                {"current_phase": OrchestrationPhase.ROUTING.value},
+                as_node="ensure_route",
+            )
+        elif kind == RESUME_KIND_SUPPLEMENTAL_RESEARCH:
+            # K2：next → execute_supplemental_research；注入 {}（不写 round /
+            # plan 等 channel）→ 不递增 backflow_round、replay 不新建 plan。
+            await graph.aupdate_state(
+                config,
+                {"current_phase": OrchestrationPhase.RESEARCH_BACKFLOW.value},
+                as_node="plan_supplemental_research",
+            )
+        else:
+            raise ResearchOrchestrationInvalidAction(f"unsupported resume kind: {kind}")
+
+        final_state = await self._stream(graph, config, initial_state=None)
         if final_state is not None and not final_state.values:
             return {}
         return dict(final_state.values) if final_state is not None else {}

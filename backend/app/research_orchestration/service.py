@@ -27,24 +27,27 @@
   `run_orchestration` 继续顶层（continuation → `route_stage5_result`：approve →
   complete / rewrite → 重新 awaiting_stage5 / research → pause_for_research 只
   持久化 research_request_id + phase=research_backflow，**不做 backflow 循环**，
-  spec P）；`cancel` 委托 `cancel_orchestration`。runners 未绑定 → RuntimeError。
+  spec P）；`cancel` 委托 `cancel_orchestration`。runners 未绑定 → RuntimeError；
+- **resume_after_source_acquisition(orchestration_id)**（7A Product Gate spec
+  J/K/L）：受控补资料后**同线程恢复**（不换顶层 thread / 不新建 orchestration）。
+  服务端读 checkpoint 分类：waiting_manual → K1 prepare 重路由；research_backflow
+  且 reason ∈ RESUME_BACKFLOW_MANUAL_REASONS → K2 同 round 重跑补充研究；
+  reason=limit_reached → K3 拒绝；awaiting_stage5 → L 拒绝（与 HumanReviewDecision
+  分开）。后台 `schedule_resume`，返回投影供轮询。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
-
-if TYPE_CHECKING:  # pragma: no cover — 仅类型注解
-    from app.research_orchestration.execution_manager import ResearchOrchestrationExecutionManager
-    from app.research_orchestration.runner import ResearchOrchestrationRunner
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ActiveWorkflowRunExists
+from app.core.logging import get_logger
 from app.db.models.research_orchestration import (
     ResearchOrchestrationChildModel,
     ResearchOrchestrationModel,
@@ -55,6 +58,10 @@ from app.research_orchestration.contracts import (
     ORCHESTRATION_SCHEMA_VERSION,
     ORCHESTRATOR_NAME,
     ORCHESTRATOR_VERSION,
+    RESEARCH_BACKFLOW_LIMIT_REACHED,
+    RESUME_BACKFLOW_MANUAL_REASONS,
+    RESUME_KIND_PREPARE,
+    RESUME_KIND_SUPPLEMENTAL_RESEARCH,
     ChildStage,
     OrchestrationPhase,
     OrchestrationStatus,
@@ -86,6 +93,23 @@ from app.stage4.contracts import Stage4WorkflowRequest
 from app.stage4.runner import Stage4WorkflowRunner
 from app.stage5.contracts import Stage5WorkflowRequest
 from app.stage5.runner import Stage5WorkflowRunner
+
+if TYPE_CHECKING:  # pragma: no cover — 仅类型注解
+    from app.research_orchestration.execution_manager import ResearchOrchestrationExecutionManager
+    from app.research_orchestration.runner import ResearchOrchestrationRunner
+
+logger = get_logger("app.research_orchestration_service")
+
+
+def _uuid_or_none(value) -> UUID | None:
+    """checkpoint state 的 id 是 str → UUID；非法 / None → None。"""
+    if value is None:
+        return None
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError):
+        return None
+
 
 _ACTIVE_RUN_VALUES = {status.value for status in ACTIVE_WORKFLOW_RUN_STATUSES}
 
@@ -130,7 +154,13 @@ class OrchestrationStartOutcome:
 
 @dataclass(frozen=True)
 class ResearchOrchestrationResult:
-    """一次 top-level orchestration 的只读摘要（不含 plan / child 正文）。"""
+    """一次 top-level orchestration 的只读摘要（不含 plan / child 正文）。
+
+    7A Product Gate spec O：checkpoint 派生字段（current_child_run_id /
+    backflow_round / research_request_id / manual_reason / missing_need_codes）
+    在 runner 绑定时从顶层 checkpoint 补充（`_project`），不放过 Evidence body /
+    prompt / reasoning。
+    """
 
     orchestration_id: UUID
     task_id: UUID
@@ -149,6 +179,13 @@ class ResearchOrchestrationResult:
     attempt_no: int
     retry_of_orchestration_id: UUID | None
     replayed: bool = False
+    # 7A Product Gate spec O：checkpoint 派生（可空，未进入对应阶段 / runner 未绑定时 None）。
+    current_child_run_id: UUID | None = None
+    backflow_round: int | None = None
+    research_request_id: UUID | None = None
+    manual_reason: str | None = None
+    missing_need_codes: list[str] | None = None
+    updated_at: datetime | None = None
 
 
 class ResearchOrchestrationService:
@@ -186,6 +223,45 @@ class ResearchOrchestrationService:
     def execution_manager(self) -> ResearchOrchestrationExecutionManager | None:
         """只读：lifespan close 复用同一 manager（cancel 本地 task 用）。"""
         return self._execution_manager
+
+    async def _project(
+        self, orchestration: ResearchOrchestrationModel
+    ) -> ResearchOrchestrationResult:
+        """row + 顶层 checkpoint 的完整状态投影（7A Product Gate spec O）。
+
+        checkpoint 派生字段（current_child_run_id / backflow_round /
+        research_request_id / backflow_manual_reason / missing_need_codes）只在
+        `_orchestration_runner` 绑定时读取；runner 未绑定（unit 测试）或 checkpoint
+        读取失败 → 这些字段保持 None（row 本身是权威，不因投影失败降级）。
+        **不放过** Evidence body / prompt / reasoning。
+        """
+        base = self._to_result(orchestration)
+        if self._orchestration_runner is None:
+            return base
+        try:
+            checkpoint = await self._orchestration_runner.read_orchestration_checkpoint(
+                orchestration.orchestration_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_orchestration_checkpoint_read_failed",
+                orchestration_id=str(orchestration.orchestration_id),
+                error_type=type(exc).__name__,
+            )
+            return base
+        return replace(
+            base,
+            current_child_run_id=_uuid_or_none(checkpoint.get("current_child_run_id")),
+            backflow_round=checkpoint.get("backflow_round"),
+            research_request_id=_uuid_or_none(checkpoint.get("research_request_id")),
+            manual_reason=checkpoint.get("backflow_manual_reason"),
+            missing_need_codes=checkpoint.get("missing_need_codes"),
+            updated_at=(
+                orchestration.updated_at.astimezone(UTC)
+                if orchestration.updated_at is not None
+                else None
+            ),
+        )
 
     # ------------------------------------------------------------------ create
 
@@ -275,7 +351,7 @@ class ResearchOrchestrationService:
             latest = None if active is not None else await repo.get_latest_for_task(task_id)
 
         if active is not None:
-            result = self._to_result(active)
+            result = await self._project(active)
             scheduled = False
             if (
                 active.status == OrchestrationStatus.PENDING.value
@@ -301,7 +377,7 @@ class ResearchOrchestrationService:
         # 无 active：latest 只可能是 terminal（completed / failed / cancelled）。
         if latest.status == OrchestrationStatus.COMPLETED.value:
             return OrchestrationStartOutcome(
-                orchestration=self._to_result(latest), created=False, scheduled=False
+                orchestration=await self._project(latest), created=False, scheduled=False
             )
         raise ResearchOrchestrationRetryRequired()
 
@@ -406,7 +482,7 @@ class ResearchOrchestrationService:
             )
         if orchestration is None:
             raise ResearchOrchestrationNotFound()
-        return self._to_result(orchestration)
+        return await self._project(orchestration)
 
     async def get_current_orchestration(self, task_id: UUID) -> ResearchOrchestrationResult:
         """task 的 `current` 状态投影（spec U）：active 优先，否则最近一条。
@@ -420,7 +496,7 @@ class ResearchOrchestrationService:
                 orchestration = await repo.get_latest_for_task(task_id)
         if orchestration is None:
             raise ResearchOrchestrationNotFound()
-        return self._to_result(orchestration)
+        return await self._project(orchestration)
 
     # ------------------------------------------------------------------ verify
 
@@ -588,6 +664,68 @@ class ResearchOrchestrationService:
             child.workflow_run_id, decision=action, comment=comment
         )
         await self._orchestration_runner.run_orchestration(orchestration_id)
+        return await self.get_orchestration(orchestration_id)
+
+    async def resume_after_source_acquisition(
+        self, orchestration_id: UUID
+    ) -> ResearchOrchestrationResult:
+        """受控补资料后同线程恢复（7A Product Gate spec J/K/L）。
+
+        **仅 waiting_human** orchestration；服务端先读顶层 checkpoint 分类
+        （错误**同步**抛给调用方），再后台 `schedule_resume`（K1/K2 可能跑完整
+        Stage4，长任务不阻塞 API，前端轮询投影）：
+        - phase=waiting_manual → **K1** kind=prepare：ensure_route → prepare 重算
+          route_readiness（补资料后）→ ready→Stage4 attempt 1 | 仍缺→waiting_manual
+          END（同 orchestration_id + 同顶层 thread，不换 thread）；
+        - phase=research_backflow 且 `backflow_manual_reason` ∈
+          RESUME_BACKFLOW_MANUAL_REASONS（source_acquisition_required /
+          structured_data_refresh_required）→ **K2** kind=supplemental_research：
+          同 research_request_id + 同 backflow_round 重跑 execute_supplemental_
+          research（不 round+1、不新建 SupplementalPlan）；
+        - reason=research_backflow_limit_reached → **K3 拒绝**（InvalidAction：
+          MAX rounds 不可绕过，须 retry 新 orchestration）；
+        - phase=awaiting_stage5（Stage5 人工裁决）→ **L：InvalidAction，与
+          HumanReviewDecision 分开**（走 act_on_orchestration）。
+        守卫：orchestration 不存在 → NotFound；status ≠ waiting_human →
+        AlreadyFinished；runner / manager 未绑定 → RuntimeError（production
+        factory 绑定）。
+        """
+        async with self._sessionmaker() as session:
+            orchestration = await ResearchOrchestrationRepository(session).get_by_id(
+                orchestration_id
+            )
+        if orchestration is None:
+            raise ResearchOrchestrationNotFound()
+        if orchestration.status != OrchestrationStatus.WAITING_HUMAN.value:
+            raise ResearchOrchestrationAlreadyFinished()
+        if self._orchestration_runner is None or self._execution_manager is None:
+            raise RuntimeError("orchestration resume runner not bound")
+
+        checkpoint = await self._orchestration_runner.read_orchestration_checkpoint(
+            orchestration_id
+        )
+        phase = checkpoint.get("current_phase") or orchestration.current_phase
+        if phase == OrchestrationPhase.WAITING_MANUAL.value:
+            kind = RESUME_KIND_PREPARE
+        elif phase == OrchestrationPhase.RESEARCH_BACKFLOW.value:
+            reason = checkpoint.get("backflow_manual_reason")
+            if reason == RESEARCH_BACKFLOW_LIMIT_REACHED:
+                raise ResearchOrchestrationInvalidAction(
+                    "research backflow limit reached; retry with a new orchestration"
+                )
+            if reason not in RESUME_BACKFLOW_MANUAL_REASONS:
+                raise ResearchOrchestrationInvalidAction(
+                    f"research backflow manual reason not resumable: {reason or 'unknown'}"
+                )
+            kind = RESUME_KIND_SUPPLEMENTAL_RESEARCH
+        else:
+            # 含 awaiting_stage5（Stage5 人工裁决）——L：走 act_on_orchestration，
+            # 不进入 source acquisition resume。
+            raise ResearchOrchestrationInvalidAction(
+                "orchestration is not waiting for source acquisition resume"
+            )
+
+        self._execution_manager.schedule_resume(orchestration_id, kind)
         return await self.get_orchestration(orchestration_id)
 
     # ------------------------------------------------------------------ internal

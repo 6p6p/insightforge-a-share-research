@@ -17,7 +17,12 @@ ORCHESTRATION_ACTION = Literal["approve", "rewrite", "research", "cancel", "retr
 
 
 class ResearchOrchestrationResponse(BaseModel):
-    """orchestration 状态投影（不携带 plan / child 正文）。"""
+    """orchestration 状态投影（7A Product Gate spec O；不携带 plan / child 正文）。
+
+    checkpoint 派生字段（current_child_run_id / backflow_round / research_request_id /
+    manual_reason / missing_need_codes）由 service `_project` 从顶层 checkpoint
+    补充，**不放过** Evidence body / prompt / reasoning。
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -34,6 +39,13 @@ class ResearchOrchestrationResponse(BaseModel):
     completed_at: datetime | None
     created_at: datetime
     replayed: bool = False
+    # 7A Product Gate spec O：checkpoint 派生（可空，未进入对应阶段 / 无 checkpoint 时 None）。
+    current_child_run_id: UUID | None = None
+    backflow_round: int | None = None
+    research_request_id: UUID | None = None
+    manual_reason: str | None = None
+    missing_need_codes: list[str] | None = None
+    updated_at: datetime | None = None
 
 
 class ResearchOrchestrationActionRequest(BaseModel):

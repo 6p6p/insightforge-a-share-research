@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   getTaskReviews: vi.fn(),
   getEvidenceCitation: vi.fn(),
   getClaimCitation: vi.fn(),
+  getCurrentOrchestration: vi.fn(),
   useTaskEvents: vi.fn(),
 }));
 
@@ -54,6 +55,15 @@ vi.mock('../api/tasks', () => ({
 
 vi.mock('../hooks/useTaskEvents', () => ({
   useTaskEvents: mocks.useTaskEvents,
+}));
+
+vi.mock('../api/orchestrations', () => ({
+  orchestrationKeys: {
+    all: ['orchestrations'],
+    current: (id: string) => ['orchestrations', 'current', id],
+    detail: (id: string) => ['orchestrations', 'detail', id],
+  },
+  getCurrentOrchestration: mocks.getCurrentOrchestration,
 }));
 
 vi.mock('../features/workflow-progress/StartResearchPanel', () => ({
@@ -115,6 +125,7 @@ beforeEach(() => {
   mocks.getTaskReviews.mockReset();
   mocks.getEvidenceCitation.mockReset();
   mocks.getClaimCitation.mockReset();
+  mocks.getCurrentOrchestration.mockReset();
   mocks.useTaskEvents.mockReset();
   mocks.useTaskEvents.mockReturnValue({
     events: [],
@@ -123,6 +134,8 @@ beforeEach(() => {
     error: null,
   });
   mocks.getTaskWorkspace.mockResolvedValue(workspaceData);
+  // 默认无编排（404 语义 → 组件吞掉返回 null，不渲染 banner）。
+  mocks.getCurrentOrchestration.mockResolvedValue(null);
 });
 
 describe('TaskWorkspacePage artifact tabs（Stage 6B.1）', () => {

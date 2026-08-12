@@ -1,8 +1,9 @@
-/** Task Create 表单（spec J）。
+/** Task Create 表单（spec J + 7A Product Gate spec M）。
 
 Stage6A 只做实际后端当前支持的字段：公司、研究起止日期、模块、研究问题、
-相对估值开关。提交后 create task → （可选）显式 work plan execute → 跳转
-/tasks/:taskId。
+相对估值开关。提交后 create task → 默认「创建后自动开始研究」（POST
+/tasks/{id}/orchestrations，一键入口）；高级「创建后执行研究」仍保留显式
+Stage 4 work plan（开启时优先于自动研究）。跳转 /tasks/:taskId。
  */
 
 import { useState } from 'react';
@@ -20,6 +21,7 @@ import {
 } from 'antd';
 import type { Dayjs } from 'dayjs';
 
+import { createOrchestration } from '../../api/orchestrations';
 import { createTask, executeTask } from '../../api/tasks';
 import { ApiError } from '../../types/api';
 import { type ResearchModule, type TaskCreateRequest } from '../../types/task';
@@ -51,6 +53,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
   const [form] = Form.useForm<FormValues>();
   const [workItems, setWorkItems] = useState<AnalysisWorkItem[]>([]);
   const [enableExecute, setEnableExecute] = useState(false);
+  const [autoStart, setAutoStart] = useState(true);
 
   const mutation = useMutation({
     mutationFn: async (values: FormValues) => {
@@ -66,8 +69,11 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
         require_plan_approval: true,
       };
       const task = await createTask(payload);
+      // 显式 work plan 优先；否则默认走自动研究编排（一键入口）。
       if (enableExecute && workItems.length > 0) {
         await executeTask(task.task_id, { analysis_work_items: workItems });
+      } else if (autoStart) {
+        await createOrchestration(task.task_id);
       }
       return task.task_id;
     },
@@ -80,6 +86,8 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
 
   const errorMessage =
     mutation.error instanceof ApiError ? mutation.error.message : mutation.error?.message;
+  const willExecute = enableExecute && workItems.length > 0;
+  const submitLabel = willExecute ? '创建并执行研究' : autoStart ? '创建并自动研究' : '创建任务';
 
   return (
     <Card title="新建研究任务">
@@ -130,13 +138,23 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
           <Switch />
         </Form.Item>
 
-        <Form.Item label="执行研究（可选）">
+        <Form.Item label="自动研究">
+          <Switch
+            checked={autoStart}
+            onChange={setAutoStart}
+            checkedChildren="创建后自动开始研究"
+            unCheckedChildren="仅创建任务"
+            aria-label="是否自动开始研究"
+          />
+        </Form.Item>
+
+        <Form.Item label="执行研究（高级，可选）">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Switch
               checked={enableExecute}
               onChange={setEnableExecute}
-              checkedChildren="创建后执行研究"
-              unCheckedChildren="仅创建任务"
+              checkedChildren="显式 work plan"
+              unCheckedChildren="不显式执行"
               aria-label="是否执行研究"
             />
             {enableExecute ? (
@@ -144,7 +162,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
                 <Alert
                   type="info"
                   showIcon
-                  message="Stage 6A 不包含自动 Source Planning。请显式填写 Stage 4 work plan（引用已入库的真实证据 / 计算 / 对比 ID）。"
+                  message="显式 work plan 优先于自动研究：需引用已入库的真实证据 / 计算 / 对比 ID（Stage 6A 能力，不含自动 Source Planning）。"
                 />
                 <WorkPlanEditor value={workItems} onChange={setWorkItems} />
               </>
@@ -162,7 +180,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
           loading={mutation.isPending}
           disabled={enableExecute && workItems.length === 0}
         >
-          {enableExecute && workItems.length > 0 ? '创建并执行研究' : '创建任务'}
+          {submitLabel}
         </Button>
       </Form>
     </Card>

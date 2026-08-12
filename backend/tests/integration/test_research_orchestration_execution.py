@@ -117,15 +117,29 @@ class _ScriptedRunner:
     - complete：mark_completed。
     """
 
-    def __init__(self, sessionmaker, *steps: str) -> None:
+    def __init__(self, sessionmaker, *steps: str, checkpoint: dict | None = None) -> None:
         self._sessionmaker = sessionmaker
         self._steps = steps or ("complete",)
         self._index = 0
         self.gate = threading.Event()
         self.run_calls: list[UUID] = []
+        self.resume_calls: list[tuple[UUID, str]] = []
+        self.checkpoint = checkpoint if checkpoint is not None else {}
+        self.read_calls: list[UUID] = []
+
+    async def read_orchestration_checkpoint(self, orchestration_id: UUID) -> dict:
+        self.read_calls.append(orchestration_id)
+        return self.checkpoint
 
     async def run_orchestration(self, orchestration_id: UUID) -> dict:
         self.run_calls.append(orchestration_id)
+        return await self._execute_step(orchestration_id)
+
+    async def resume_after_source_acquisition(self, orchestration_id: UUID, kind: str) -> dict:
+        self.resume_calls.append((orchestration_id, kind))
+        return await self._execute_step(orchestration_id)
+
+    async def _execute_step(self, orchestration_id: UUID) -> dict:
         kind = self._steps[min(self._index, len(self._steps) - 1)]
         self._index += 1
         if kind == "block":
@@ -248,6 +262,100 @@ async def test_start_first_schedule_once(env) -> None:
         runner.gate.set()
         await _drain(manager, outcome.orchestration.orchestration_id)
     assert await _get_status(sessionmaker, outcome.orchestration.orchestration_id) == "completed"
+
+
+async def test_resume_after_source_acquisition_schedules_resume(env) -> None:
+    """7A Product Gate spec J：waiting_manual 补资料后 → service 读 checkpoint
+    分类 → schedule_resume(kind=prepare) 后台执行 → 恰好一次 resume 调用。"""
+    sessionmaker = env["sessionmaker"]
+    runner = _ScriptedRunner(sessionmaker, "block", checkpoint={"current_phase": "waiting_manual"})
+    service, manager = _make_service(sessionmaker, runner)
+    o1 = None
+    try:
+        # 先创建 orchestration → 放行首启 run → 置为 waiting_human / waiting_manual。
+        outcome = await service.prepare_orchestration_start(env["task_id"])
+        o1 = outcome.orchestration.orchestration_id
+        runner.gate.set()
+        await _drain(manager, o1)
+        await _set_status(sessionmaker, o1, "waiting_human", "waiting_manual")
+
+        # 补资料后 resume → 后台调度 resume（kind=prepare）。
+        result = await service.resume_after_source_acquisition(o1)
+        assert manager.is_scheduled(o1)
+        await _wait_until(lambda: len(runner.resume_calls) == 1, message="resume task should start")
+        assert runner.resume_calls == [(o1, "prepare")]
+        # checkpoint 读取：分类一次 + get_orchestration 投影一次。
+        assert runner.read_calls == [o1, o1]
+        assert result.orchestration_id == o1
+    finally:
+        if o1 is not None:
+            runner.gate.set()
+            await _drain(manager, o1)
+
+
+async def test_resume_backflow_source_required_schedules_supplemental(env) -> None:
+    """K2：research_backflow + reason=source_acquisition_required →
+    schedule_resume(kind=supplemental_research)。"""
+    sessionmaker = env["sessionmaker"]
+    runner = _ScriptedRunner(
+        sessionmaker,
+        "block",
+        checkpoint={
+            "current_phase": "research_backflow",
+            "backflow_manual_reason": "source_acquisition_required",
+        },
+    )
+    service, manager = _make_service(sessionmaker, runner)
+    o1 = None
+    try:
+        outcome = await service.prepare_orchestration_start(env["task_id"])
+        o1 = outcome.orchestration.orchestration_id
+        runner.gate.set()
+        await _drain(manager, o1)
+        await _set_status(sessionmaker, o1, "waiting_human", "research_backflow")
+
+        result = await service.resume_after_source_acquisition(o1)
+        await _wait_until(lambda: len(runner.resume_calls) == 1, message="resume task should start")
+        assert runner.resume_calls == [(o1, "supplemental_research")]
+        assert result.orchestration_id == o1
+    finally:
+        if o1 is not None:
+            runner.gate.set()
+            await _drain(manager, o1)
+
+
+async def test_resume_no_duplicate_task_while_run_live(env) -> None:
+    """resume 与 run 共享同一 registry：resume task 仍 live 时再次 resume → 不
+    重复调度（同 orchestration_id 至多一个 live task）。"""
+    sessionmaker = env["sessionmaker"]
+    runner = _ScriptedRunner(sessionmaker, "block", checkpoint={"current_phase": "waiting_manual"})
+    service, manager = _make_service(sessionmaker, runner)
+    o1 = None
+    try:
+        outcome = await service.prepare_orchestration_start(env["task_id"])
+        o1 = outcome.orchestration.orchestration_id
+        runner.gate.set()
+        await _drain(manager, o1)
+        await _set_status(sessionmaker, o1, "waiting_human", "waiting_manual")
+
+        # 手工调度一个 live resume task（模拟上一次 resume 仍在执行）。
+        runner.gate.clear()  # 复用 gate：清空后 resume task 的 block 步真正阻塞
+        manager.schedule_resume(o1, "prepare")
+        await _wait_until(
+            lambda: len(runner.resume_calls) == 1, message="manual resume task should start"
+        )
+        assert manager.is_scheduled(o1)
+
+        # 再次 resume → status 仍 waiting_human + checkpoint waiting_manual，但
+        # live task 存在 → 不重复调度（resume_calls 不增长）。
+        result = await service.resume_after_source_acquisition(o1)
+        assert runner.resume_calls == [(o1, "prepare")]
+        assert manager.is_scheduled(o1)
+        assert result.orchestration_id == o1
+    finally:
+        if o1 is not None:
+            runner.gate.set()
+            await _drain(manager, o1)
 
 
 async def test_repeat_start_active_no_duplicate_task(env) -> None:

@@ -243,8 +243,9 @@ class _SequencedAuditDecision:
 
 class _FakeBackflowExecutor:
     """可控 `ResearchBackflowExecutor`：按调用次序返回预置 new_evidence_card_ids
-    （最后重复）。只投影 `new_evidence_card_ids`（graph 节点只读它；真实检索链
-    已由 test_research_backflow_executor.py 覆盖，0 real DeepSeek）。"""
+    （最后重复）。只投影 `new_evidence_card_ids` + 空 `attempts`（graph 节点读
+    `result.attempts` 聚合 executor manual reasons；真实检索链已由
+    test_research_backflow_executor.py 覆盖，0 real DeepSeek）。"""
 
     def __init__(self, new_card_batches=()) -> None:
         self._batches = list(new_card_batches)
@@ -256,7 +257,8 @@ class _FakeBackflowExecutor:
         self.executed.append((verified_request, plan_payload))
         idx = min(self.calls - 1, len(self._batches) - 1) if self._batches else -1
         return SimpleNamespace(
-            new_evidence_card_ids=tuple(self._batches[idx]) if self._batches else ()
+            new_evidence_card_ids=tuple(self._batches[idx]) if self._batches else (),
+            attempts=(),
         )
 
 

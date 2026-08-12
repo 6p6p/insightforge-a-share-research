@@ -1,4 +1,5 @@
-/** 任务工作台页（spec K + Stage 6B.1 artifact workspace + Stage 6B.2 citation nav）。
+/** 任务工作台页（spec K + Stage 6B.1 artifact workspace + Stage 6B.2 citation nav
+ *  + 7A Product Gate spec M/N）。
 
 SSE 事件到达时自动失效 workspace 缓存 → TanStack Query 后台重取；
 pending human action 出现时渲染 HumanActionCard。
@@ -13,6 +14,11 @@ Stage 6B.2（spec O/P/Q）：
   EvidenceTab「查看引用」都调用 `openCitation`；
 - ReviewsTab「定位报告」→ `?tab=report&section=S2&paragraph=3` → ReportTab
   高亮并滚动到对应段落。
+
+7A Product Gate：页级当前编排查询（getCurrentOrchestration，404 视为无编排）→
+顶层 OrchestrationBanner（phase / 补资料 / awaiting_stage5 人工决策）；编排
+awaiting_stage5 时抑制 WorkflowProgressPanel 的 workflow-runs HumanActionCard，
+改由 orchestration actions 驱动顶层图。
  */
 
 import { useState } from 'react';
@@ -21,11 +27,13 @@ import { useQuery } from '@tanstack/react-query';
 import { Alert, Badge, Button, Card, Descriptions, Layout, Space, Tabs, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 
+import { getCurrentOrchestration, orchestrationKeys } from '../api/orchestrations';
 import { getTaskWorkspace, taskKeys } from '../api/tasks';
 import { ArtifactSummaryCards } from '../components/ArtifactSummaryCards';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import { useTaskEvents } from '../hooks/useTaskEvents';
+import { OrchestrationBanner } from '../features/orchestration/OrchestrationBanner';
 import { StartResearchPanel } from '../features/workflow-progress/StartResearchPanel';
 import { WorkflowProgressPanel } from '../features/workflow-progress/WorkflowProgressPanel';
 import { AnalysisTab } from '../features/artifacts/AnalysisTab';
@@ -79,10 +87,32 @@ export function TaskWorkspacePage(): React.JSX.Element {
     refetchInterval: 5000,
   });
 
+  /** 当前编排投影：404 = 尚无编排 → null（不触发重试风暴）。 */
+  const orchestrationQuery = useQuery({
+    queryKey: orchestrationKeys.current(taskId),
+    queryFn: async () => {
+      try {
+        return await getCurrentOrchestration(taskId);
+      } catch (queryError) {
+        if (queryError instanceof ApiError && queryError.status === 404) {
+          return null;
+        }
+        throw queryError;
+      }
+    },
+    refetchInterval: 5000,
+    retry: false,
+  });
+  const orchestration = orchestrationQuery.data ?? null;
+
   const { events, connected, streamEnded, error: sseError } = useTaskEvents(taskId);
 
   const run = data?.current_run ?? null;
   const hasActiveRun = run != null && ['pending', 'running', 'waiting_human'].includes(run.status);
+  /** 编排 Stage5 人工决策 → 抑制 workflow-runs 的 HumanActionCard。 */
+  const suppressHumanAction =
+    orchestration?.status === 'waiting_human' &&
+    orchestration.current_phase === 'awaiting_stage5';
 
   /** tab 切换写入 URL `?tab=`；离开 report 时清理定位参数。 */
   const onTabChange = (key: string): void => {
@@ -128,6 +158,11 @@ export function TaskWorkspacePage(): React.JSX.Element {
         }
       />
 
+      <OrchestrationBanner
+        orchestration={orchestration}
+        companyId={data?.resolved_company?.company_id ?? null}
+      />
+
       <Tabs
         activeKey={activeTab}
         onChange={onTabChange}
@@ -141,6 +176,7 @@ export function TaskWorkspacePage(): React.JSX.Element {
                 query={{ data, isLoading, isError, error, refetch }}
                 run={run}
                 hasActiveRun={hasActiveRun}
+                suppressHumanAction={suppressHumanAction}
                 events={events}
                 sseError={sseError}
               />
@@ -189,6 +225,8 @@ interface OverviewPanelProps {
   query: UseQueryResult;
   run: WorkflowRunResponse | null;
   hasActiveRun: boolean;
+  /** 编排 awaiting_stage5 时隐藏 workflow-runs 的 HumanActionCard。 */
+  suppressHumanAction: boolean;
   events: WorkflowEventResponse[];
   sseError: string | null;
 }
@@ -199,6 +237,7 @@ function OverviewPanel({
   query,
   run,
   hasActiveRun,
+  suppressHumanAction,
   events,
   sseError,
 }: OverviewPanelProps): React.JSX.Element | null {
@@ -256,7 +295,12 @@ function OverviewPanel({
       </Card>
 
       {run ? (
-        <WorkflowProgressPanel task={data.task} run={run} events={events} />
+        <WorkflowProgressPanel
+          task={data.task}
+          run={run}
+          events={events}
+          suppressHumanAction={suppressHumanAction}
+        />
       ) : null}
 
       {!hasActiveRun ? <StartResearchPanel taskId={taskId} onStarted={() => void refetch()} /> : null}

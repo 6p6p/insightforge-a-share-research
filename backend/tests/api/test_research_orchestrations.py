@@ -63,6 +63,7 @@ class FakeOrchestrationService:
         self.get_calls: list[UUID] = []
         self.action_calls: list[tuple] = []
         self.retry_calls: list[UUID] = []
+        self.resume_calls: list[UUID] = []
         self.result = _result()
         self.raise_not_found = False
         self.raise_retry_required = False
@@ -92,6 +93,10 @@ class FakeOrchestrationService:
 
     async def retry_and_schedule(self, orchestration_id):
         self.retry_calls.append(orchestration_id)
+        return self.result
+
+    async def resume_after_source_acquisition(self, orchestration_id):
+        self.resume_calls.append(orchestration_id)
         return self.result
 
 
@@ -240,3 +245,22 @@ def test_actions_unknown_action_rejected_422(app) -> None:
     assert response.status_code == 422
     assert fake.action_calls == []
     assert fake.retry_calls == []
+
+
+# ---------------------- resume after source acquisition（7A Product Gate spec J/K/L）
+
+
+def test_resume_source_acquisition_dispatch(app) -> None:
+    """补资料后 → POST /resume-source-acquisition → service dispatch → 200 投影。"""
+    fake = FakeOrchestrationService()
+    fake.result = _result(status="waiting_human", current_phase="waiting_manual")
+    with _client(app, fake) as client:
+        response = client.post(
+            f"/api/v1/research-orchestrations/{_OID}/resume-source-acquisition"
+        )
+    assert response.status_code == 200
+    assert fake.resume_calls == [_OID]
+    body = response.json()
+    assert body["orchestration_id"] == str(_OID)
+    assert body["status"] == "waiting_human"
+    assert body["current_phase"] == "waiting_manual"
