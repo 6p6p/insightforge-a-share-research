@@ -35,3 +35,16 @@ class EvalMaterializationError(EvalError):
     领域 verifier 校验失败等）。"""
 
     code = "eval_materialization_error"
+
+
+class EvalScoringError(EvalError):
+    """Deterministic scoring 失败（请求未实现的 metric calculator 等）。"""
+
+    code = "eval_scoring_error"
+
+
+class EvalOutputStructureError(EvalError):
+    """normalized variant output 结构校验失败（duplicate id / dangling ref /
+    source 未命中 frozen snapshot）。"""
+
+    code = "eval_output_structure_error"

@@ -1,6 +1,8 @@
 # Stage 7B.1 — Evaluation Foundation
 
-> 状态：**7B.1.0 契约 = FINAL**；**7B.1.1A Frozen Evaluation Bundle = 完成**。
+> 状态：**7B.1.0 契约 = FINAL**；**7B.1.1A Frozen Evaluation Bundle = FINAL**；
+> **7B.1.1B PG→Frozen Snapshot Materializer = FINAL**；**7B.1.2A Deterministic Metrics
+> Foundation = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -59,6 +61,13 @@ app/eval/
     loader.py     #   identity → path → 读取（label leakage boundary）
     integrity.py  #   12 步 referential integrity 校验
     _io.py        #   底层读写 + 稳定错误包装
+  materialization/# 7B.1.1B：PG/Chroma 物化为 frozen snapshot（依赖详见 §3.11）
+    service.py    #   document / macro / structured 三路 payload 投影
+    projections.py#   payload bytes + sha256 + semantic fingerprint
+  scoring/        # 7B.1.2A：cross-variant deterministic metrics
+    context.py    #   EvalScoringContext（output + snapshot + exec fp，无 label）
+    deterministic.py # citation_validity / citation_coverage v1 + 结构校验
+    registry.py   #   deterministic calculator 注册表 + 可用集合
 ```
 
 ## 3. 冻结契约（7B.1.0）
@@ -190,6 +199,44 @@ id / API key / wall-clock latency。8 个函数：
 **排除** `human_label_fingerprint`；label fp **排除** `annotation`；unordered
 collection canonical sort。
 
+### 3.11 PG→Frozen Snapshot Materializer（7B.1.1B）
+
+`app/eval/materialization/` 把 live 源物化成 frozen snapshot 的输入：
+
+- **依赖边界 = 仅 PostgreSQL + `RawArtifactStore` + `BundleWriter` + 领域 verifier**
+  （**0 Chroma**）。document 从 `RawArtifactStore` 读原始字节；macro 从 PG
+  `MacroDatasetSnapshot` / `MacroSeries` / `MacroObservation` /
+  `MacroSnapshotArtifactLink` 读；structured 从 PG 对应 artifact 表读。不做任何
+  向量检索。
+- **no-lookahead**：materializer 只取 `fetched_at <= case.analysis_as_of` 的数据，
+  不读取未来数据。
+- **macro payload 的 semantic fingerprint 由 `MacroPersistenceService.
+  verify_snapshot_integrity` 重算**（结构不变量 + fingerprint 重算防篡改）；eval
+  模块**不复制**该算法，而是复用 domain helper
+  （`app/macro/snapshot_rebuild.rebuild_macro_snapshot_fingerprint`）。
+
+### 3.12 Deterministic Metrics Foundation（7B.1.2A）
+
+`app/eval/scoring/` 实现**跨三路 variant 真正公平**的确定性指标（不依赖 label /
+judge / DB / LLM / network）：
+
+- `EvalScoringContext`（frozen）：`execution_spec_fingerprint` + `variant_output` +
+  `source_snapshot`。**不含** `HumanLabel`（human_labeled 属另一来源，绝不进入
+  deterministic 计量）。
+- `verify_variant_output_structure()`：结构性 fail-fast 校验（unique ids / 双向
+  closure / source membership），违反抛 `EvalOutputStructureError`。
+- `DeterministicMetricCalculator` Protocol + registry
+  （`calculate_available_deterministic_metrics()` / `get_deterministic_calculator()`）。
+- **已实现 v1**：
+  - `citation_validity`：分母 = 全部 citation；valid = `source_fingerprint` 命中
+    snapshot 且 `claim_ids` 全指向真实 claim 且 `citation_id` 唯一；0 citation →
+    `not_applicable`。
+  - `citation_coverage`：分母 = 全部 claim；covered = claim 拥有 ≥1 条 valid real
+    citation；0 claim → `not_applicable`。
+- **未实现**（registry 暴露为 unavailable，不复制公式）：
+  `claim_support_rate` / `unsupported_claim_ratio` / `conflict_preservation` /
+  `financial_accuracy` 等；这些留待 7B.1.2B（judge 依赖）或 human-label 阶段。
+
 ## 4. 验收标准（7B.1.0）
 
 1. `app/eval/` 六模块；**无 DB / LLM / network / Chroma / 新依赖**。
@@ -223,11 +270,14 @@ collection canonical sort。
   可重放的目录；atomic 写 + replay + content-address blob；loader 由 identity 派生 path
   （防 traversal）+ label leakage boundary；`verify_bundle_integrity` 12 步 referential
   integrity；synthetic test bundle + 17 tests。
-- **7B.1.1B（下一步，未开始）**：PG snapshot materializer（把 live PG/Chroma 物化成 frozen
-  bundle 的输入）。
-- **7B.1.2**：确定性指标计算器（复用 `run_checks` 10 check → citation_validity /
-  unsupported_claim_ratio / conflict_preservation / forbidden-language；证据链 closure →
-  claim_support_rate / citation_coverage）+ token/cost/latency 捕获层（回填 9 adapter）。
+- **7B.1.1B ✅ FINAL**：PG snapshot materializer（把 live PG 物化成 frozen bundle 的输入；
+  依赖 = PG + RawArtifactStore + BundleWriter + domain verifier，**0 Chroma**；
+  no-lookahead；macro fingerprint 由 domain helper 重算）。
+- **7B.1.2A ✅ FINAL**：Cross-Variant Deterministic Metrics Foundation（`app/eval/scoring/`；
+  实现 citation_validity / citation_coverage v1 + 结构校验 + registry；只做真正公平、
+  不依赖 label/judge/DB/LLM 的指标）。
+- **7B.1.2B（下一步，未开始）**：token/cost/latency 捕获层（统一 LLM 调用包装，回填 9
+  adapter）+ 其余 deterministic 指标（conflict_preservation / 证据链 closure 类）。
 - **7B.1.3**：eval 持久化（alembic migration + models + repository，镜像 `ReportCheckResult`）。
 - **7B.1.4**：variant runner 契约（`VariantRunner` Protocol）+ dev/test Noop runner。
 - **7B.1.5**：offline CLI `python -m app.cli.eval run --variant ... --dataset ...`。
