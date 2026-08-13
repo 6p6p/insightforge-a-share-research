@@ -60,3 +60,20 @@ class EvalExecutionAssemblyError(EvalError):
     """
 
     code = "eval_execution_assembly_error"
+
+
+class EvalPersistenceError(EvalError):
+    """Evaluation execution persistence 失败（行不存在 / 无法持久化等）。
+
+    独立于 `EvalMaterializationError`（那是 frozen bundle 物化失败）。错误消息
+    **不**包含 prompt / output 文本 / token 明细 payload / API key / raw JSON。
+    """
+
+    code = "eval_persistence_error"
+
+
+class EvalPersistenceIntegrityError(EvalPersistenceError):
+    """Evaluation execution persistence 完整性破坏（fingerprint 不一致 / 篡改 /
+    replay 不一致 / 父行身份不匹配）。"""
+
+    code = "eval_persistence_integrity_error"

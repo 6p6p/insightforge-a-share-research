@@ -3,7 +3,8 @@
 > 状态：**7B.1.0 契约 = FINAL**；**7B.1.1A Frozen Evaluation Bundle = FINAL**；
 > **7B.1.1B PG→Frozen Snapshot Materializer = FINAL**；**7B.1.2A Deterministic Metrics
 > Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**；
-> **7B.1.2C Execution Runtime = FINAL**。
+> **7B.1.2C Execution Runtime = FINAL**；**7B.1.3A Evaluation Execution Persistence
+> = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -78,6 +79,9 @@ app/eval/
                   #     + ExecutionAttemptStatus + compute_trial_fingerprint
     runner.py     #   VariantRunner Protocol（label leakage boundary）
     harness.py    #   execute_variant_attempt（collector 注入 + 身份校验 + 收敛 success/failed）
+  persistence/    # 7B.1.3A：ExecutionSpec → Trial → Attempt → LLM Call Usage 持久化
+    contracts.py  #   Verified{Spec,Trial,Attempt}Record read models（verified 只读）
+    service.py    #   create-or-get + persist_attempt_result + verify_*_integrity
 ```
 `app/llm/`（通用层，不在 eval 包内）：
 ```
@@ -297,11 +301,14 @@ config / prompt / schema / tool 权限**全部不变**；adapter 构造新增可
 0 network（不含真实 variant runner）。
 
 - `EvalTrialSpec`（frozen dataclass）：`execution_spec_fingerprint 64hex` /
-  `trial_no>=1` / `schema_version=1` / `random_seed int?`。trial fingerprint =
-  `execution_spec_fingerprint + trial_no + random_seed` 的 canonical SHA-256
+  `trial_no>=1` / `schema_version=1`。trial fingerprint =
+  `schema_version + execution_spec_fingerprint + trial_no` 的 canonical SHA-256
   （`compute_trial_fingerprint`，位于 execution/contracts.py）；同一 spec 下
-  trial1 ≠ trial2（trial_no 不同）；`random_seed=None` 规范为 JSON null（≠ 0）。
-  **无** attempt_no / UUID / started_at / latency。
+  trial1 ≠ trial2（trial_no 不同）。**不含** `random_seed`（当前 `VariantRunner.run()`
+  拿不到 TrialSpec、生产 model config 也未真正应用 seed，把 seed 放进 semantic
+  fingerprint 等于给不影响真实执行的字段记账；待 provider 真正支持 deterministic
+  seed 时，seed 才进入 `EvalExecutionConfig` / `FrozenModelConfig` 并由 real runner
+  实际应用）。**无** attempt_no / UUID / started_at / latency。
 - `EvalExecutionAttempt`（frozen dataclass）：`trial_fingerprint 64hex` /
   `attempt_no>=1` / `execution_id UUID`。attempt identity =
   `(trial_fingerprint, attempt_no)`；`execution_id` 是 runtime UUID（去重 /
@@ -333,6 +340,42 @@ config / prompt / schema / tool 权限**全部不变**；adapter 构造新增可
 `ExecutionSpec 1:N Trial 1:N Attempt`——attempt 的 `execution_id` 是行 UUID（非
 semantic identity），`(trial_fingerprint, attempt_no)` 才是去重身份。执行语义先于
 持久化冻结，7B.1.3 只做镜像迁移，**不得**在 DB 层重新发明身份。
+
+### 3.15 Evaluation Execution Persistence（7B.1.3A）
+
+`app/eval/persistence/` + `app/db/models/eval_execution.py` + alembic 0045 持久化
+`ExecutionSpec 1:N Trial 1:N Attempt 1:N LLM Call Usage` 四层。**只**持久化执行侧
+四层（spec U：**不**持久化 MetricValue / ScoringSpec / HumanLabel / Judge），**不**
+创建 `eval_runs`。0 LLM / 0 network。
+
+- **4 张表**（`eval_execution_specs` / `eval_trials` / `eval_execution_attempts` /
+  `eval_llm_call_usages`），RESTRICT 外键；`execution_spec_fingerprint` /
+  `trial_fingerprint` UNIQUE，`(execution_spec_id, trial_no)` /
+  `(trial_id, attempt_no)` / `(execution_id, call_index)` UNIQUE。
+- **denormalized fingerprint 列**（case / source / config / spec / trial /
+  variant output）供查询与快速一致性校验；JSONB 保存完整 frozen contract payload
+  （`model_dump(mode="json")` → 重校验用 `model_validate`，**绝不** `model_construct`）。
+- **CHECK 强制**：success/failed 与 output fp/payload、error_code 互斥
+  （`ck_eval_exec_attempts_status_fields`）；usage reported 三 token 完整非负且
+  `total = input + output`、unavailable 三 token 全 NULL
+  （`ck_eval_llm_call_usages_token_fields`）。可空 JSONB 列 `none_as_null=True`
+  （None → SQL NULL，**不**落 JSON null，否则 `IS NULL` CHECK 会漏判）。
+- **create-or-get**（`create_or_get_execution_spec` / `create_or_get_trial`）：
+  ON CONFLICT DO NOTHING（UNIQUE 是并发唯一性来源，无 Python 进程锁）；replay 时
+  完整重校验 + 重算 fingerprint，一致 = replay（返回同 id），不一致 =
+  `EvalPersistenceIntegrityError`。
+- **`persist_attempt_result(result)`**：单事务写 attempt + N usage，失败全回滚；
+  同 execution_id / (trial_id, attempt_no) 重放 → 完整校验，静默覆盖禁止（并发同
+  attempt → 1 attempt + N usage，usage 去重靠 UNIQUE + ON CONFLICT）。
+- **verifiers**（`verify_execution_spec_integrity` / `verify_trial_integrity` /
+  `verify_attempt_integrity`）：加载 → `model_validate` → 重算 fingerprint → 校验 →
+  返回 verified read model；usage 按 call_index 排序、连续（0..N-1）逐条重建
+  `LlmCallUsageRecord`。
+- **错误**：`EvalPersistenceError`（`eval_persistence_error`）/
+  `EvalPersistenceIntegrityError`（`eval_persistence_integrity_error`）；消息**不**
+  包含 prompt / output 文本 / token 明细 payload / API key / raw JSON。
+- **downgrade guard**（0045→0044）：四张表任一存在行 → 拒绝回滚（RuntimeError，
+  `alembic_version` 保持 0045）；四张表全空才允许回滚。
 
 ## 4. 验收标准（7B.1.0）
 
@@ -380,8 +423,12 @@ semantic identity），`(trial_fingerprint, attempt_no)` 才是去重身份。�
   `EvalTrialSpec` / `EvalExecutionAttempt` / `EvalExecutionAttemptResult` 三层身份 +
   `VariantRunner` Protocol + `execute_variant_attempt` harness；0 DB / 0 LLM /
   0 network；14 tests）。
-- **7B.1.3**：eval 持久化（alembic migration + models + repository，镜像
-  `ExecutionSpec 1:N Trial 1:N Attempt`，见 §3.14 spec R）。
+- **7B.1.3A ✅ FINAL**：Evaluation Execution Persistence（`app/eval/persistence/` +
+  `app/db/models/eval_execution.py` + alembic 0045；持久化 ExecutionSpec → Trial →
+  Attempt → LLM Call Usage 四层，**不**持久化 MetricValue / ScoringSpec / HumanLabel
+  / Judge；create-or-get replay + persist_attempt_result + verify_*_integrity +
+  downgrade guard；18 + 2 integration tests，见 §3.15）。
+- **7B.1.3B**：MetricValue / ScoringSpec / HumanLabel / Judge 持久化（本轮**未**开始）。
 - **7B.1.4**：真实/dev runner（dev/test Noop runner 用独立 identity，**不加**
   `EvalVariantId.NOOP`）+ 三路 real variant runner。
 - **7B.1.5**：offline CLI `python -m app.cli.eval run --variant ... --dataset ...`。
