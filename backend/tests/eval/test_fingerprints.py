@@ -16,6 +16,7 @@ from app.eval.contracts import (
     EvalVariantOutput,
     FinancialFactLabel,
     FrozenDocumentSourceRef,
+    FrozenMacroSnapshotRef,
     FrozenModelConfig,
     FrozenSourceSnapshot,
     HumanLabel,
@@ -130,6 +131,25 @@ def test_snapshot_reorder_keeps_fp() -> None:
     s1 = FrozenSourceSnapshot(document_sources=(_doc_ref("a"), _doc_ref("b")))
     s2 = FrozenSourceSnapshot(document_sources=(_doc_ref("b"), _doc_ref("a")))
     assert compute_source_snapshot_fingerprint(s1) == compute_source_snapshot_fingerprint(s2)
+
+
+def test_snapshot_fingerprint_includes_macro_payload_sha() -> None:
+    def make(payload_sha: str) -> FrozenSourceSnapshot:
+        return FrozenSourceSnapshot(
+            macro_snapshots=(
+                FrozenMacroSnapshotRef(
+                    snapshot_id=uuid4(),
+                    series_id=uuid4(),
+                    snapshot_fingerprint=_sha("c"),
+                    payload_sha256=payload_sha,
+                    fetched_at=datetime(2026, 8, 1, 12, 0, 0),
+                ),
+            ),
+        )
+
+    fp_a = compute_source_snapshot_fingerprint(make(_sha("a")))
+    fp_b = compute_source_snapshot_fingerprint(make(_sha("b")))
+    assert fp_a != fp_b
 
 
 def test_case_fingerprint_excludes_label() -> None:

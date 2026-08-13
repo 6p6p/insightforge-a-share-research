@@ -123,19 +123,30 @@ class FrozenDocumentSourceRef(BaseModel):
 
 
 class FrozenMacroSnapshotRef(BaseModel):
-    """一条 macro snapshot 的字节寻址引用（`snapshot_fingerprint` 是 semantic identity）。"""
+    """一条 macro snapshot 的字节寻址引用（`snapshot_fingerprint` 是 semantic identity）。
+
+    `payload_sha256` 是 Evaluation Bundle 冻结的 canonical payload bytes identity——
+    独立证明 payload bytes 未被篡改，但**不**参与 duplicate identity（仍按
+    `snapshot_fingerprint` 去重）。
+    """
 
     model_config = ConfigDict(frozen=True)
 
     snapshot_id: UUID
     series_id: UUID
     snapshot_fingerprint: str
+    payload_sha256: str
     fetched_at: datetime
 
     @field_validator("snapshot_fingerprint")
     @classmethod
     def _v_sha(cls, v: str) -> str:
         return _validate_sha256(v, field="snapshot_fingerprint")
+
+    @field_validator("payload_sha256")
+    @classmethod
+    def _v_payload_sha(cls, v: str) -> str:
+        return _validate_sha256(v, field="payload_sha256")
 
 
 class StructuredArtifactType(StrEnum):
@@ -145,18 +156,29 @@ class StructuredArtifactType(StrEnum):
 
 
 class FrozenStructuredArtifactRef(BaseModel):
-    """一条 structured artifact 的字节寻址引用（`artifact_fingerprint` 是 semantic identity）。"""
+    """一条 structured artifact 的字节寻址引用（`artifact_fingerprint` 是 semantic identity）。
+
+    `payload_sha256` 是 Evaluation Bundle 冻结的 canonical payload bytes identity——
+    独立证明 payload bytes 未被篡改，但**不**参与 duplicate identity（仍按
+    `(artifact_type, artifact_fingerprint)` 去重）。
+    """
 
     model_config = ConfigDict(frozen=True)
 
     artifact_type: StructuredArtifactType
     artifact_id: UUID
     artifact_fingerprint: str
+    payload_sha256: str
 
     @field_validator("artifact_fingerprint")
     @classmethod
     def _v_sha(cls, v: str) -> str:
         return _validate_sha256(v, field="artifact_fingerprint")
+
+    @field_validator("payload_sha256")
+    @classmethod
+    def _v_payload_sha(cls, v: str) -> str:
+        return _validate_sha256(v, field="payload_sha256")
 
 
 class FrozenSourceSnapshot(BaseModel):

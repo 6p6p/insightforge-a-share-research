@@ -1,8 +1,9 @@
 """Bundle referential integrity verification（stage 7B.1.1A）。
 
 验证 bundle 内部引用闭合：manifest → case → snapshot → document / macro / structured
-payload。只验证 bundle envelope 与 ref closure；不在此处调用真实 domain verifier
-（那属于 7B.1.1B 从 PG materialize 时的 upstream fingerprint 证明）。
+payload。document blob / macro payload / structured payload 按字节 SHA 校验
+（content_sha256 / payload_sha256）；不在此处调用真实 domain verifier（那属于 7B.1.1B
+从 PG materialize 时的 upstream fingerprint 证明）。
 """
 
 import hashlib
@@ -70,14 +71,20 @@ def verify_bundle_integrity(root: str | Path) -> VerifiedEvaluationBundle:
             if hashlib.sha256(blob).hexdigest() != doc.content_sha256:
                 raise EvalContractError("document blob content_sha256 不匹配")
 
-        # 11. macro payload envelope 闭合。
+        # 11. macro payload：file bytes SHA == payload_sha256 + envelope 闭合。
         for macro in snapshot.macro_snapshots:
+            raw = loader.read_macro_payload_bytes(macro.snapshot_fingerprint)
+            if hashlib.sha256(raw).hexdigest() != macro.payload_sha256:
+                raise EvalContractError("macro payload 字节 SHA 与 payload_sha256 不匹配")
             payload = loader.load_macro_payload(macro.snapshot_fingerprint)
             if payload.get("snapshot_fingerprint") != macro.snapshot_fingerprint:
                 raise EvalContractError("macro payload envelope snapshot_fingerprint 不匹配")
 
-        # 12. structured payload envelope 闭合。
+        # 12. structured payload：file bytes SHA == payload_sha256 + envelope 闭合。
         for art in snapshot.structured_artifacts:
+            raw = loader.read_structured_payload_bytes(art.artifact_type, art.artifact_fingerprint)
+            if hashlib.sha256(raw).hexdigest() != art.payload_sha256:
+                raise EvalContractError("structured payload 字节 SHA 与 payload_sha256 不匹配")
             payload = loader.load_structured_payload(art.artifact_type, art.artifact_fingerprint)
             if payload.get("artifact_type") != art.artifact_type.value:
                 raise EvalContractError("structured payload envelope artifact_type 不匹配")

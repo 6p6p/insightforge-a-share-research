@@ -142,6 +142,7 @@ def test_snapshot_covers_three_categories() -> None:
                 snapshot_id=uuid4(),
                 series_id=uuid4(),
                 snapshot_fingerprint=_sha("c"),
+                payload_sha256=_sha("e"),
                 fetched_at=datetime(2026, 8, 1, 12, 0, 0),
             ),
         ),
@@ -150,6 +151,7 @@ def test_snapshot_covers_three_categories() -> None:
                 artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
                 artifact_id=uuid4(),
                 artifact_fingerprint=_sha("d"),
+                payload_sha256=_sha("f"),
             ),
         ),
     )
@@ -175,6 +177,7 @@ def test_structured_artifact_type_enum() -> None:
             artifact_type="unknown",
             artifact_id=uuid4(),
             artifact_fingerprint=_sha("d"),
+            payload_sha256=_sha("f"),
         )
 
 
@@ -277,6 +280,7 @@ def _macro_ref(fp: str) -> FrozenMacroSnapshotRef:
         snapshot_id=uuid4(),
         series_id=uuid4(),
         snapshot_fingerprint=fp,
+        payload_sha256=_sha("e"),
         fetched_at=datetime(2026, 8, 1, 12, 0, 0),
     )
 
@@ -292,11 +296,13 @@ def test_structured_duplicate_fingerprint_rejected() -> None:
         artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
         artifact_id=uuid4(),
         artifact_fingerprint=fp,
+        payload_sha256=_sha("f"),
     )
     ref2 = FrozenStructuredArtifactRef(
         artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
         artifact_id=uuid4(),
         artifact_fingerprint=fp,
+        payload_sha256=_sha("f"),
     )
     with pytest.raises(ValidationError):
         FrozenSourceSnapshot(structured_artifacts=(ref1, ref2))

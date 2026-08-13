@@ -66,6 +66,7 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
         [
             {
                 "snapshot_fingerprint": ref.snapshot_fingerprint,
+                "payload_sha256": ref.payload_sha256,
                 "fetched_at": _iso(ref.fetched_at),
             }
             for ref in snapshot.macro_snapshots
@@ -77,6 +78,7 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
             {
                 "artifact_type": ref.artifact_type.value,
                 "artifact_fingerprint": ref.artifact_fingerprint,
+                "payload_sha256": ref.payload_sha256,
             }
             for ref in snapshot.structured_artifacts
         ],

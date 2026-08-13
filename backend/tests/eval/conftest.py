@@ -17,6 +17,7 @@ from uuid import UUID
 import pytest
 
 from app.eval.bundle.writer import EvaluationBundleWriter
+from app.eval.canonical import canonical_json_bytes
 from app.eval.contracts import (
     EvalCase,
     EvalDatasetCaseRef,
@@ -59,6 +60,8 @@ class BundleSpec:
     case: EvalCase
     label: HumanLabel
     snapshot: FrozenSourceSnapshot
+    macro_ref: FrozenMacroSnapshotRef
+    structured_ref: FrozenStructuredArtifactRef
     document_content: bytes
     document_sha256: str
     macro_fingerprint: str
@@ -72,6 +75,16 @@ class BundleSpec:
 
 
 def _build_spec() -> BundleSpec:
+    macro_payload = {"snapshot_fingerprint": MACRO_FP, "series": "gdp_growth", "value": 5.2}
+    structured_payload = {
+        "artifact_type": StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION.value,
+        "artifact_fingerprint": STRUCTURED_FP,
+        "metric_code": "net_profit",
+        "value": "100000000",
+    }
+    macro_payload_sha = hashlib.sha256(canonical_json_bytes(macro_payload)).hexdigest()
+    structured_payload_sha = hashlib.sha256(canonical_json_bytes(structured_payload)).hexdigest()
+
     doc = FrozenDocumentSourceRef(
         source_record_id=SOURCE_RECORD_ID,
         raw_artifact_id=RAW_ARTIFACT_ID,
@@ -84,12 +97,14 @@ def _build_spec() -> BundleSpec:
         snapshot_id=MACRO_SNAPSHOT_ID,
         series_id=MACRO_SERIES_ID,
         snapshot_fingerprint=MACRO_FP,
+        payload_sha256=macro_payload_sha,
         fetched_at=datetime(2026, 8, 1, 12, 0, 0),
     )
     structured_ref = FrozenStructuredArtifactRef(
         artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
         artifact_id=STRUCTURED_ARTIFACT_ID,
         artifact_fingerprint=STRUCTURED_FP,
+        payload_sha256=structured_payload_sha,
     )
     snapshot = FrozenSourceSnapshot(
         document_sources=(doc,),
@@ -133,19 +148,13 @@ def _build_spec() -> BundleSpec:
     )
     dataset_fp = compute_dataset_fingerprint(manifest)
 
-    macro_payload = {"snapshot_fingerprint": MACRO_FP, "series": "gdp_growth", "value": 5.2}
-    structured_payload = {
-        "artifact_type": StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION.value,
-        "artifact_fingerprint": STRUCTURED_FP,
-        "metric_code": "net_profit",
-        "value": "100000000",
-    }
-
     return BundleSpec(
         manifest=manifest,
         case=case,
         label=label,
         snapshot=snapshot,
+        macro_ref=macro_ref,
+        structured_ref=structured_ref,
         document_content=DOC_CONTENT,
         document_sha256=DOC_SHA256,
         macro_fingerprint=MACRO_FP,
@@ -164,12 +173,8 @@ def build_bundle(root: str | Path) -> BundleSpec:
     spec = _build_spec()
     writer = EvaluationBundleWriter(root)
     writer.write_document_blob(spec.document_sha256, spec.document_content)
-    writer.write_macro_payload(spec.macro_fingerprint, spec.macro_payload)
-    writer.write_structured_payload(
-        StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
-        spec.structured_fingerprint,
-        spec.structured_payload,
-    )
+    writer.write_macro_payload(spec.macro_ref, spec.macro_payload)
+    writer.write_structured_payload(spec.structured_ref, spec.structured_payload)
     writer.write_snapshot(spec.snapshot)
     writer.write_label(spec.label)
     writer.write_case(spec.case)

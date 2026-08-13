@@ -92,11 +92,23 @@ class EvaluationBundleLoader:
         path = layout.macro_payload_path(self._root, snapshot_fingerprint)
         return _io.read_json_dict(path, f"macro:{snapshot_fingerprint}")
 
+    def read_macro_payload_bytes(self, snapshot_fingerprint: str) -> bytes:
+        """读取 macro payload 的原始 canonical bytes（供 payload_sha256 校验）。"""
+        path = layout.macro_payload_path(self._root, snapshot_fingerprint)
+        return _io.read_raw_bytes(path, f"macro:{snapshot_fingerprint}")
+
     def load_structured_payload(
         self, artifact_type: StructuredArtifactType, artifact_fingerprint: str
     ) -> dict[str, Any]:
         path = layout.structured_payload_path(self._root, artifact_type, artifact_fingerprint)
         return _io.read_json_dict(path, f"structured:{artifact_type.value}:{artifact_fingerprint}")
+
+    def read_structured_payload_bytes(
+        self, artifact_type: StructuredArtifactType, artifact_fingerprint: str
+    ) -> bytes:
+        """读取 structured payload 的原始 canonical bytes（供 payload_sha256 校验）。"""
+        path = layout.structured_payload_path(self._root, artifact_type, artifact_fingerprint)
+        return _io.read_raw_bytes(path, f"structured:{artifact_type.value}:{artifact_fingerprint}")
 
     def load_execution_case(self, case_id: str, case_version: int) -> LoadedEvalExecutionCase:
         """execution 侧加载：case execution fields + snapshot，不含任何 label 信息。"""

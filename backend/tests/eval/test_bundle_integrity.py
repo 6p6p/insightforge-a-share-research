@@ -85,7 +85,18 @@ def test_macro_envelope_fp_mismatch_verify_fails(built_bundle) -> None:
     root, spec = built_bundle
     path = layout.macro_payload_path(root, spec.macro_fingerprint)
     tampered = {**spec.macro_payload, "snapshot_fingerprint": "4" * 64}
-    path.write_bytes(canonical_json_bytes(tampered) + b"\n")
+    path.write_bytes(canonical_json_bytes(tampered))
+    with pytest.raises(EvalContractError):
+        verify_bundle_integrity(root)
+
+
+def test_tamper_macro_payload_value_verify_fails(built_bundle) -> None:
+    root, spec = built_bundle
+    path = layout.macro_payload_path(root, spec.macro_fingerprint)
+    # 只改 value，snapshot_fingerprint envelope 不变 → 靠 payload_sha256 捕获。
+    tampered = {**spec.macro_payload, "value": 999.9}
+    assert tampered["snapshot_fingerprint"] == spec.macro_fingerprint
+    path.write_bytes(canonical_json_bytes(tampered))
     with pytest.raises(EvalContractError):
         verify_bundle_integrity(root)
 
@@ -105,7 +116,20 @@ def test_structured_envelope_mismatch_verify_fails(built_bundle) -> None:
         root, StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION, spec.structured_fingerprint
     )
     tampered = {**spec.structured_payload, "artifact_fingerprint": "5" * 64}
-    path.write_bytes(canonical_json_bytes(tampered) + b"\n")
+    path.write_bytes(canonical_json_bytes(tampered))
+    with pytest.raises(EvalContractError):
+        verify_bundle_integrity(root)
+
+
+def test_tamper_structured_payload_field_verify_fails(built_bundle) -> None:
+    root, spec = built_bundle
+    path = layout.structured_payload_path(
+        root, StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION, spec.structured_fingerprint
+    )
+    # 只改数据 field，artifact_fingerprint envelope 不变 → 靠 payload_sha256 捕获。
+    tampered = {**spec.structured_payload, "value": "999999999"}
+    assert tampered["artifact_fingerprint"] == spec.structured_fingerprint
+    path.write_bytes(canonical_json_bytes(tampered))
     with pytest.raises(EvalContractError):
         verify_bundle_integrity(root)
 
