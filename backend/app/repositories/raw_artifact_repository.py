@@ -28,6 +28,17 @@ class RawArtifactRepository:
         )
         return result.scalar_one_or_none()
 
+    async def insert(self, artifact: RawArtifactModel) -> RawArtifactModel:
+        """精确 ID 插入（`session.add + flush`，保留显式 artifact_id）。
+
+        用于 7B.1.4B.1 隔离运行时复现：frozen `raw_artifact_id` 必须作为 DB PK
+        原样落库，`create()` 的 ON CONFLICT 路径不写 artifact_id（用 Python uuid4
+        默认值），无法满足 exact-ID replay。
+        """
+        self._session.add(artifact)
+        await self._session.flush()
+        return artifact
+
     async def create(self, artifact: RawArtifactModel) -> RawArtifactModel | None:
         """Insert with ON CONFLICT DO NOTHING for concurrent dedup.
 

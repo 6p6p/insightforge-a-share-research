@@ -4,7 +4,8 @@
 > **7B.1.1B PG→Frozen Snapshot Materializer = FINAL**；**7B.1.2A Deterministic Metrics
 > Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**；
 > **7B.1.2C Execution Runtime = FINAL**；**7B.1.3A Evaluation Execution Persistence
-> = FINAL**；**7B.1.4A Frozen Runtime Replayability Gate = FINAL**。
+> = FINAL**；**7B.1.4A Frozen Runtime Replayability Gate = FINAL**；
+> **7B.1.4B.1 Isolated Runtime Rehydration Foundation = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -67,6 +68,9 @@ app/eval/
   materialization/# 7B.1.1B：PG + RawArtifactStore 物化为 frozen snapshot（依赖详见 §3.11）
     service.py    #   document / macro / structured 三路 payload 投影
     projections.py#   payload bytes + sha256 + semantic fingerprint
+  replay/         # 7B.1.4B.1：Frozen Bundle → 隔离 PG + store 的运行时复现（依赖详见 §3.17）
+    contracts.py  #   replay_v1 确定性 policy 常量 + RehydratedCase/Document 结果
+    rehydrator.py #   EvaluationReplayRehydrator（只依赖隔离 target sessionmaker + store + loader）
   scoring/        # 7B.1.2A：cross-variant deterministic metrics
     context.py    #   EvalScoringContext（output + snapshot + exec fp，无 label）
     deterministic.py # citation_validity / citation_coverage v1 + 结构校验
@@ -457,6 +461,68 @@ provenance，运行期不读）、`provider_capabilities_snapshot`（SourceRecor
 master-data 时间戳与 identity-source 字段、Chroma 索引与 BGE embedding（derived /
 pipeline config，不在 bundle 内）。
 
+### 3.17 Isolated Runtime Rehydration Foundation（7B.1.4B.1）
+
+`app/eval/replay/` 把 Frozen Evaluation Bundle **复现**到一个**隔离运行时**上，
+证明 7B.1.4A 的 frozen bundle 确实足以在「无 live PG / 0 Chroma / 0 network」下重建
+三路 variant 的运行期输入。这是 7B.1.4A 审计（§3.16）的**落地证明**，不是新的产物。
+
+- **隔离边界（结构强制）**：`EvaluationReplayRehydrator` 构造函数**只**接收
+  `target_sessionmaker`（隔离 PG）+ `target_raw_artifact_store`（隔离 store root）+
+  `bundle_loader`（frozen bundle）。它**没有** source/live sessionmaker、**不读**
+  `DEFAULT_PROVIDERS` registry、**不调用** `SourceIngestionService`。测试
+  `test_rehydrator_structurally_isolated` 断言实例字段集恰为
+  `{"_sessionmaker", "_raw_store", "_loader"}`。
+- **精确 ID replay**：frozen 的 `company_id` / `source_record_id` / `raw_artifact_id`
+  作为隔离库的 DB PK **原样**落库（`RawArtifactRepository.insert` 新增 `session.add +
+  flush`，与 `create` 的 ON CONFLICT 路径不同——后者不写 `artifact_id`）。
+- **语义字段 vs 持久化脚手架**：frozen bundle 只携带运行期读取的语义字段
+  （Company 的 security_code/official_name/short_name/exchange/board/aliases、
+  Provider 的 provider_key/display_name/enabled/capabilities、Document 的 provenance）。
+  其余 schema-only 字段（NOT NULL / FK / CHECK 约束但运行期不读）由
+  `EVAL_REHYDRATION_POLICY_VERSION = "replay_v1"` 确定性补全（见 `replay/contracts.py`），
+  **不散落**在 rehydrator、**不读** DEFAULT_PROVIDER registry。`identity_key` 由
+  frozen 字段派生（`f"{exchange}:{security_code}"`）；`provider_capabilities_snapshot`
+  由 frozen provider 的 `capabilities` 派生（bundle 自洽）。
+- **不 seed derived artifact**：rehydration **不**写 ParsedSource / ParsedBlock /
+  ChunkSet / DocumentChunk / VectorIndex / EvidenceCard。caller 在 rehydrate 后用
+  `SourceParsingService.parse_source` + `ChunkingService.chunk_parsed_source` 走真实
+  pipeline 重建（integration test 端到端证明）。
+- **两阶段流程**：阶段一（DB session 之外）读 blob → SHA 校验 →
+  content-addressed 落盘（`media_type` dispatch：PDF→`put_pdf_stream`、JSON→
+  `put_json_bytes`、HTML→`put_html_bytes`）；阶段二单 DB 事务按 providers → company →
+  aliases → raw_artifacts → source_records 顺序插入 + commit。任一 blob SHA 不匹配、
+  snapshot fingerprint 与 case 引用不一致、document provider_key 不在 source_providers、
+  或 `media_type` 不支持 → fail-fast，**不打开 target session**。
+- **错误分类（不复用 EvalMaterializationError）**：`EvalReplayError`
+  （`eval_replay_error`，落盘/落库失败）+ `EvalReplayIntegrityError`
+  （`eval_replay_integrity_error`，SHA 不匹配 / 引用不自洽 / 违反 schema 约束，
+  映射 `IntegrityError`）。消息**不含** raw bytes / payload / DB URL / label / prompt /
+  API key。
+- **验证**：2 个 integration（真实 `alembic upgrade head` → 0045 的隔离临时库
+  `insightforge_eval_replay_<random>`，8 断言 happy path + schema violation 负例）
+  + 6 个 unit（blob tamper / snapshot fingerprint tamper / 跨引用破坏 / unsupported
+  media_type / 结构隔离 / 错误消息不泄露 payload）。0 LLM / 0 Chroma / 0 network。
+
+**宏观 / 财务 / 估值 rehydration 审计（spec R/S，本轮只审计不实现）**：
+
+- **R1（macro payload 是否含 raw bytes 供 `verify_snapshot_integrity` 重算？）→ 否**。
+  `build_macro_payload`（`materialization/projections.py`）投影的是**结构化 dict**
+  （snapshot_fingerprint / series / indicator / geography / observations 的序列化标量），
+  **不含** raw bytes；`MacroPersistenceService.verify_snapshot_integrity` 读的是
+  **persisted DB 行**（snapshot / series / links / observations / raw_artifacts 行），
+  其中归档 SHA 来自 `RawArtifact` **行**的 `content_sha256`，**不读** store 原始字节。
+  → macro rehydration 需要重建的是 persisted 结构化行（再重算 fingerprint），不需要
+  raw bytes；但 macro 行含 `MacroSnapshotArtifactLink` / `RawArtifact` 跨表引用，超出
+  本轮 document-only 复现范围。
+- **R2（财务/估值 fingerprint 是否绑定 source_evidence_card_id？）→ 是**。
+  `compute_metric_fingerprint`（`financial/contracts.py`）与
+  `compute_valuation_observation_fingerprint`（`valuation/contracts.py`）的 fingerprint
+  payload **均包含** `source_evidence_card_id`。→ 财务/估值 observation 的 exact-ID
+  replay 要求先重建 EvidenceCard 证据链；而 EvidenceCard 是 **derived artifact**
+  （§3.16 明确「不冻结」，各 variant 自提取），故**本轮 deferred**，待 runner 重建
+  证据链后再行结构化 replay。
+
 ## 4. 验收标准（7B.1.0）
 
 1. `app/eval/` 六模块；**无 DB / LLM / network / Chroma / 新依赖**。
@@ -512,6 +578,10 @@ pipeline config，不在 bundle 内）。
   live PG 隔离环境下的输入闭包；补齐 company identity / document provenance /
   provider registry 三处 closure gap；schema version 1→2 + 3 个指纹敏感 contract
   测试，见 §3.16）。
+- **7B.1.4B.1 ✅ FINAL**：Isolated Runtime Rehydration Foundation
+  （`app/eval/replay/`；`EvaluationReplayRehydrator` 把 frozen bundle 复现到隔离
+  PG + store，精确 ID replay + replay_v1 脚手架 + 不 seed derived artifact；
+  2 integration + 6 unit tests；宏观/财务/估值 rehydration 审计 deferred，见 §3.17）。
 - **7B.1.3B**：MetricValue / ScoringSpec / HumanLabel / Judge 持久化（本轮**未**开始）。
 - **7B.1.4**：真实/dev runner（dev/test Noop runner 用独立 identity，**不加**
   `EvalVariantId.NOOP`）+ 三路 real variant runner。

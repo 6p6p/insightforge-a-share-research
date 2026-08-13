@@ -77,3 +77,20 @@ class EvalPersistenceIntegrityError(EvalPersistenceError):
     replay 不一致 / 父行身份不匹配）。"""
 
     code = "eval_persistence_integrity_error"
+
+
+class EvalReplayError(EvalError):
+    """Frozen bundle rehydration 失败（隔离运行时复现 frozen input 失败）。
+
+    独立于 `EvalMaterializationError`（那是 PG→Bundle 物化失败）。错误消息
+    **不**包含 raw bytes / source payload / DB URL / labels / prompt / API key。
+    """
+
+    code = "eval_replay_error"
+
+
+class EvalReplayIntegrityError(EvalReplayError):
+    """Rehydration 完整性破坏（SHA-256 mismatch / tamper / 语义字段不一致 /
+    bundle 不自洽等）。"""
+
+    code = "eval_replay_integrity_error"
