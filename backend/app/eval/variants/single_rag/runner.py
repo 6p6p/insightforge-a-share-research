@@ -8,17 +8,18 @@ Synthesis / Writer / Audit / Revision——single_rag 只有一次 RAG 生成。
 
 隔离不变量：
 - rehydration 只落在隔离 target PG + store（`EvaluationReplayRehydrator`）；
-- derived index 用 per-(config, case) 命名空间 collection，**不**写回 bundle、
-  **不**复用生产 `insightforge_chunks_v2_*` collection；不同 variant / config /
-  case 的 collection 互相不可见；
+- derived index 用 per-attempt 命名空间 collection（绑定 `EvalVariantRuntimeContext`
+  `.execution_id`），**不**写回 bundle、**不**复用生产
+  `insightforge_chunks_v2_*` collection；不同 attempt / variant 的 collection
+  互相不可见；
 - 检索只在当前 frozen snapshot 的 document source 内（`source_ids` 白名单），
   `research_question` 是唯一 query。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -35,6 +36,7 @@ from app.eval.errors import (
     EvalOutputStructureError,
     EvalSingleRagInputError,
 )
+from app.eval.execution.contracts import EvalVariantRuntimeContext
 from app.eval.fingerprints import compute_execution_config_fingerprint
 from app.eval.replay.rehydrator import EvaluationReplayRehydrator
 from app.eval.variants import EvalVariantId
@@ -46,7 +48,7 @@ from app.eval.variants.single_rag.contracts import (
     SingleRagContextEntry,
 )
 from app.llm.instrumentation import LlmUsageObserver
-from app.rag.embedding.contracts import EmbeddingProvider
+from app.rag.embedding.contracts import BGE_SMALL_ZH_V1_5, EmbeddingProvider
 from app.rag.index.service import VectorIndexService
 from app.rag.retrieval.contracts import DEFAULT_TOP_K, RetrievalQuery
 from app.rag.retrieval.service import RetrievalService
@@ -91,24 +93,28 @@ class SingleRagVariantRunner:
         execution_case: LoadedEvalExecutionCase,
         execution_spec: EvalExecutionSpec,
         *,
+        runtime_context: EvalVariantRuntimeContext,
         usage_observer: LlmUsageObserver | None,
     ) -> EvalVariantOutput:
         # 1. config ↔ spec 绑定（assembly，0 model call）。
         self._validate_spec(execution_spec)
-        # 2. input closure（document-only，0 model call）。
+        # 2. 模型身份 preflight：注入 answer model + embedding provider 必须匹配
+        #    frozen config / 冻结 BGE 模型（0 model call）。
+        self._validate_model_identity()
+        self._validate_embedding_identity()
+        # 3. input closure（document-only，0 model call）。
         self._validate_input(execution_case)
 
-        # 3. rehydrate：frozen bundle → 隔离 PG + store。
+        # 4. rehydrate：frozen bundle → 隔离 PG + store。
         rehydrated = await self._rehydrator.rehydrate_case(
             execution_case.case_id, execution_case.case_version
         )
         if not rehydrated.documents:
             raise EvalSingleRagInputError("rehydration 未产出任何 document source")
 
-        # 4. per-(config, case) collection 命名空间（派生索引，不写回 bundle）。
-        collection_name = self._collection_name(
-            execution_spec.execution_config_fingerprint, execution_case.case_fingerprint
-        )
+        # 5. per-attempt collection 命名空间（绑定 execution_id；派生索引，不写回
+        #    bundle，不同 execution_id 的 attempt 互相不可见）。
+        collection_name = self._collection_name(runtime_context.execution_id)
         index_service = VectorIndexService(
             self._sessionmaker, self._embedding, self._chroma, collection_name=collection_name
         )
@@ -116,13 +122,16 @@ class SingleRagVariantRunner:
             self._sessionmaker, self._embedding, self._chroma, collection_name=collection_name
         )
 
-        # 5. parse → chunk → index（每条 frozen document 走真实 deterministic pipeline）。
+        # 6. parse → chunk → index（每条 frozen document 走真实 deterministic pipeline）。
+        #    parse/chunk 是幂等 create-or-get（跨 attempt 复用同一 ChunkSet），因此
+        #    index 必须 force_rebuild：把 manifest 重置并重建进本 attempt 自己的
+        #    collection，避免 ready replay 校验到空 collection。
         for doc in rehydrated.documents:
             parsed = await self._parsing.parse_source(doc.source_record_id)
             chunked = await self._chunking.chunk_parsed_source(parsed.parsed_source_id)
-            await index_service.index_chunk_set(chunked.chunk_set_id)
+            await index_service.index_chunk_set(chunked.chunk_set_id, force_rebuild=True)
 
-        # 6. retrieve：question 唯一 query，top_k 来自 frozen config，限定当前快照。
+        # 7. retrieve：question 唯一 query，top_k 来自 frozen config，限定当前快照。
         source_ids = [doc.source_record_id for doc in rehydrated.documents]
         top_k = (
             self._config.retrieval_top_k
@@ -138,7 +147,7 @@ class SingleRagVariantRunner:
             )
         )
 
-        # 7. 组装 context entries + key → (content_sha256, locator) 映射（不进 prompt）。
+        # 8. 组装 context entries + key → (content_sha256, locator) 映射（不进 prompt）。
         sha_by_source = {doc.source_record_id: doc.content_sha256 for doc in rehydrated.documents}
         context_entries: list[SingleRagContextEntry] = []
         key_to_sha: dict[str, str] = {}
@@ -159,15 +168,15 @@ class SingleRagVariantRunner:
             key_to_sha[key] = sha_by_source[hit.source_id]
             key_to_locator[key] = locator
 
-        # 8. 恰好一次 LLM 生成（usage_observer 线程到 adapter）。
+        # 9. 恰好一次 LLM 生成（usage_observer 线程到 adapter）。
         model_output = await self._answer_model.answer(
             execution_case.research_question,
             tuple(context_entries),
             usage_observer=usage_observer,
         )
 
-        # 9. 归一化为 EvalVariantOutput（citation source_fingerprint 由 application
-        #    映射 content_sha256，不取自模型）。
+        # 10. 归一化为 EvalVariantOutput（citation source_fingerprint 由 application
+        #     映射 content_sha256，不取自模型）。
         return self._normalize(model_output, execution_case, key_to_sha, key_to_locator)
 
     # ------------------------------------------------------------------ 内部
@@ -183,6 +192,50 @@ class SingleRagVariantRunner:
                 "execution_config_fingerprint 与 runner 绑定 config 不一致"
             )
 
+    def _validate_model_identity(self) -> None:
+        """模型身份 preflight：注入 answer model 必须等于 frozen config（0 model call）。
+
+        确保同一个 execution_config 下不会注入错误 provider / model_id 的模型；
+        不一致 = benchmark assembly corruption，抛 `EvalExecutionAssemblyError`。
+        """
+        config_model = self._config.model
+        if self._answer_model.provider != config_model.provider:
+            raise EvalExecutionAssemblyError(
+                f"answer_model.provider {self._answer_model.provider!r} != "
+                f"config {config_model.provider!r}"
+            )
+        if self._answer_model.model_id != config_model.model_id:
+            raise EvalExecutionAssemblyError(
+                f"answer_model.model_id {self._answer_model.model_id!r} != "
+                f"config {config_model.model_id!r}"
+            )
+
+    def _validate_embedding_identity(self) -> None:
+        """Embedding 模型身份 preflight（0 model call）。
+
+        single_rag 的 embedding 层冻结为 BGE：注入 provider 的 `model_info`
+        （model_id + immutable revision）必须等于 `BGE_SMALL_ZH_V1_5`。这防止同一个
+        `execution_config_fingerprint` 下悄悄更换 embedding 模型——embedding 变化会
+        改变 retrieval 结果，却不改变 config 指纹，使同 fingerprint 的 trial 不可比。
+        `revision is None`（模型未配置）在 assembly 期 fail fast（index 层虽同样
+        拒绝，但这里在 rehydration 之前失败更早）。未来更换 / 升级 BGE 必须同步
+        bump config（retrieval_version / component_versions）以改变指纹。
+        """
+        spec = self._embedding.model_info
+        frozen = BGE_SMALL_ZH_V1_5
+        if spec.model_id != frozen.model_id:
+            raise EvalExecutionAssemblyError(
+                f"embedding model_id {spec.model_id!r} != frozen {frozen.model_id!r}"
+            )
+        if spec.revision is None:
+            raise EvalExecutionAssemblyError(
+                "embedding model 未配置 immutable revision（revision is None）"
+            )
+        if spec.revision != frozen.revision:
+            raise EvalExecutionAssemblyError(
+                f"embedding revision {spec.revision!r} != frozen {frozen.revision!r}"
+            )
+
     @staticmethod
     def _validate_input(execution_case: LoadedEvalExecutionCase) -> None:
         snapshot = execution_case.snapshot
@@ -194,11 +247,11 @@ class SingleRagVariantRunner:
             raise EvalSingleRagInputError("single_rag v1 不支持 structured 输入")
 
     @staticmethod
-    def _collection_name(execution_config_fingerprint: str, case_fingerprint: str) -> str:
-        digest = hashlib.sha256(
-            (execution_config_fingerprint + case_fingerprint).encode("utf-8")
-        ).hexdigest()
-        return f"eval_single_rag_{digest[:12]}"
+    def _collection_name(execution_id: UUID) -> str:
+        # 派生索引命名空间绑定 execution_id：同一 case/config/spec 的不同 attempt
+        # （不同 trial 或不同 retry）必须各有独立 collection。execution_id.hex 是
+        # 稳定 deterministic encoding，长度 32 在 Chroma collection 名限制内。
+        return f"eval_single_rag_{execution_id.hex}"
 
     def _normalize(
         self,

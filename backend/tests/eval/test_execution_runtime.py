@@ -122,11 +122,15 @@ class _FakeRunner:
         self._output = output
         self._exc = exc
         self.seen_observer = None
+        self.seen_runtime_context = None
         self.calls = 0
 
-    async def run(self, execution_case, execution_spec, *, usage_observer=None):
+    async def run(
+        self, execution_case, execution_spec, *, runtime_context=None, usage_observer=None
+    ):
         self.calls += 1
         self.seen_observer = usage_observer
+        self.seen_runtime_context = runtime_context
         if self._exc is not None:
             raise self._exc
         assert self._output is not None
@@ -508,6 +512,25 @@ async def test_harness_passes_collector_to_runner() -> None:
     assert runner.calls == 1
     assert runner.seen_observer is not None
     assert isinstance(runner.seen_observer, EvalLlmUsageCollector)
+
+
+@pytest.mark.asyncio
+async def test_harness_passes_runtime_context_from_attempt() -> None:
+    """harness 是 EvalVariantRuntimeContext 的唯一 producer：context 必须等于
+    attempt 的 (execution_id, trial_fingerprint, attempt_no)。"""
+    attempt = _attempt()
+    runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
+    await execute_variant_attempt(
+        attempt=attempt,
+        trial_spec=_trial_spec(),
+        execution_spec=_spec(),
+        execution_case=_case(),
+        runner=runner,
+    )
+    assert runner.seen_runtime_context is not None
+    assert runner.seen_runtime_context.execution_id == attempt.execution_id
+    assert runner.seen_runtime_context.trial_fingerprint == attempt.trial_fingerprint
+    assert runner.seen_runtime_context.attempt_no == attempt.attempt_no
 
 
 @pytest.mark.asyncio

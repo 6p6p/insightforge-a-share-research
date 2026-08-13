@@ -7,14 +7,13 @@ normalize `EvalVariantOutput`（经 `execute_variant_attempt` harness，含
 usage collector + output fingerprint + wall latency）。
 
 全程 FakeEmbeddingProvider + FakeSingleRagAnswerModel + 独立临时 PostgreSQL
-（`insightforge_eval_single_rag_*`，alembic head → 0045）+ 独立 Chroma
-collection（`eval_single_rag_<sha12>`，finally 删除）：**0 真实 DeepSeek / 0
-network / 0 live provider**。需要真实 PostgreSQL（127.0.0.1:5433）且账号有
-CREATEDB 权限。
+（`insightforge_eval_single_rag_*`，alembic head → 0045）+ 每 attempt 独立 Chroma
+collection（`eval_single_rag_<execution_id.hex>`，finally 删除）：**0 真实
+DeepSeek / 0 network / 0 live provider**。需要真实 PostgreSQL（127.0.0.1:5433）
+且账号有 CREATEDB 权限。
 """
 
 import asyncio
-import hashlib
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -145,6 +144,9 @@ class _SingleRagAnswerModel:
     通过 usage_observer 记录一条 `eval_single_rag_answer` usage。
     """
 
+    provider = "deepseek"
+    model_id = "deepseek-chat"
+
     def __init__(self) -> None:
         self.calls = 0
         self.seen_entries = None
@@ -197,11 +199,8 @@ def _make_config() -> EvalExecutionConfig:
     )
 
 
-def _expected_collection_name(config: EvalExecutionConfig, case_fingerprint: str) -> str:
-    digest = hashlib.sha256(
-        (compute_execution_config_fingerprint(config) + case_fingerprint).encode("utf-8")
-    ).hexdigest()
-    return f"eval_single_rag_{digest[:12]}"
+def _expected_collection_name(execution_id) -> str:
+    return f"eval_single_rag_{execution_id.hex}"
 
 
 async def _drop_collection(client, collection_name: str) -> None:
@@ -261,7 +260,7 @@ async def test_single_rag_full_path_real_chain(monkeypatch, tmp_path) -> None:
             answer_model=answer_model,
         )
 
-        collection_name = _expected_collection_name(config, execution_case.case_fingerprint)
+        collection_name = _expected_collection_name(attempt.execution_id)
         client = await chroma.get_client()
         try:
             result = await execute_variant_attempt(
@@ -300,10 +299,82 @@ async def test_single_rag_full_path_real_chain(monkeypatch, tmp_path) -> None:
             # (5) wall latency 非负（harness perf_counter 度量）。
             assert isinstance(result.wall_latency_ms, int) and result.wall_latency_ms >= 0
 
-            # (6) Chroma collection 只属于本次 attempt（per-(config, case) 派生名，
-            #     不以 production 名复用），且已真实写入。
+            # (6) Chroma collection 只属于本次 attempt（per-attempt 派生名，绑定
+            #     execution_id，不以 production 名复用），且已真实写入。
             collection = await client.get_collection(collection_name)
             assert collection is not None
             assert collection_name.startswith("eval_single_rag_")
         finally:
             await _drop_collection(client, collection_name)
+
+
+async def test_single_rag_collections_isolated_per_attempt(monkeypatch, tmp_path) -> None:
+    """同一 Chroma root 连续执行两个 attempt（同 trial：Attempt1 vs Attempt2）：
+    各自创建独立 collection，不共享、不覆盖。"""
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sessionmaker, raw_store):
+        loader = EvaluationBundleLoader(bundle_root)
+        execution_case = loader.load_execution_case(CASE_ID, CASE_VERSION)
+        config = _make_config()
+        execution_spec = EvalExecutionSpec(
+            case_fingerprint=execution_case.case_fingerprint,
+            source_snapshot_fingerprint=compute_source_snapshot_fingerprint(
+                execution_case.snapshot
+            ),
+            execution_config_fingerprint=compute_execution_config_fingerprint(config),
+            variant_id=EvalVariantId.SINGLE_RAG,
+        )
+        trial_spec = EvalTrialSpec(
+            execution_spec_fingerprint=compute_execution_spec_fingerprint(execution_spec),
+            trial_no=1,
+        )
+
+        settings = get_settings()
+        chroma = ChromaManager(
+            host=settings.chroma_host,
+            port=settings.chroma_port,
+            ssl=settings.chroma_ssl,
+            timeout_seconds=settings.chroma_timeout_seconds,
+        )
+        client = await chroma.get_client()
+        collection_names: list[str] = []
+        try:
+            # 同一 trial 内 Attempt1 / Attempt2（不同 execution_id）。
+            for attempt_no, execution_id in ((1, uuid4()), (2, uuid4())):
+                attempt = EvalExecutionAttempt(
+                    trial_fingerprint=compute_trial_fingerprint(trial_spec),
+                    attempt_no=attempt_no,
+                    execution_id=execution_id,
+                )
+                runner = create_single_rag_runner(
+                    config=config,
+                    bundle_loader=loader,
+                    sessionmaker=sessionmaker,
+                    raw_store=raw_store,
+                    chroma=chroma,
+                    embedding_provider=FakeEmbeddingProvider(),
+                    answer_model=_SingleRagAnswerModel(),
+                )
+                result = await execute_variant_attempt(
+                    attempt=attempt,
+                    trial_spec=trial_spec,
+                    execution_spec=execution_spec,
+                    execution_case=execution_case,
+                    runner=runner,
+                )
+                assert result.status == ExecutionAttemptStatus.SUCCESS, (
+                    f"attempt {attempt_no} failed: {result.error_code}"
+                )
+                name = _expected_collection_name(execution_id)
+                collection = await client.get_collection(name)
+                assert collection is not None, f"attempt {attempt_no} 未创建自己的 collection"
+                collection_names.append(name)
+
+            # 两个 attempt 各得独立 collection，绝不共享。
+            assert len(set(collection_names)) == 2
+            assert collection_names[0] != collection_names[1]
+        finally:
+            for name in set(collection_names):
+                await _drop_collection(client, name)

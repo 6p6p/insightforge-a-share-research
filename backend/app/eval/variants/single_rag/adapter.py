@@ -32,6 +32,14 @@ class DeepSeekSingleRagAnswerModel:
         self._provider = provider
         self._model_id = model_id
 
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
     async def answer(
         self,
         research_question: str,

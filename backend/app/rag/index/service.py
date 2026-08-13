@@ -99,7 +99,17 @@ class VectorIndexService:
                 distance_metric=CHROMA_DISTANCE_METRIC,
             )
 
-    async def index_chunk_set(self, chunk_set_id: UUID) -> VectorIndexResult:
+    async def index_chunk_set(
+        self, chunk_set_id: UUID, *, force_rebuild: bool = False
+    ) -> VectorIndexResult:
+        """把一个 ChunkSet 嵌入并登记到 `self._collection_name`。
+
+        `force_rebuild=True`（默认 False）：**跳过 ready replay**，把既有 manifest
+        重置为 building 并重建进当前 collection。eval 每 attempt 隔离场景使用——同一
+        ChunkSet（幂等 parse/chunk 复用）在不同 attempt 各自重建进独立的
+        per-attempt collection；重建成功后 manifest.collection_name 指向实际写入的
+        collection。生产默认路径行为不变。
+        """
         spec = self._provider.model_info
         if spec.revision is None:
             raise EmbeddingModelNotConfigured(
@@ -120,7 +130,7 @@ class VectorIndexService:
 
         # 3a. manifest create-or-get（短 transaction，Chroma 操作前提交）。
         vector_index_id, existing = await self._ensure_manifest(
-            chunk_set_id, spec, fingerprint, expected
+            chunk_set_id, spec, fingerprint, expected, force_rebuild=force_rebuild
         )
 
         # 4a. Chroma 网络操作：get/create 兼容 collection（不持有 PG transaction）。
@@ -128,7 +138,8 @@ class VectorIndexService:
 
         # ready replay：先验证 expected records，缺失/错误抛 VectorIndexIntegrityError，
         # 不重新 embedding、不改状态（不在 retrieval read path 自动修复）。
-        if existing is not None and existing.status == "ready":
+        # force_rebuild 时跳过——manifest 已被重置为 building，走 build 路径。
+        if not force_rebuild and existing is not None and existing.status == "ready":
             collection = await self._compatible_collection(client)
             await self._verify_records(collection, chunks, provenance)
             return VectorIndexResult(
@@ -148,7 +159,7 @@ class VectorIndexService:
         except Exception as exc:
             await self._mark_failed(vector_index_id, stable_error_code(exc))
             raise
-        await self._mark_ready(vector_index_id, expected)
+        await self._mark_ready(vector_index_id, expected, collection_name=self._collection_name)
         return VectorIndexResult(
             vector_index_id=vector_index_id,
             chunk_set_id=chunk_set_id,
@@ -205,12 +216,15 @@ class VectorIndexService:
         spec,
         fingerprint: str,
         expected: int,
+        *,
+        force_rebuild: bool = False,
     ) -> tuple[UUID, ChunkVectorIndexModel | None]:
         """manifest create-or-get（自然身份）。返回 (vector_index_id, existing 或 None)。
 
         - 无 manifest → 创建 building；
         - failed / building → 重置为 building（retry，确定性 id + upsert 幂等）；
-        - ready → 原样返回（replay 由调用方决定）。
+        - ready → 原样返回（replay 由调用方决定）；`force_rebuild=True` 时 ready 也
+          重置为 building（eval 每 attempt 重建进独立 collection）。
         """
         async with self._sessionmaker() as session:
             repo = ChunkVectorIndexRepository(session)
@@ -221,9 +235,11 @@ class VectorIndexService:
                 CHROMA_COLLECTION_SCHEMA_VERSION,
             )
             if existing is not None:
-                if existing.status == "ready":
+                if not force_rebuild and existing.status == "ready":
                     return existing.vector_index_id, existing
-                await repo.reset_to_building(existing.vector_index_id)
+                await repo.reset_to_building(
+                    existing.vector_index_id, index_fingerprint=fingerprint
+                )
                 await session.commit()
                 return existing.vector_index_id, existing
             manifest = ChunkVectorIndexModel(
@@ -311,11 +327,15 @@ class VectorIndexService:
         if problems:
             raise VectorIndexIntegrityError()
 
-    async def _mark_ready(self, vector_index_id: UUID, expected: int) -> None:
+    async def _mark_ready(
+        self, vector_index_id: UUID, expected: int, *, collection_name: str | None = None
+    ) -> None:
         async with self._sessionmaker() as session:
             try:
                 repo = ChunkVectorIndexRepository(session)
-                await repo.mark_ready(vector_index_id, indexed=expected)
+                await repo.mark_ready(
+                    vector_index_id, indexed=expected, collection_name=collection_name
+                )
                 await session.commit()
             except SQLAlchemyError as exc:
                 await session.rollback()

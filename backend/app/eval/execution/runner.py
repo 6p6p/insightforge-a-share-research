@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 
 from app.eval.bundle.loader import LoadedEvalExecutionCase
 from app.eval.contracts import EvalExecutionSpec, EvalVariantOutput
+from app.eval.execution.contracts import EvalVariantRuntimeContext
 from app.eval.variants import EvalVariantId
 from app.llm.instrumentation import LlmUsageObserver
 
@@ -20,8 +21,11 @@ class VariantRunner(Protocol):
     """variant 执行器契约。
 
     - `variant_id`：该 runner 实现的 variant（harness 校验 == spec.variant_id）；
-    - `run(...)`：execution_case + execution_spec → normalized output；失败抛异常
-      （异常稳定 `.code` 进入 attempt result 的 `error_code`）；
+    - `run(...)`：execution_case + execution_spec + runtime_context → normalized
+      output；失败抛异常（异常稳定 `.code` 进入 attempt result 的 `error_code`）；
+    - `runtime_context` 由 harness 从当前 `EvalExecutionAttempt` 构造（唯一
+      producer），runner 用它做 attempt 级派生隔离（如 Chroma collection 命名），
+      不得自造 execution_id；
     - `usage_observer` 由 harness 注入（`EvalLlmUsageCollector`），runner 必须把它
       线程到其内部全部 LLM adapter（否则 usage 计为 0 = 0 LLM call）。
     """
@@ -33,5 +37,6 @@ class VariantRunner(Protocol):
         execution_case: LoadedEvalExecutionCase,
         execution_spec: EvalExecutionSpec,
         *,
+        runtime_context: EvalVariantRuntimeContext,
         usage_observer: LlmUsageObserver | None,
     ) -> EvalVariantOutput: ...

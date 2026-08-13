@@ -95,10 +95,16 @@ class SingleRagContextEntry:
 class SingleRagAnswerModel(Protocol):
     """一次 LLM 生成的 answer model。
 
+    - 只读 `provider` / `model_id`：runner 在**任何** model call 前验证它们等于
+      `EvalExecutionConfig.model` 的冻结值（不一致 → `EvalExecutionAssemblyError`，
+      0 model call）；fake 必须显式声明身份，production adapter 使用真实配置值；
     - 输入研究问题 + 检索上下文条目；
     - 产出 `SingleRagModelOutput`；
     - `usage_observer` 由 runner 线程（harness 注入的 `EvalLlmUsageCollector`）。
     """
+
+    provider: str
+    model_id: str
 
     async def answer(
         self,

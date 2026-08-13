@@ -1,4 +1,4 @@
-"""Single RAG variant runner 单元测试（stage 7B.1.4C.1 spec R，11 cases）。
+"""Single RAG variant runner 单元测试（stage 7B.1.4C.1 spec R）。
 
 全部离线：fake rehydrator / parsing / chunking / answer model + monkeypatch
 `VectorIndexService` / `RetrievalService`，0 DB / 0 LLM / 0 network / 0 Chroma。
@@ -6,6 +6,12 @@
 覆盖 single_rag runner 的：
 - input closure（macro / structured 不支持 → `EvalSingleRagInputError`，0 model call）；
 - config ↔ spec binding（fingerprint mismatch → assembly error，0 model call）；
+- 模型身份 preflight（answer model provider / model_id 与 frozen config 不一致 →
+  assembly error，0 model call）；
+- embedding 身份 preflight（注入 provider 的 model_id / revision 与冻结 BGE 不一致，
+  或 revision 未配置 → assembly error，0 model call）；
+- 每 attempt 隔离（collection 命名绑定 execution_id；跨 trial / 同 trial 不同
+  attempt 各得独立 collection）；
 - prompt version 绑定（构造期校验）；
 - normalize 的 hard 失败（unknown citation key / duplicate claim_id）；
 - 归一化结构（citation source_fingerprint 由 application 映射 content_sha256，
@@ -35,6 +41,7 @@ from app.eval.errors import (
     EvalOutputStructureError,
     EvalSingleRagInputError,
 )
+from app.eval.execution.contracts import EvalVariantRuntimeContext
 from app.eval.fingerprints import compute_execution_config_fingerprint
 from app.eval.replay.contracts import RehydratedCase, RehydratedDocument
 from app.eval.usage.collector import EvalLlmUsageCollector
@@ -46,7 +53,9 @@ from app.eval.variants.single_rag import (
 )
 from app.eval.variants.single_rag.runner import SingleRagVariantRunner
 from app.llm.instrumentation import LlmCallOutcome, LlmCallUsageRecord, UsageStatus
+from app.rag.embedding.contracts import BGE_SMALL_ZH_V1_5, EmbeddingModelSpec
 from app.rag.retrieval.contracts import RetrievalHit
+from tests.embedding.fakes import FakeEmbeddingProvider
 from tests.eval.macro_factory import make_macro_ref
 
 CASE_ID = "single-rag-case"
@@ -199,10 +208,37 @@ def _model_output() -> SingleRagModelOutput:
     )
 
 
+def _runtime(*, execution_id: UUID = UID, attempt_no: int = 1) -> EvalVariantRuntimeContext:
+    """构造一个与当前 attempt 一致的 runtime context（trial fp 与 harness 无耦合）。"""
+    return EvalVariantRuntimeContext(
+        execution_id=execution_id,
+        trial_fingerprint="d" * 64,
+        attempt_no=attempt_no,
+    )
+
+
+def _embedding_spec(
+    *, model_id: str | None = None, revision: str | None = None
+) -> EmbeddingModelSpec:
+    """与冻结 BGE 不同的 embedding spec（embedding 身份 preflight 负向测试用）。"""
+    base = BGE_SMALL_ZH_V1_5
+    return EmbeddingModelSpec(
+        model_id=model_id if model_id is not None else base.model_id,
+        dimension=base.dimension,
+        normalize_embeddings=base.normalize_embeddings,
+        query_instruction=base.query_instruction,
+        max_input_tokens=base.max_input_tokens,
+        revision=revision,
+    )
+
+
 # ---------------------------------------------------------------- fakes
 
 
 class _FakeAnswerModel:
+    provider = "deepseek"
+    model_id = "deepseek-chat"
+
     def __init__(self, output: SingleRagModelOutput, *, record_usage: bool = False) -> None:
         self._output = output
         self._record_usage = record_usage
@@ -264,8 +300,10 @@ class _FakeChunking:
 class _FakeVectorIndexService:
     def __init__(self, sessionmaker, embedding, chroma, collection_name=None) -> None:
         self.collection_name = collection_name
+        self.force_rebuild_calls = []
 
-    async def index_chunk_set(self, chunk_set_id) -> None:
+    async def index_chunk_set(self, chunk_set_id, *, force_rebuild=False) -> None:
+        self.force_rebuild_calls.append((chunk_set_id, force_rebuild))
         return None
 
 
@@ -299,12 +337,16 @@ def _patch_rag(monkeypatch, hits):
     return created
 
 
-def _make_runner(monkeypatch, *, config, documents=(), hits=(), answer_model=None):
+def _make_runner(
+    monkeypatch, *, config, documents=(), hits=(), answer_model=None, embedding_provider=None
+):
     rehydrator = _FakeRehydrator(documents=documents)
     parsing = _FakeParsing()
     chunking = _FakeChunking()
     if answer_model is None:
         answer_model = _FakeAnswerModel(output=_model_output())
+    if embedding_provider is None:
+        embedding_provider = FakeEmbeddingProvider()
     created = _patch_rag(monkeypatch, hits)
     runner = SingleRagVariantRunner(
         config=config,
@@ -312,7 +354,7 @@ def _make_runner(monkeypatch, *, config, documents=(), hits=(), answer_model=Non
         parsing_service=parsing,
         chunking_service=chunking,
         sessionmaker=None,
-        embedding_provider=None,
+        embedding_provider=embedding_provider,
         chroma=None,
         answer_model=answer_model,
     )
@@ -334,7 +376,9 @@ async def test_macro_input_unsupported(monkeypatch) -> None:
         monkeypatch, config=config, answer_model=answer_model
     )
     with pytest.raises(EvalSingleRagInputError) as exc:
-        await runner.run(_case(snapshot), _spec(config), usage_observer=None)
+        await runner.run(
+            _case(snapshot), _spec(config), runtime_context=_runtime(), usage_observer=None
+        )
     assert exc.value.code == "single_rag_input_not_supported"
     assert answer_model.calls == 0
     assert rehydrator.calls == 0
@@ -355,7 +399,9 @@ async def test_structured_input_unsupported(monkeypatch) -> None:
         monkeypatch, config=config, answer_model=answer_model
     )
     with pytest.raises(EvalSingleRagInputError) as exc:
-        await runner.run(_case(snapshot), _spec(config), usage_observer=None)
+        await runner.run(
+            _case(snapshot), _spec(config), runtime_context=_runtime(), usage_observer=None
+        )
     assert exc.value.code == "single_rag_input_not_supported"
     assert answer_model.calls == 0
     assert rehydrator.calls == 0
@@ -377,7 +423,7 @@ async def test_config_fingerprint_mismatch_zero_calls(monkeypatch) -> None:
     )
     bad_spec = _spec(config, config_fingerprint="e" * 64)
     with pytest.raises(EvalExecutionAssemblyError):
-        await runner.run(_case(), bad_spec, usage_observer=None)
+        await runner.run(_case(), bad_spec, runtime_context=_runtime(), usage_observer=None)
     assert answer_model.calls == 0
     assert rehydrator.calls == 0
 
@@ -386,6 +432,170 @@ def test_wrong_prompt_version_rejected_at_construction(monkeypatch) -> None:
     config = _make_config(prompt_version="v2")
     with pytest.raises(EvalExecutionAssemblyError):
         _make_runner(monkeypatch, config=config)
+
+
+# ---------------------------------------------------------------- runtime identity binding
+
+
+@pytest.mark.asyncio
+async def test_model_identity_provider_mismatch_zero_calls(monkeypatch) -> None:
+    config = _make_config()
+    wrong = _FakeAnswerModel(output=_model_output())
+    wrong.provider = "openai"  # 与 config.model.provider=deepseek 不一致
+    runner, _, _, _, _, _ = _make_runner(
+        monkeypatch,
+        config=config,
+        documents=(_rehydrated_doc(),),
+        hits=_two_hits(),
+        answer_model=wrong,
+    )
+    with pytest.raises(EvalExecutionAssemblyError):
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
+    assert wrong.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_model_identity_model_id_mismatch_zero_calls(monkeypatch) -> None:
+    config = _make_config()
+    wrong = _FakeAnswerModel(output=_model_output())
+    wrong.model_id = "deepseek-reasoner"  # 与 config.model.model_id=deepseek-chat 不一致
+    runner, _, _, _, _, _ = _make_runner(
+        monkeypatch,
+        config=config,
+        documents=(_rehydrated_doc(),),
+        hits=_two_hits(),
+        answer_model=wrong,
+    )
+    with pytest.raises(EvalExecutionAssemblyError):
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
+    assert wrong.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_identity_model_id_mismatch_zero_calls(monkeypatch) -> None:
+    config = _make_config()
+    answer_model = _FakeAnswerModel(output=_model_output())
+    wrong = FakeEmbeddingProvider(spec=_embedding_spec(model_id="other-embedding-model"))
+    runner, _, _, _, answer_model, _ = _make_runner(
+        monkeypatch,
+        config=config,
+        documents=(_rehydrated_doc(),),
+        hits=_two_hits(),
+        answer_model=answer_model,
+        embedding_provider=wrong,
+    )
+    with pytest.raises(EvalExecutionAssemblyError):
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
+    assert answer_model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_identity_revision_mismatch_zero_calls(monkeypatch) -> None:
+    config = _make_config()
+    answer_model = _FakeAnswerModel(output=_model_output())
+    wrong = FakeEmbeddingProvider(spec=_embedding_spec(revision="9" * 64))
+    runner, _, _, _, answer_model, _ = _make_runner(
+        monkeypatch,
+        config=config,
+        documents=(_rehydrated_doc(),),
+        hits=_two_hits(),
+        answer_model=answer_model,
+        embedding_provider=wrong,
+    )
+    with pytest.raises(EvalExecutionAssemblyError):
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
+    assert answer_model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_identity_revision_none_zero_calls(monkeypatch) -> None:
+    config = _make_config()
+    answer_model = _FakeAnswerModel(output=_model_output())
+    unconfigured = FakeEmbeddingProvider(spec=_embedding_spec(revision=None))
+    runner, _, _, _, answer_model, _ = _make_runner(
+        monkeypatch,
+        config=config,
+        documents=(_rehydrated_doc(),),
+        hits=_two_hits(),
+        answer_model=answer_model,
+        embedding_provider=unconfigured,
+    )
+    with pytest.raises(EvalExecutionAssemblyError):
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
+    assert answer_model.calls == 0
+
+
+# ---------------------------------------------------------------- per-attempt isolation
+
+
+@pytest.mark.asyncio
+async def test_collection_isolated_across_trials(monkeypatch) -> None:
+    """same case/config/spec：Trial1 Attempt1 (execution_id=A) vs Trial2 Attempt1
+    (execution_id=B) → collection 名不同。"""
+    config = _make_config()
+    uuid_a = UUID("00000000-0000-0000-0000-0000000000a1")
+    uuid_b = UUID("00000000-0000-0000-0000-0000000000b1")
+
+    runner_a, _, _, _, _, created_a = _make_runner(
+        monkeypatch, config=config, documents=(_rehydrated_doc(),), hits=_two_hits()
+    )
+    await runner_a.run(
+        _case(),
+        _spec(config),
+        runtime_context=_runtime(execution_id=uuid_a),
+        usage_observer=None,
+    )
+    name_a = created_a["vector"].collection_name
+
+    runner_b, _, _, _, _, created_b = _make_runner(
+        monkeypatch, config=config, documents=(_rehydrated_doc(),), hits=_two_hits()
+    )
+    await runner_b.run(
+        _case(),
+        _spec(config),
+        runtime_context=_runtime(execution_id=uuid_b),
+        usage_observer=None,
+    )
+    name_b = created_b["vector"].collection_name
+
+    assert name_a != name_b
+    assert name_a.startswith("eval_single_rag_")
+    assert name_b.startswith("eval_single_rag_")
+
+
+@pytest.mark.asyncio
+async def test_collection_isolated_within_trial(monkeypatch) -> None:
+    """same case/config/spec + same trial：Attempt1 (execution_id=C) vs Attempt2
+    (execution_id=D) → collection 名不同。"""
+    config = _make_config()
+    uuid_c = UUID("00000000-0000-0000-0000-0000000000c2")
+    uuid_d = UUID("00000000-0000-0000-0000-0000000000d2")
+
+    runner_c, _, _, _, _, created_c = _make_runner(
+        monkeypatch, config=config, documents=(_rehydrated_doc(),), hits=_two_hits()
+    )
+    await runner_c.run(
+        _case(),
+        _spec(config),
+        runtime_context=_runtime(execution_id=uuid_c, attempt_no=1),
+        usage_observer=None,
+    )
+    name_c = created_c["vector"].collection_name
+
+    runner_d, _, _, _, _, created_d = _make_runner(
+        monkeypatch, config=config, documents=(_rehydrated_doc(),), hits=_two_hits()
+    )
+    await runner_d.run(
+        _case(),
+        _spec(config),
+        runtime_context=_runtime(execution_id=uuid_d, attempt_no=2),
+        usage_observer=None,
+    )
+    name_d = created_d["vector"].collection_name
+
+    assert name_c != name_d
+    assert name_c == f"eval_single_rag_{uuid_c.hex}"
+    assert name_d == f"eval_single_rag_{uuid_d.hex}"
 
 
 # ---------------------------------------------------------------- normalize hard failure
@@ -407,7 +617,7 @@ async def test_unknown_citation_key_fails(monkeypatch) -> None:
         answer_model=answer_model,
     )
     with pytest.raises(EvalOutputStructureError):
-        await runner.run(_case(), _spec(config), usage_observer=None)
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
     assert answer_model.calls == 1
 
 
@@ -430,7 +640,7 @@ async def test_duplicate_claim_id_fails(monkeypatch) -> None:
         answer_model=answer_model,
     )
     with pytest.raises(EvalOutputStructureError):
-        await runner.run(_case(), _spec(config), usage_observer=None)
+        await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
     assert answer_model.calls == 1
 
 
@@ -448,7 +658,9 @@ async def test_valid_output_normalized(monkeypatch) -> None:
         hits=_two_hits(),
         answer_model=answer_model,
     )
-    output = await runner.run(_case(), _spec(config), usage_observer=None)
+    output = await runner.run(
+        _case(), _spec(config), runtime_context=_runtime(), usage_observer=None
+    )
 
     assert output.variant_id == EvalVariantId.SINGLE_RAG
     assert output.case_id == CASE_ID
@@ -483,7 +695,9 @@ async def test_citation_sha_from_application_not_model(monkeypatch) -> None:
         hits=_two_hits(),
         answer_model=answer_model,
     )
-    output = await runner.run(_case(), _spec(config), usage_observer=None)
+    output = await runner.run(
+        _case(), _spec(config), runtime_context=_runtime(), usage_observer=None
+    )
 
     # citation source_fingerprint 必须等于 frozen content_sha256（application 映射），
     # 而不是模型给出的任何值（模型只能产出 D1/D2 短 key）。
@@ -506,7 +720,9 @@ async def test_bidirectional_closure(monkeypatch) -> None:
         hits=_two_hits(),
         answer_model=_FakeAnswerModel(output=_model_output()),
     )
-    output = await runner.run(_case(), _spec(config), usage_observer=None)
+    output = await runner.run(
+        _case(), _spec(config), runtime_context=_runtime(), usage_observer=None
+    )
 
     citation_ids = {c.citation_id for c in output.citations}
     claim_ids = {c.claim_id for c in output.claims}
@@ -538,7 +754,7 @@ async def test_usage_observer_passthrough(monkeypatch) -> None:
         hits=_two_hits(),
         answer_model=answer_model,
     )
-    await runner.run(_case(), _spec(config), usage_observer=collector)
+    await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=collector)
 
     assert answer_model.seen_observer is collector
     records = collector.records()
@@ -557,5 +773,5 @@ async def test_exactly_one_model_call(monkeypatch) -> None:
         hits=_two_hits(),
         answer_model=answer_model,
     )
-    await runner.run(_case(), _spec(config), usage_observer=None)
+    await runner.run(_case(), _spec(config), runtime_context=_runtime(), usage_observer=None)
     assert answer_model.calls == 1

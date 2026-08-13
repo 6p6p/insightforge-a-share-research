@@ -42,6 +42,7 @@ from app.eval.execution.contracts import (
     EvalExecutionAttempt,
     EvalExecutionAttemptResult,
     EvalTrialSpec,
+    EvalVariantRuntimeContext,
     ExecutionAttemptStatus,
     compute_trial_fingerprint,
 )
@@ -142,9 +143,19 @@ async def execute_variant_attempt(
     trial_fingerprint = attempt.trial_fingerprint
     attempt_no = attempt.attempt_no
     execution_id = attempt.execution_id
+    runtime_context = EvalVariantRuntimeContext(
+        execution_id=execution_id,
+        trial_fingerprint=trial_fingerprint,
+        attempt_no=attempt_no,
+    )
     start_ns = time.perf_counter_ns()
     try:
-        output = await runner.run(execution_case, execution_spec, usage_observer=collector)
+        output = await runner.run(
+            execution_case,
+            execution_spec,
+            runtime_context=runtime_context,
+            usage_observer=collector,
+        )
         _verify_output(output, execution_case, execution_spec, execution_spec_fingerprint)
         output_fingerprint = compute_variant_output_fingerprint(output)
     except Exception as exc:  # noqa: BLE001 — 任何 runner 异常都收敛为 failed result

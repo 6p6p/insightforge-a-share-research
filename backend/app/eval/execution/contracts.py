@@ -101,6 +101,31 @@ class EvalExecutionAttempt:
 
 
 @dataclass(frozen=True)
+class EvalVariantRuntimeContext:
+    """一次 attempt 的 runtime 身份（VariantRunner 派生隔离状态的唯一依据）。
+
+    由 harness 从当前 `EvalExecutionAttempt` 构造并传给 `VariantRunner.run()`：
+    runner 不得自造 execution_id。derived state（Chroma collection / 临时 index /
+    缓存）必须绑定 `execution_id`——同一 ExecutionSpec 下 Trial1/Attempt1、
+    Trial2/Attempt1、Trial2/Attempt2 是三次独立 attempt，不能共享派生状态。
+
+    不重复携带 `execution_spec_fingerprint`：它已嵌入 `trial_fingerprint`，
+    且 `EvalExecutionSpec` 本身由 runner 直接拿到。
+    """
+
+    execution_id: UUID
+    trial_fingerprint: str
+    attempt_no: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution_id, UUID):
+            raise ValueError(f"execution_id 必须是 UUID，得到 {self.execution_id!r}")
+        if not _is_sha256_hex(self.trial_fingerprint):
+            raise ValueError("trial_fingerprint 必须是 64 位小写 hex")
+        _require_int_ge_1(self.attempt_no, "attempt_no")
+
+
+@dataclass(frozen=True)
 class EvalExecutionAttemptResult:
     """一次 attempt 的冻结执行结果（success / failed）。
 

@@ -83,28 +83,42 @@ class ChunkVectorIndexRepository:
             raise RuntimeError("chunk vector index conflict without existing row")
         return existing, False
 
-    async def reset_to_building(self, vector_index_id: UUID) -> None:
-        """retry failed/building：回到 building，清空上一次错误与计数。"""
+    async def reset_to_building(
+        self, vector_index_id: UUID, *, index_fingerprint: str | None = None
+    ) -> None:
+        """retry failed/building（或 eval force_rebuild）：回到 building，清空上一次
+        错误与计数；`index_fingerprint` 可选——重建进不同 collection 时同步更新
+        fingerprint（否则 manifest 残留旧 collection 的指纹，内部不一致）。"""
+        values: dict = {
+            "status": "building",
+            "last_error_code": None,
+            "indexed_chunk_count": 0,
+        }
+        if index_fingerprint is not None:
+            values["index_fingerprint"] = index_fingerprint
         await self._session.execute(
             update(ChunkVectorIndexModel)
             .where(ChunkVectorIndexModel.vector_index_id == vector_index_id)
-            .values(
-                status="building",
-                last_error_code=None,
-                indexed_chunk_count=0,
-            )
+            .values(**values)
         )
 
-    async def mark_ready(self, vector_index_id: UUID, *, indexed: int) -> None:
+    async def mark_ready(
+        self, vector_index_id: UUID, *, indexed: int, collection_name: str | None = None
+    ) -> None:
+        """mark ready；`collection_name` 可选：eval per-attempt 重建时把 manifest 指向
+        实际写入的 collection（生产路径同名，无副作用）。"""
+        values: dict = {
+            "status": "ready",
+            "indexed_chunk_count": indexed,
+            "last_error_code": None,
+            "ready_at": datetime.now(UTC),
+        }
+        if collection_name is not None:
+            values["collection_name"] = collection_name
         await self._session.execute(
             update(ChunkVectorIndexModel)
             .where(ChunkVectorIndexModel.vector_index_id == vector_index_id)
-            .values(
-                status="ready",
-                indexed_chunk_count=indexed,
-                last_error_code=None,
-                ready_at=datetime.now(UTC),
-            )
+            .values(**values)
         )
 
     async def mark_failed(self, vector_index_id: UUID, *, error_code: str) -> None:
