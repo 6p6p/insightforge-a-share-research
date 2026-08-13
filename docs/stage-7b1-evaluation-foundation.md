@@ -4,7 +4,7 @@
 > **7B.1.1B PG→Frozen Snapshot Materializer = FINAL**；**7B.1.2A Deterministic Metrics
 > Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**；
 > **7B.1.2C Execution Runtime = FINAL**；**7B.1.3A Evaluation Execution Persistence
-> = FINAL**。
+> = FINAL**；**7B.1.4A Frozen Runtime Replayability Gate = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -109,25 +109,38 @@ COMPARABLE_VARIANTS: tuple[EvalVariantId, ...] = tuple(EvalVariantId)
 
 - `FrozenDocumentSourceRef`：`source_record_id UUID` / `raw_artifact_id UUID` /
   `content_sha256 64hex` / `provider_key` / `document_type` / `media_type` /
-  `published_at?` / `reporting_period_start?` / `reporting_period_end?`。
+  `title` / `source_url` / `acquired_at` / `authority_tier_snapshot 1..4` /
+  `critical_claim_eligible_snapshot` / `published_at?` / `reporting_period_start?` /
+  `reporting_period_end?`（`title`/`source_url`/`acquired_at`/
+  `authority_tier_snapshot`/`critical_claim_eligible_snapshot` 为 7B.1.4A 补齐，
+  见 §3.16）。
 - `FrozenMacroSnapshotRef`：`snapshot_id UUID` / `series_id UUID` /
   `snapshot_fingerprint 64hex` / `fetched_at`。
 - `FrozenStructuredArtifactRef`：`artifact_type`（enum：`financial_metric_observation`
   / `relative_valuation_observation` / `relative_valuation_comparison`）/
   `artifact_id UUID` / `artifact_fingerprint 64hex`。
-- `FrozenSourceSnapshot`：`snapshot_schema_version=1` + 三类 tuple；`frozen=True`；
+- `FrozenSourceSnapshot`：`snapshot_schema_version=2` + 四类 tuple（document /
+  macro / structured / `source_providers`）；`frozen=True`；
   duplicate identity 构造时拒绝（doc 按 `content_sha256`、macro 按
-  `snapshot_fingerprint`、structured 按 `(artifact_type, artifact_fingerprint)`）；
+  `snapshot_fingerprint`、structured 按 `(artifact_type, artifact_fingerprint)`、
+  provider 按 `provider_key`）；
   UUID（`snapshot_id` / `artifact_id`）只是 provenance 指针，**不是** semantic
   identity，不参与去重；**不保存 raw bytes**。
+- `FrozenSourceProviderRef`（7B.1.4A 新增）：`provider_key` / `display_name` /
+  `enabled` / `capabilities tuple`（sorted）。只冻结 router 与 citation label
+  运行期真正读取的 semantic 字段。
 
 ### 3.3 EvalCase（`contracts.py`）
 
-`schema_version=1` / `case_id`（稳定 slug，拒绝 UUID-only）/ `case_version>=1` /
-`company_id UUID` / `security_code` / `research_question`（strip 非空、bounded）/
-`analysis_as_of datetime` / `tags` / `source_snapshot_fingerprint 64hex` /
-`human_label_fingerprint 64hex?`。**不含** WorkflowRun id / orchestration id /
-created_at / 当前 DB execution status。
+`schema_version=2` / `case_id`（稳定 slug，拒绝 UUID-only）/ `case_version>=1` /
+`company_id UUID` / `company FrozenCompanyIdentity` / `research_question`（strip
+非空、bounded）/ `analysis_as_of datetime` / `tags` /
+`source_snapshot_fingerprint 64hex` / `human_label_fingerprint 64hex?`。**不含**
+WorkflowRun id / orchestration id / created_at / 当前 DB execution status。
+`FrozenCompanyIdentity`（7B.1.4A 新增）：`security_code` / `official_name` /
+`short_name?` / `exchange` / `board` / `aliases tuple`（dedup+sorted）——即
+production `ResearchPlannerInputSnapshot` 的 company 子集，取代旧 `security_code`
+标量，见 §3.16。
 
 ### 3.4 EvalDatasetManifest（`contracts.py`）
 
@@ -237,6 +250,11 @@ collection canonical sort。
   verify_snapshot_integrity` 重算**（结构不变量 + fingerprint 重算防篡改）；eval
   模块**不复制**该算法，而是复用 domain helper
   （`app/macro/snapshot_rebuild.rebuild_macro_snapshot_fingerprint`）。
+- **7B.1.4A 补齐**：materializer 额外物化 `FrozenCompanyIdentity`（从 `CompanyModel`
+  + `CompanyAliasModel`，交叉核对 `security_code`）+ `FrozenSourceProviderRef`
+  列表（`list_providers(enabled_only=False)` 全量投影）。document 投影新增
+  title / source_url / acquired_at / authority_tier_snapshot /
+  critical_claim_eligible_snapshot 字段。见 §3.16。
 
 ### 3.12 Deterministic Metrics Foundation（7B.1.2A）
 
@@ -377,6 +395,68 @@ semantic identity），`(trial_fingerprint, attempt_no)` 才是去重身份。�
 - **downgrade guard**（0045→0044）：四张表任一存在行 → 拒绝回滚（RuntimeError，
   `alembic_version` 保持 0045）；四张表全空才允许回滚。
 
+### 3.16 Frozen Runtime Replayability（7B.1.4A）
+
+**目标**：审计 Frozen Evaluation Bundle 能否在**完全隔离环境（无 live PG / 无
+Chroma / 0 network）**下重建三路 variant（single_rag / multi_stage_no_audit /
+insightforge_full）的全部运行期输入。审计沿
+`create_research_orchestration_dependencies` 装配链，逐一追踪 Planner / Initial
+Fulfillment / Source Preparation / Document Parsing / Chunking / Retrieval /
+Evidence Extraction / Stage4 / Stage5 / Backflow 各节点从 live PG 读取的生产字段，
+核对「该字段是否已被 frozen bundle 覆盖」。
+
+**审计结论：3 处 closure gap，已在本 stage 补齐**（`SNAPSHOT_SCHEMA_VERSION`、
+`EVAL_CASE_SCHEMA_VERSION` 均 1→2）：
+
+1. **company identity**：Planner 从 `CompanyModel`（security_code / official_name /
+   short_name / exchange / board）+ `CompanyAliasModel.alias` 构建 planner 输入；
+   旧 `EvalCase.security_code` 标量不足。新增 `FrozenCompanyIdentity` 取代之，
+   完整冻结 planner LLM prompt 的 `CompanyIdentitySnapshot` 派生所需原始字段。
+2. **document source provenance**：Evidence Extraction（`resolve_document`）与
+   Preparation（no-lookahead / period 过滤）读取 `SourceRecord` 的 title /
+   source_url / published_at / acquired_at / authority_tier_snapshot /
+   critical_claim_eligible_snapshot / document_type / reporting_period_end；旧
+   `FrozenDocumentSourceRef` 缺 title / source_url / acquired_at /
+   authority_tier_snapshot / critical_claim_eligible_snapshot。补齐。
+3. **provider registry**：Router（`list_providers(enabled_only=True)`）与 citation
+   label（`SourceProvider.display_name`）读取 provider registry；旧 snapshot 完全
+   缺失。新增 `FrozenSourceProviderRef`（provider_key / display_name / enabled /
+   capabilities）。
+
+**contract 测试（指纹敏感）**：`test_eval_fingerprints.py` 新增
+`test_snapshot_fingerprint_sensitive_to_document_provenance` /
+`test_snapshot_fingerprint_sensitive_to_provider_registry` /
+`test_case_fingerprint_sensitive_to_company_identity` —— 任一冻结字段变化 → 对应
+fingerprint 变化（防 frozen 字段漂移未被察觉）。
+
+**FrozenRuntimeClosureAudit**（域 / 生产字段 / 读者 / 已冻结? / 必需? / 处置）：
+
+| 域 | 生产字段 | 运行期读者 | 已冻结? | 必需? | 处置 |
+|---|---|---|---|---|---|
+| Planner | Company.security_code / official_name / short_name / exchange / board | `_build_input_snapshot` → `CompanyIdentitySnapshot` | ✅ | ✅ | 7B.1.4A 新增 `FrozenCompanyIdentity` |
+| Planner | CompanyAlias.alias（去重排序） | 同上 | ✅ | ✅ | 7B.1.4A 新增 `aliases` |
+| Planner | Company.listing_status / listing_date / delisting_date / identity_source_* / source_updated_at / identity_key | 无（仅 master-data / identity source） | ❌ | ❌ | 不冻结 |
+| Planner | Task.questions[0] → research_question；Task.research_end_date → analysis_as_of | `create_plan` | ✅ | ✅ | 已冻结（`EvalCase.research_question` / `analysis_as_of`） |
+| Router | SourceProvider.provider_key / enabled / capabilities | `router._build_entries` `list_providers(enabled_only=True)` | ✅ | ✅ | 7B.1.4A 新增 `FrozenSourceProviderRef` |
+| Router | SourceProvider.authority_tier | 仅 provider 排序，route 快照丢弃 | ❌ | ❌ | 不冻结 |
+| Router | SourceProvider.provider_type / homepage_url / allowed_domains / acquisition_methods / exchange_scope / requires_api_key | 仅 ingestion（路由/校验） | ❌ | ❌ | 不冻结 |
+| Evidence provenance (doc) | SourceRecord.title / source_url / acquired_at / authority_tier_snapshot / critical_claim_eligible_snapshot | `provenance_service.resolve_document` + preparation | ✅ | ✅ | 7B.1.4A 补齐 `FrozenDocumentSourceRef` |
+| Evidence provenance (doc) | SourceRecord.published_at / document_type / provider_key / reporting_period_end | 同上 | ✅ | ✅ | 已冻结 |
+| Evidence provenance (doc) | SourceRecord.acquisition_method / external_document_id / provider_capabilities_snapshot / status / created_at | 无（ingestion-only） | ❌ | ❌ | 不冻结 |
+| Evidence provenance (doc) | SourceProvider.display_name（citation label） | `resolve_document` → `provider_label` | ✅ | ✅ | 7B.1.4A 新增 `FrozenSourceProviderRef.display_name` |
+| Evidence provenance (doc) | RawArtifact.media_type / 原始字节 | `resolve_document` / parsing+chunking | ✅ | ✅ | 已冻结（`media_type` + `content_sha256` + blob） |
+| Macro | MacroDatasetSnapshot / MacroSeries / MacroObservation 全字段 | `resolve_macro` + macro analysis | ✅ | ✅ | 已冻结（macro payload deep closure，`build_macro_payload`） |
+| Structured | FinancialMetricObservation / ValuationMetricObservation / RelativeValuationComparison 全字段 | financial / valuation need + Stage4 | ✅ | ✅ | 已冻结（structured payload deep closure） |
+| Derived | EvidenceCard / Claim / DocumentChunk / ParsedSource / ChunkSet / Chroma index | 各 variant 自提取 / 检索 | ❌ | ❌ | **不冻结**（derived artifact，各 variant 从同一 frozen source 重建） |
+
+**明确不冻结（by design）**：`acquisition_method` / `external_document_id`（ingestion
+provenance，运行期不读）、`provider_capabilities_snapshot`（SourceRecord 上 ingestion
+时 provider 能力快照，运行期读的是 `critical_claim_eligible_snapshot` /
+`authority_tier_snapshot`）、provider `authority_tier`（router 排序后丢弃）、
+`provider.critical_claim_eligible`（运行期只读 SourceRecord 快照值）、Company
+master-data 时间戳与 identity-source 字段、Chroma 索引与 BGE embedding（derived /
+pipeline config，不在 bundle 内）。
+
 ## 4. 验收标准（7B.1.0）
 
 1. `app/eval/` 六模块；**无 DB / LLM / network / Chroma / 新依赖**。
@@ -428,6 +508,10 @@ semantic identity），`(trial_fingerprint, attempt_no)` 才是去重身份。�
   Attempt → LLM Call Usage 四层，**不**持久化 MetricValue / ScoringSpec / HumanLabel
   / Judge；create-or-get replay + persist_attempt_result + verify_*_integrity +
   downgrade guard；18 + 2 integration tests，见 §3.15）。
+- **7B.1.4A ✅ FINAL**：Frozen Runtime Replayability Gate（审计三路 variant 在无
+  live PG 隔离环境下的输入闭包；补齐 company identity / document provenance /
+  provider registry 三处 closure gap；schema version 1→2 + 3 个指纹敏感 contract
+  测试，见 §3.16）。
 - **7B.1.3B**：MetricValue / ScoringSpec / HumanLabel / Judge 持久化（本轮**未**开始）。
 - **7B.1.4**：真实/dev runner（dev/test Noop runner 用独立 identity，**不加**
   `EvalVariantId.NOOP`）+ 三路 real variant runner。

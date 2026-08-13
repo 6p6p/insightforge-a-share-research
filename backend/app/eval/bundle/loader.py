@@ -16,6 +16,7 @@ from app.eval.bundle import _io, layout
 from app.eval.contracts import (
     EvalCase,
     EvalDatasetManifest,
+    FrozenCompanyIdentity,
     FrozenSourceSnapshot,
     HumanLabel,
     StructuredArtifactType,
@@ -36,7 +37,7 @@ class LoadedEvalExecutionCase:
     case_id: str
     case_version: int
     company_id: UUID
-    security_code: str
+    company: FrozenCompanyIdentity
     research_question: str
     analysis_as_of: datetime
     tags: tuple[str, ...]
@@ -125,7 +126,7 @@ class EvaluationBundleLoader:
             case_id=case.case_id,
             case_version=case.case_version,
             company_id=case.company_id,
-            security_code=case.security_code,
+            company=case.company,
             research_question=case.research_question,
             analysis_as_of=case.analysis_as_of,
             tags=case.tags,

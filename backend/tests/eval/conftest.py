@@ -23,8 +23,10 @@ from app.eval.contracts import (
     EvalDatasetCaseRef,
     EvalDatasetManifest,
     FinancialFactLabel,
+    FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
     FrozenMacroSnapshotRef,
+    FrozenSourceProviderRef,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
     HumanLabel,
@@ -92,6 +94,18 @@ def _build_spec() -> BundleSpec:
         provider_key="cninfo",
         document_type="annual_report",
         media_type="application/pdf",
+        title="贵州茅台 2024 年年度报告",
+        source_url="https://www.cninfo.com.cn/maotai/annual_report.pdf",
+        acquired_at=datetime(2026, 8, 1, 12, 0, 0),
+        authority_tier_snapshot=1,
+        critical_claim_eligible_snapshot=True,
+        published_at=datetime(2026, 4, 1, 12, 0, 0),
+    )
+    provider = FrozenSourceProviderRef(
+        provider_key="cninfo",
+        display_name="巨潮资讯",
+        enabled=True,
+        capabilities=("annual_report",),
     )
     macro_ref = FrozenMacroSnapshotRef(
         snapshot_id=MACRO_SNAPSHOT_ID,
@@ -110,6 +124,7 @@ def _build_spec() -> BundleSpec:
         document_sources=(doc,),
         macro_snapshots=(macro_ref,),
         structured_artifacts=(structured_ref,),
+        source_providers=(provider,),
     )
     snapshot_fp = compute_source_snapshot_fingerprint(snapshot)
 
@@ -133,7 +148,14 @@ def _build_spec() -> BundleSpec:
         case_id=CASE_ID,
         case_version=1,
         company_id=COMPANY_ID,
-        security_code="600519",
+        company=FrozenCompanyIdentity(
+            security_code="600519",
+            official_name="贵州茅台酒股份有限公司",
+            short_name="贵州茅台",
+            exchange="SSE",
+            board="sse_main",
+            aliases=("贵州茅台",),
+        ),
         research_question="贵州茅台 2024 年基本面是否支撑当前估值？",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         source_snapshot_fingerprint=snapshot_fp,

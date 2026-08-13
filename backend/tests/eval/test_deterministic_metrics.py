@@ -49,6 +49,11 @@ def _snapshot() -> FrozenSourceSnapshot:
                 provider_key="xinhuanet",
                 document_type="news_article",
                 media_type="text/html",
+                title="测试新闻",
+                source_url="https://example.com/news",
+                acquired_at=datetime(2026, 8, 9, tzinfo=UTC),
+                authority_tier_snapshot=3,
+                critical_claim_eligible_snapshot=False,
             ),
         ),
         macro_snapshots=(

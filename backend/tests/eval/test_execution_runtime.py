@@ -20,6 +20,7 @@ from app.eval.bundle.loader import LoadedEvalExecutionCase
 from app.eval.contracts import (
     EvalExecutionSpec,
     EvalVariantOutput,
+    FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
     FrozenSourceSnapshot,
 )
@@ -61,13 +62,22 @@ def _spec() -> EvalExecutionSpec:
     )
 
 
+def _company() -> FrozenCompanyIdentity:
+    return FrozenCompanyIdentity(
+        security_code="600519",
+        official_name="测试公司",
+        exchange="SSE",
+        board="sse_main",
+    )
+
+
 def _case() -> LoadedEvalExecutionCase:
     return LoadedEvalExecutionCase(
         case_fingerprint=EXEC_FP,
         case_id=CASE_ID,
         case_version=1,
         company_id=UID,
-        security_code="600519",
+        company=_company(),
         research_question="test question",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         tags=(),
@@ -288,7 +298,7 @@ async def test_harness_case_fingerprint_mismatch_raises() -> None:
         case_id=CASE_ID,
         case_version=1,
         company_id=UID,
-        security_code="600519",
+        company=_company(),
         research_question="test question",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         tags=(),
@@ -317,6 +327,11 @@ async def test_harness_snapshot_mismatch_raises() -> None:
                 provider_key="cninfo",
                 document_type="annual_report",
                 media_type="application/pdf",
+                title="测试文档",
+                source_url="https://example.com/doc",
+                acquired_at=datetime(2026, 8, 1, 12, 0, 0),
+                authority_tier_snapshot=3,
+                critical_claim_eligible_snapshot=False,
             ),
         ),
     )
@@ -325,7 +340,7 @@ async def test_harness_snapshot_mismatch_raises() -> None:
         case_id=CASE_ID,
         case_version=1,
         company_id=UID,
-        security_code="600519",
+        company=_company(),
         research_question="test question",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         tags=(),

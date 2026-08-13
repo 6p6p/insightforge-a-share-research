@@ -54,6 +54,11 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
                 "provider_key": ref.provider_key,
                 "document_type": ref.document_type,
                 "media_type": ref.media_type,
+                "title": ref.title,
+                "source_url": ref.source_url,
+                "acquired_at": _iso(ref.acquired_at),
+                "authority_tier_snapshot": ref.authority_tier_snapshot,
+                "critical_claim_eligible_snapshot": ref.critical_claim_eligible_snapshot,
                 "published_at": _iso(ref.published_at),
                 "reporting_period_start": _iso(ref.reporting_period_start),
                 "reporting_period_end": _iso(ref.reporting_period_end),
@@ -84,11 +89,24 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
         ],
         key=canonical_json_str,
     )
+    source_providers = sorted(
+        [
+            {
+                "provider_key": ref.provider_key,
+                "display_name": ref.display_name,
+                "enabled": ref.enabled,
+                "capabilities": sorted(ref.capabilities),
+            }
+            for ref in snapshot.source_providers
+        ],
+        key=lambda d: d["provider_key"],
+    )
     payload = {
         "snapshot_schema_version": snapshot.snapshot_schema_version,
         "document_sources": document_sources,
         "macro_snapshots": macro_snapshots,
         "structured_artifacts": structured_artifacts,
+        "source_providers": source_providers,
     }
     return _sha256_hex(canonical_json_str(payload))
 
@@ -100,7 +118,14 @@ def compute_eval_case_fingerprint(case: EvalCase) -> str:
         "case_id": case.case_id,
         "case_version": case.case_version,
         "company_id": str(case.company_id),
-        "security_code": case.security_code,
+        "company": {
+            "security_code": case.company.security_code,
+            "official_name": case.company.official_name,
+            "short_name": case.company.short_name,
+            "exchange": case.company.exchange,
+            "board": case.company.board,
+            "aliases": sorted(case.company.aliases),
+        },
         "research_question": case.research_question,
         "analysis_as_of": _iso(case.analysis_as_of),
         "tags": sorted(case.tags),

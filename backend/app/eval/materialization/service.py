@@ -21,17 +21,21 @@ source payloads，交给 7B.1.1A 的 `EvaluationBundleWriter` 落盘。
 
 import hashlib
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.claims.macro_policy import resolve_availability
 from app.core.errors import RawArtifactNotFound
+from app.db.models.company_alias import CompanyAliasModel
 from app.eval.bundle.writer import EvaluationBundleWriter
 from app.eval.contracts import (
     EvalCase,
     EvalDatasetCaseRef,
     EvalDatasetManifest,
+    FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
     FrozenMacroSnapshotRef,
+    FrozenSourceProviderRef,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
     StructuredArtifactType,
@@ -57,12 +61,14 @@ from app.evidence.contracts import EvidenceOrigin
 from app.financial.contracts import compute_metric_fingerprint
 from app.financial.number_parser import normalize_value_cny, parse_financial_number
 from app.macro.errors import MacroSnapshotIntegrityError
+from app.repositories.company_repository import CompanyRepository
 from app.repositories.financial_metric_observation_repository import (
     FinancialMetricObservationRepository,
 )
 from app.repositories.macro_observation_repository import MacroObservationRepository
 from app.repositories.macro_series_repository import MacroSeriesRepository
 from app.repositories.raw_artifact_repository import RawArtifactRepository
+from app.repositories.source_provider_repository import SourceProviderRepository
 from app.repositories.source_record_repository import SourceRecordRepository
 from app.repositories.valuation_metric_observation_repository import (
     ValuationMetricObservationRepository,
@@ -91,6 +97,8 @@ class EvaluationSnapshotMaterializer:
     async def materialize_case(self, spec: EvalCaseMaterializationSpec) -> MaterializedEvalCase:
         # 阶段一：单 DB session 内加载 + 校验 + 投影 payload（不碰文件）。
         async with self._sessionmaker() as session:
+            company_identity = await self._materialize_company(session, spec)
+            provider_refs = await self._materialize_providers(session)
             document_refs, blob_sources = await self._materialize_documents(session, spec)
             macro_refs, macro_payloads = await self._materialize_macros(session, spec)
             structured_refs, structured_payloads = await self._materialize_structured(session, spec)
@@ -104,12 +112,13 @@ class EvaluationSnapshotMaterializer:
             document_sources=tuple(document_refs),
             macro_snapshots=tuple(macro_refs),
             structured_artifacts=tuple(structured_refs),
+            source_providers=tuple(provider_refs),
         )
         case = EvalCase(
             case_id=spec.case_id,
             case_version=spec.case_version,
             company_id=spec.company_id,
-            security_code=spec.security_code,
+            company=company_identity,
             research_question=spec.research_question,
             analysis_as_of=spec.analysis_as_of,
             tags=spec.tags,
@@ -123,6 +132,47 @@ class EvaluationSnapshotMaterializer:
             macro_payloads=macro_payloads,
             structured_payloads=structured_payloads,
         )
+
+    # ------------------------------------------------------------ company / provider 路
+
+    async def _materialize_company(
+        self, session: AsyncSession, spec: EvalCaseMaterializationSpec
+    ) -> FrozenCompanyIdentity:
+        company = await CompanyRepository(session).get_by_id(spec.company_id)
+        if company is None:
+            raise EvalMaterializationError("company not found")
+        if company.security_code != spec.security_code:
+            raise EvalMaterializationError("company security_code mismatch")
+        result = await session.execute(
+            select(CompanyAliasModel).where(CompanyAliasModel.company_id == spec.company_id)
+        )
+        aliases = sorted({row.alias for row in result.scalars().all()})
+        return FrozenCompanyIdentity(
+            security_code=company.security_code,
+            official_name=company.official_name,
+            short_name=company.short_name,
+            exchange=company.exchange,
+            board=company.board,
+            aliases=tuple(aliases),
+        )
+
+    async def _materialize_providers(self, session: AsyncSession) -> list[FrozenSourceProviderRef]:
+        providers = await SourceProviderRepository(session).list_providers(
+            authority_tier=None,
+            capability=None,
+            acquisition_method=None,
+            exchange=None,
+            enabled_only=False,
+        )
+        return [
+            FrozenSourceProviderRef(
+                provider_key=p.provider_key,
+                display_name=p.display_name,
+                enabled=p.enabled,
+                capabilities=tuple(p.capabilities),
+            )
+            for p in providers
+        ]
 
     # ------------------------------------------------------------ document 路
 
@@ -160,6 +210,11 @@ class EvaluationSnapshotMaterializer:
                     provider_key=source.provider_key,
                     document_type=source.document_type,
                     media_type=artifact.media_type,
+                    title=source.title,
+                    source_url=source.source_url,
+                    acquired_at=source.acquired_at,
+                    authority_tier_snapshot=source.authority_tier_snapshot,
+                    critical_claim_eligible_snapshot=source.critical_claim_eligible_snapshot,
                     published_at=source.published_at,
                     reporting_period_start=None,
                     reporting_period_end=source.reporting_period_end,

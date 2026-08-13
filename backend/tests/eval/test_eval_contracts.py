@@ -17,6 +17,7 @@ from app.eval.contracts import (
     EvalExecutionConfig,
     EvalExecutionSpec,
     FinancialFactLabel,
+    FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
     FrozenMacroSnapshotRef,
     FrozenModelConfig,
@@ -35,15 +36,33 @@ def _sha(tag: str = "a") -> str:
     return tag * 64
 
 
-def _doc_ref(tag: str = "a") -> FrozenDocumentSourceRef:
-    return FrozenDocumentSourceRef(
+def _doc_ref(tag: str = "a", **overrides) -> FrozenDocumentSourceRef:
+    kwargs = dict(
         source_record_id=uuid4(),
         raw_artifact_id=uuid4(),
         content_sha256=_sha(tag),
         provider_key="cninfo",
         document_type="annual_report",
         media_type="application/pdf",
+        title="测试文档",
+        source_url="https://example.com/doc",
+        acquired_at=datetime(2026, 8, 1, 12, 0, 0),
+        authority_tier_snapshot=3,
+        critical_claim_eligible_snapshot=False,
     )
+    kwargs.update(overrides)
+    return FrozenDocumentSourceRef(**kwargs)
+
+
+def _company(**overrides) -> FrozenCompanyIdentity:
+    kwargs = dict(
+        security_code="000001",
+        official_name="Acme 股份",
+        exchange="SSE",
+        board="sse_main",
+    )
+    kwargs.update(overrides)
+    return FrozenCompanyIdentity(**kwargs)
 
 
 def _case(**overrides) -> EvalCase:
@@ -51,7 +70,7 @@ def _case(**overrides) -> EvalCase:
         case_id="acme-2024-fundamental",
         case_version=1,
         company_id=uuid4(),
-        security_code="000001",
+        company=_company(),
         research_question="Acme 2024 年基本面是否支撑当前估值？",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         source_snapshot_fingerprint=_sha("b"),
@@ -68,46 +87,17 @@ def test_contracts_frozen() -> None:
 
 def test_invalid_hex_char_rejected() -> None:
     with pytest.raises(ValidationError):
-        FrozenDocumentSourceRef(
-            source_record_id=uuid4(),
-            raw_artifact_id=uuid4(),
-            content_sha256="g" * 64,
-            provider_key="cninfo",
-            document_type="annual_report",
-            media_type="application/pdf",
-        )
+        _doc_ref("a", content_sha256="g" * 64)
 
 
 def test_wrong_length_hex_rejected() -> None:
     with pytest.raises(ValidationError):
-        FrozenDocumentSourceRef(
-            source_record_id=uuid4(),
-            raw_artifact_id=uuid4(),
-            content_sha256="ab",
-            provider_key="cninfo",
-            document_type="annual_report",
-            media_type="application/pdf",
-        )
+        _doc_ref("a", content_sha256="ab")
 
 
 def test_duplicate_source_identity_rejected() -> None:
-    sha = _sha("a")
-    ref1 = FrozenDocumentSourceRef(
-        source_record_id=uuid4(),
-        raw_artifact_id=uuid4(),
-        content_sha256=sha,
-        provider_key="cninfo",
-        document_type="annual_report",
-        media_type="application/pdf",
-    )
-    ref2 = FrozenDocumentSourceRef(
-        source_record_id=uuid4(),
-        raw_artifact_id=uuid4(),
-        content_sha256=sha,
-        provider_key="cninfo",
-        document_type="annual_report",
-        media_type="application/pdf",
-    )
+    ref1 = _doc_ref("a")
+    ref2 = _doc_ref("a")
     with pytest.raises(ValidationError):
         FrozenSourceSnapshot(document_sources=(ref1, ref2))
 
@@ -309,23 +299,8 @@ def test_structured_duplicate_fingerprint_rejected() -> None:
 
 
 def test_document_duplicate_hash_different_uuid_provider_rejected() -> None:
-    sha = _sha("d")
-    ref1 = FrozenDocumentSourceRef(
-        source_record_id=uuid4(),
-        raw_artifact_id=uuid4(),
-        content_sha256=sha,
-        provider_key="cninfo",
-        document_type="annual_report",
-        media_type="application/pdf",
-    )
-    ref2 = FrozenDocumentSourceRef(
-        source_record_id=uuid4(),
-        raw_artifact_id=uuid4(),
-        content_sha256=sha,
-        provider_key="sse",
-        document_type="annual_report",
-        media_type="application/pdf",
-    )
+    ref1 = _doc_ref("d")
+    ref2 = _doc_ref("d", provider_key="sse")
     with pytest.raises(ValidationError):
         FrozenSourceSnapshot(document_sources=(ref1, ref2))
 

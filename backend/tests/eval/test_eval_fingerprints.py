@@ -15,9 +15,11 @@ from app.eval.contracts import (
     EvalScoringSpec,
     EvalVariantOutput,
     FinancialFactLabel,
+    FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
     FrozenMacroSnapshotRef,
     FrozenModelConfig,
+    FrozenSourceProviderRef,
     FrozenSourceSnapshot,
     HumanLabel,
 )
@@ -38,15 +40,33 @@ def _sha(tag: str = "a") -> str:
     return tag * 64
 
 
-def _doc_ref(tag: str = "a") -> FrozenDocumentSourceRef:
-    return FrozenDocumentSourceRef(
+def _doc_ref(tag: str = "a", **overrides) -> FrozenDocumentSourceRef:
+    kwargs = dict(
         source_record_id=uuid4(),
         raw_artifact_id=uuid4(),
         content_sha256=_sha(tag),
         provider_key="cninfo",
         document_type="annual_report",
         media_type="application/pdf",
+        title="测试文档",
+        source_url="https://example.com/doc",
+        acquired_at=datetime(2026, 8, 1, 12, 0, 0),
+        authority_tier_snapshot=3,
+        critical_claim_eligible_snapshot=False,
     )
+    kwargs.update(overrides)
+    return FrozenDocumentSourceRef(**kwargs)
+
+
+def _company(**overrides) -> FrozenCompanyIdentity:
+    kwargs = dict(
+        security_code="000001",
+        official_name="Acme 股份",
+        exchange="SSE",
+        board="sse_main",
+    )
+    kwargs.update(overrides)
+    return FrozenCompanyIdentity(**kwargs)
 
 
 def _case(company_id=None, label_fp=None) -> EvalCase:
@@ -54,7 +74,7 @@ def _case(company_id=None, label_fp=None) -> EvalCase:
         case_id="acme-2024-fundamental",
         case_version=1,
         company_id=company_id if company_id is not None else uuid4(),
-        security_code="000001",
+        company=_company(),
         research_question="Acme 2024 年基本面是否支撑当前估值？",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         source_snapshot_fingerprint=_sha("b"),
@@ -112,18 +132,7 @@ def test_snapshot_semantic_change_changes_fp() -> None:
 def test_snapshot_uuid_only_change_keeps_fp() -> None:
     s1 = FrozenSourceSnapshot(document_sources=(_doc_ref("a"),))
     # 同 content_sha256 + metadata，不同 DB UUID → semantic identity 不变
-    s2 = FrozenSourceSnapshot(
-        document_sources=(
-            FrozenDocumentSourceRef(
-                source_record_id=uuid4(),
-                raw_artifact_id=uuid4(),
-                content_sha256=_sha("a"),
-                provider_key="cninfo",
-                document_type="annual_report",
-                media_type="application/pdf",
-            ),
-        ),
-    )
+    s2 = FrozenSourceSnapshot(document_sources=(_doc_ref("a"),))
     assert compute_source_snapshot_fingerprint(s1) == compute_source_snapshot_fingerprint(s2)
 
 
@@ -150,6 +159,68 @@ def test_snapshot_fingerprint_includes_macro_payload_sha() -> None:
     fp_a = compute_source_snapshot_fingerprint(make(_sha("a")))
     fp_b = compute_source_snapshot_fingerprint(make(_sha("b")))
     assert fp_a != fp_b
+
+
+def test_snapshot_fingerprint_sensitive_to_document_provenance() -> None:
+    """document provenance 字段（运行期被 evidence/preparation 读取）变化 → snapshot fp 变化。"""
+    base = FrozenSourceSnapshot(document_sources=(_doc_ref("a"),))
+    for field, value in [
+        ("title", "不同标题"),
+        ("source_url", "https://example.com/other"),
+        ("authority_tier_snapshot", 1),
+        ("critical_claim_eligible_snapshot", True),
+    ]:
+        changed = FrozenSourceSnapshot(document_sources=(_doc_ref("a", **{field: value}),))
+        assert compute_source_snapshot_fingerprint(base) != compute_source_snapshot_fingerprint(
+            changed
+        ), f"{field} 变化未改变 snapshot fingerprint"
+    changed_acquired = FrozenSourceSnapshot(
+        document_sources=(_doc_ref("a", acquired_at=datetime(2026, 8, 2, 12, 0, 0)),)
+    )
+    assert compute_source_snapshot_fingerprint(base) != compute_source_snapshot_fingerprint(
+        changed_acquired
+    )
+
+
+def test_snapshot_fingerprint_sensitive_to_provider_registry() -> None:
+    """provider registry（运行期被 router / provenance 读取）变化 → snapshot fp 变化。"""
+
+    def make(**overrides) -> FrozenSourceSnapshot:
+        kwargs = dict(
+            provider_key="cninfo",
+            display_name="巨潮资讯",
+            enabled=True,
+            capabilities=("annual_report",),
+        )
+        kwargs.update(overrides)
+        return FrozenSourceSnapshot(source_providers=(FrozenSourceProviderRef(**kwargs),))
+
+    base = make()
+    assert compute_source_snapshot_fingerprint(make()) != compute_source_snapshot_fingerprint(
+        make(display_name="其他名称")
+    )
+    assert compute_source_snapshot_fingerprint(base) != compute_source_snapshot_fingerprint(
+        make(enabled=False)
+    )
+    assert compute_source_snapshot_fingerprint(base) != compute_source_snapshot_fingerprint(
+        make(capabilities=("news_article",))
+    )
+
+
+def test_case_fingerprint_sensitive_to_company_identity() -> None:
+    """company identity（运行期被 planner 读取）变化 → case fp 变化。"""
+    base = _case()
+    for field, value in [
+        ("official_name", "另一家公司"),
+        ("exchange", "SZSE"),
+        ("board", "szse_main"),
+        ("short_name", "简称"),
+        ("aliases", ("别名",)),
+    ]:
+        changed = base.model_copy(update={"company": _company(**{field: value})})
+        assert compute_eval_case_fingerprint(base) != compute_eval_case_fingerprint(changed), (
+            f"{field} 变化未改变 case fingerprint"
+        )
 
 
 def test_case_fingerprint_excludes_label() -> None:

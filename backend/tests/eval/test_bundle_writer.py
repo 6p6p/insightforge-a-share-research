@@ -97,6 +97,7 @@ def test_writer_snapshot_uuid_only_change_replays(built_bundle) -> None:
         document_sources=(doc.model_copy(update={"source_record_id": uuid4()}),),
         macro_snapshots=spec.snapshot.macro_snapshots,
         structured_artifacts=spec.snapshot.structured_artifacts,
+        source_providers=spec.snapshot.source_providers,
     )
     assert compute_source_snapshot_fingerprint(snapshot2) == spec.snapshot_fingerprint
     writer.write_snapshot(snapshot2)  # 不应抛异常（replay）

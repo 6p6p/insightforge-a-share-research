@@ -36,8 +36,8 @@ from app.eval.variants import EvalVariantId
 
 # ---------------------------------------------------------------- schema 版本
 
-SNAPSHOT_SCHEMA_VERSION = 1
-EVAL_CASE_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2
+EVAL_CASE_SCHEMA_VERSION = 2
 EVAL_DATASET_SCHEMA_VERSION = 1
 HUMAN_LABEL_SCHEMA_VERSION = 1
 EVAL_EXECUTION_CONFIG_SCHEMA_VERSION = 1
@@ -107,6 +107,11 @@ class FrozenDocumentSourceRef(BaseModel):
     provider_key: str
     document_type: str
     media_type: str
+    title: str
+    source_url: str
+    acquired_at: datetime
+    authority_tier_snapshot: int
+    critical_claim_eligible_snapshot: bool
     published_at: datetime | None = None
     reporting_period_start: date | None = None
     reporting_period_end: date | None = None
@@ -116,10 +121,17 @@ class FrozenDocumentSourceRef(BaseModel):
     def _v_sha(cls, v: str) -> str:
         return _validate_sha256(v, field="content_sha256")
 
-    @field_validator("provider_key", "document_type", "media_type")
+    @field_validator("provider_key", "document_type", "media_type", "title", "source_url")
     @classmethod
     def _v_nonempty(cls, v: str) -> str:
         return _strip(v, field="source 元数据")
+
+    @field_validator("authority_tier_snapshot")
+    @classmethod
+    def _v_tier(cls, v: int) -> int:
+        if v < 1 or v > 4:
+            raise ValueError("authority_tier_snapshot 必须在 1..4")
+        return v
 
 
 class FrozenMacroSnapshotRef(BaseModel):
@@ -181,8 +193,35 @@ class FrozenStructuredArtifactRef(BaseModel):
         return _validate_sha256(v, field="payload_sha256")
 
 
+class FrozenSourceProviderRef(BaseModel):
+    """source provider registry 的一条冻结行（router / provenance 运行期读取的字段）。
+
+    只冻结 routing 与 citation label 真正依赖的 semantic 字段：provider_key /
+    display_name / enabled / capabilities。不冻结 authority_tier（router 排序后
+    丢弃）、homepage_url / allowed_domains / acquisition_methods / exchange_scope
+    / requires_api_key / critical_claim_eligible（运行期不读取）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider_key: str
+    display_name: str
+    enabled: bool
+    capabilities: tuple[str, ...] = ()
+
+    @field_validator("provider_key", "display_name")
+    @classmethod
+    def _v_nonempty(cls, v: str) -> str:
+        return _strip(v, field="provider 元数据")
+
+    @field_validator("capabilities")
+    @classmethod
+    def _v_capabilities(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(sorted(_strip(c, field="capability") for c in v))
+
+
 class FrozenSourceSnapshot(BaseModel):
-    """三路评估的 frozen source snapshot manifest（document / macro / structured）。
+    """三路评估的 frozen source snapshot manifest（document / macro / structured / provider）。
 
     collection 语义 unordered，duplicate identity 构造时拒绝；不含 raw bytes。
     """
@@ -193,12 +232,14 @@ class FrozenSourceSnapshot(BaseModel):
     document_sources: tuple[FrozenDocumentSourceRef, ...] = ()
     macro_snapshots: tuple[FrozenMacroSnapshotRef, ...] = ()
     structured_artifacts: tuple[FrozenStructuredArtifactRef, ...] = ()
+    source_providers: tuple[FrozenSourceProviderRef, ...] = ()
 
     @model_validator(mode="after")
     def _reject_duplicate_identity(self) -> "FrozenSourceSnapshot":
         # duplicate semantic identity：UUID 只做 provenance pointer，不决定
         # 「是否同一 frozen input」。document 用 content_sha256，macro 用
-        # snapshot_fingerprint，structured 用 (artifact_type, artifact_fingerprint)。
+        # snapshot_fingerprint，structured 用 (artifact_type, artifact_fingerprint)，
+        # provider 用 provider_key。
         seen_doc: set[str] = set()
         for ref in self.document_sources:
             if ref.content_sha256 in seen_doc:
@@ -217,10 +258,60 @@ class FrozenSourceSnapshot(BaseModel):
                     "duplicate structured artifact identity (artifact_type, artifact_fingerprint)"
                 )
             seen_art.add(key)
+        seen_provider: set[str] = set()
+        for ref in self.source_providers:
+            if ref.provider_key in seen_provider:
+                raise ValueError("duplicate source provider identity (provider_key)")
+            seen_provider.add(ref.provider_key)
         return self
 
 
 # ---------------------------------------------------------------- eval case
+
+
+class FrozenCompanyIdentity(BaseModel):
+    """planner 运行期读取的 company 语义身份（不含内部 UUID / master-data 时间戳）。
+
+    = `ResearchPlannerInputSnapshot` 的 company 子集：security_code / official_name /
+    short_name(optional) / exchange / board / aliases。planner LLM prompt 的
+    CompanyIdentitySnapshot 由这些字段确定性派生（short_name 前置去重进 aliases），
+    因此冻结原始字段（含独立 short_name）即可完全重建 planner 输入。不冻结
+    listing_status / listing_date / identity_source_* / source_updated_at（运行期
+    不读取）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    security_code: str
+    official_name: str
+    short_name: str | None = None
+    exchange: str
+    board: str
+    aliases: tuple[str, ...] = ()
+
+    @field_validator("security_code")
+    @classmethod
+    def _v_security_code(cls, v: str) -> str:
+        return _strip(v, field="security_code", max_len=_MAX_SECURITY_CODE_LENGTH)
+
+    @field_validator("official_name", "exchange", "board")
+    @classmethod
+    def _v_nonempty(cls, v: str) -> str:
+        return _strip(v, field="company identity 字段")
+
+    @field_validator("short_name")
+    @classmethod
+    def _v_short_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("aliases")
+    @classmethod
+    def _v_aliases(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        # 与 production `_build_input_snapshot` 一致：去重 + 稳定排序。
+        return tuple(sorted({_strip(a, field="alias") for a in v}))
 
 
 class EvalCase(BaseModel):
@@ -232,7 +323,7 @@ class EvalCase(BaseModel):
     case_id: str
     case_version: int = Field(ge=1)
     company_id: UUID
-    security_code: str
+    company: FrozenCompanyIdentity
     research_question: str
     analysis_as_of: datetime
     tags: tuple[str, ...] = ()
@@ -243,11 +334,6 @@ class EvalCase(BaseModel):
     @classmethod
     def _v_case_id(cls, v: str) -> str:
         return _validate_slug(v)
-
-    @field_validator("security_code")
-    @classmethod
-    def _v_security_code(cls, v: str) -> str:
-        return _strip(v, field="security_code", max_len=_MAX_SECURITY_CODE_LENGTH)
 
     @field_validator("research_question")
     @classmethod
