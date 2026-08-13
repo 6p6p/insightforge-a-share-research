@@ -53,7 +53,7 @@ configure_asyncio_runtime()
 class _NoLLMSentinel:
     """Gate0-F 风格哨兵：只暴露只读 `model_id`；任何其他属性访问 → AssertionError。"""
 
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, usage_observer=None) -> None:
         self._model_id = f"{settings.llm_provider}:{settings.llm_model}"
 
     @property
@@ -281,11 +281,11 @@ async def test_export_http_zero_llm(env, monkeypatch, connection_uri, tmp_path) 
     """0-LLM 证明：生产 DI 模型全部换哨兵 + ChatDeepSeek 禁止 → export POST 成功。"""
     monkeypatch.setattr(
         "app.draft_section.factory.create_draft_section_model",
-        lambda settings: _NoLLMSentinel(settings),
+        lambda settings, usage_observer=None: _NoLLMSentinel(settings),
     )
     monkeypatch.setattr(
         "app.revision.factory.create_revision_writer_model",
-        lambda settings: _NoLLMSentinel(settings),
+        lambda settings, usage_observer=None: _NoLLMSentinel(settings),
     )
     monkeypatch.setattr("app.audit.adapters.DeepSeekAuditModel", _NoLLMSentinel)
     monkeypatch.setattr("langchain_deepseek.ChatDeepSeek", _forbid_client)

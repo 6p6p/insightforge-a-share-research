@@ -411,12 +411,16 @@ class EvaluationExecutionPersistenceService:
                 raise EvalPersistenceIntegrityError("failed attempt 缺 error_code")
 
         usage_rows = (
-            await session.execute(
-                select(EvalLlmCallUsageModel)
-                .where(EvalLlmCallUsageModel.execution_id == row.execution_id)
-                .order_by(EvalLlmCallUsageModel.call_index)
+            (
+                await session.execute(
+                    select(EvalLlmCallUsageModel)
+                    .where(EvalLlmCallUsageModel.execution_id == row.execution_id)
+                    .order_by(EvalLlmCallUsageModel.call_index)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         records: list[LlmCallUsageRecord] = []
         for expected_index, urow in enumerate(usage_rows):
             if urow.call_index != expected_index:

@@ -69,7 +69,7 @@ class _NoLLMSentinel:
     触碰 LLM 模型，只消费 read-only 重放。
     """
 
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, usage_observer=None) -> None:
         self._settings = settings
         self._model_id = f"{settings.llm_provider}:{settings.llm_model}"
 
@@ -321,11 +321,11 @@ async def test_http_read_only_zero_llm(env, monkeypatch, connection_uri) -> None
     """
     monkeypatch.setattr(
         "app.draft_section.factory.create_draft_section_model",
-        lambda settings: _NoLLMSentinel(settings),
+        lambda settings, usage_observer=None: _NoLLMSentinel(settings),
     )
     monkeypatch.setattr(
         "app.revision.factory.create_revision_writer_model",
-        lambda settings: _NoLLMSentinel(settings),
+        lambda settings, usage_observer=None: _NoLLMSentinel(settings),
     )
     monkeypatch.setattr("app.audit.adapters.DeepSeekAuditModel", _NoLLMSentinel)
     monkeypatch.setattr("langchain_deepseek.ChatDeepSeek", _forbid_client)

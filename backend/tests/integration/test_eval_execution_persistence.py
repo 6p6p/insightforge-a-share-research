@@ -439,19 +439,27 @@ async def test_attempt_replay_no_duplicate_usage(service, sessionmaker) -> None:
 
     async with sessionmaker() as session:
         attempts = (
-            await session.execute(
-                select(EvalExecutionAttemptModel).where(
-                    EvalExecutionAttemptModel.execution_id == result.execution_id
+            (
+                await session.execute(
+                    select(EvalExecutionAttemptModel).where(
+                        EvalExecutionAttemptModel.execution_id == result.execution_id
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         usages = (
-            await session.execute(
-                select(EvalLlmCallUsageModel).where(
-                    EvalLlmCallUsageModel.execution_id == result.execution_id
+            (
+                await session.execute(
+                    select(EvalLlmCallUsageModel).where(
+                        EvalLlmCallUsageModel.execution_id == result.execution_id
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(attempts) == 1
     assert len(usages) == 2
 
@@ -468,19 +476,27 @@ async def test_concurrent_same_attempt_single_row(service, sessionmaker) -> None
 
     async with sessionmaker() as session:
         attempts = (
-            await session.execute(
-                select(EvalExecutionAttemptModel).where(
-                    EvalExecutionAttemptModel.execution_id == result.execution_id
+            (
+                await session.execute(
+                    select(EvalExecutionAttemptModel).where(
+                        EvalExecutionAttemptModel.execution_id == result.execution_id
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         usages = (
-            await session.execute(
-                select(EvalLlmCallUsageModel).where(
-                    EvalLlmCallUsageModel.execution_id == result.execution_id
+            (
+                await session.execute(
+                    select(EvalLlmCallUsageModel).where(
+                        EvalLlmCallUsageModel.execution_id == result.execution_id
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(attempts) == 1
     assert len(usages) == 2
 
