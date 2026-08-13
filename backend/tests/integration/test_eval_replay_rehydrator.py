@@ -14,7 +14,9 @@
 """
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -29,6 +31,10 @@ from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
+from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
+from app.db.models.macro_observation import MacroObservationModel
+from app.db.models.macro_series import MacroSeriesModel
+from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_provider import SourceProviderModel
 from app.db.models.source_record import SourceRecordModel
@@ -37,6 +43,7 @@ from app.eval.bundle.loader import EvaluationBundleLoader
 from app.eval.errors import EvalReplayIntegrityError
 from app.eval.replay import EvaluationReplayRehydrator
 from app.services.chunking_service import ChunkingService
+from app.services.macro_persistence_service import MacroPersistenceService
 from app.services.source_parsing_service import SourceParsingService
 from app.storage.raw_store import LocalRawArtifactStore
 from tests.integration.replay_bundle import (
@@ -44,8 +51,17 @@ from tests.integration.replay_bundle import (
     CASE_VERSION,
     COMPANY_ID,
     DOC_HTML,
+    MACRO_CASE_ID,
+    MACRO_CASE_VERSION,
+    MACRO_COUNTRY_LINK_ID,
+    MACRO_INDICATOR_LINK_ID,
+    MACRO_OBSERVATION_IDS,
+    MACRO_OBSERVATIONS_LINK_ID,
+    MACRO_SERIES_ID,
+    MACRO_SNAPSHOT_ID,
     RAW_ARTIFACT_ID,
     SOURCE_RECORD_ID,
+    build_macro_replay_bundle,
     build_replay_bundle,
 )
 
@@ -447,3 +463,182 @@ async def test_replay_semantic_conflict_leaves_no_partial_rows(monkeypatch, tmp_
         assert counts["alias"] == 0
         assert counts["source"] == 0
         assert counts["raw"] == 1  # 仅预置的那条 mismatching raw
+
+
+# ---------------------------------------------------------------- macro replay（spec S/T）
+
+
+async def _macro_counts(sessionmaker) -> dict:
+    """按模型统计行数（含 macro closure，用于 idempotency 断言）。"""
+    models = {
+        "company": CompanyModel,
+        "provider": SourceProviderModel,
+        "raw": RawArtifactModel,
+        "source": SourceRecordModel,
+        "alias": CompanyAliasModel,
+        "series": MacroSeriesModel,
+        "snapshot": MacroDatasetSnapshotModel,
+        "observation": MacroObservationModel,
+        "link": MacroSnapshotArtifactModel,
+    }
+    out: dict = {}
+    async with sessionmaker() as session:
+        for name, model in models.items():
+            out[name] = len((await session.execute(select(model))).scalars().all())
+    return out
+
+
+async def test_replay_macro_rehydrates_full_closure(monkeypatch, tmp_path) -> None:
+    """frozen bundle（含 macro closure）→ rehydrate → 精确 macro 行 + fingerprint 一致。"""
+    bundle_root = tmp_path / "bundle"
+    spec = build_macro_replay_bundle(bundle_root)
+    macro_ref = spec.snapshot.macro_snapshots[0]
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        rehydrated = await rehydrator.rehydrate_case(MACRO_CASE_ID, MACRO_CASE_VERSION)
+
+        # (1) macro snapshot ID 精确复现。
+        assert rehydrated.company_id == COMPANY_ID
+        assert rehydrated.macro_snapshot_ids == (MACRO_SNAPSHOT_ID,)
+
+        # (2) series 行：精确 series_id + 六字段身份。
+        series = await _get(sm, MacroSeriesModel, MACRO_SERIES_ID)
+        assert series.provider_key == "world_bank"
+        assert series.source_id == "2"
+        assert series.external_indicator_id == "SP.POP.TOTL"
+        assert series.geography_type == "country"
+        assert series.geography_code == "CHN"
+        assert series.frequency == "annual"
+
+        # (3) snapshot 行：精确 snapshot_id + snapshot_fingerprint 原样 + 脚手架。
+        snapshot_row = await _get(sm, MacroDatasetSnapshotModel, MACRO_SNAPSHOT_ID)
+        assert snapshot_row.series_id == MACRO_SERIES_ID
+        assert snapshot_row.snapshot_fingerprint == macro_ref.snapshot_fingerprint
+        assert snapshot_row.status == "available"
+        assert snapshot_row.fingerprint_version == 1
+        assert snapshot_row.normalization_version == "world_bank_v1"
+
+        # (4) observations：5 条，精确 observation_id + period + value Decimal。
+        async with sm() as session:
+            obs = (
+                (
+                    await session.execute(
+                        select(MacroObservationModel).where(
+                            MacroObservationModel.snapshot_id == MACRO_SNAPSHOT_ID
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(obs) == 5
+        assert {o.observation_id for o in obs} == set(MACRO_OBSERVATION_IDS)
+        assert {o.period for o in obs} == {"2020", "2021", "2022", "2023", "2024"}
+        assert all(o.value_numeric == Decimal("1410000000") for o in obs)
+        assert all(o.decimal_scale == 0 for o in obs)
+
+        # (5) artifact links：3 个 role，精确 snapshot_artifact_id。
+        async with sm() as session:
+            links = (
+                (
+                    await session.execute(
+                        select(MacroSnapshotArtifactModel).where(
+                            MacroSnapshotArtifactModel.snapshot_id == MACRO_SNAPSHOT_ID
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(links) == 3
+        assert {link.role for link in links} == {
+            "indicator_metadata",
+            "country_metadata",
+            "observations_page",
+        }
+        assert {link.snapshot_artifact_id for link in links} == {
+            MACRO_INDICATOR_LINK_ID,
+            MACRO_COUNTRY_LINK_ID,
+            MACRO_OBSERVATIONS_LINK_ID,
+        }
+
+        # (6) macro raw artifacts：精确 artifact_id + content_sha256/byte_size/media_type
+        #     + 隔离 store 真实字节 SHA 一致。
+        for raw_ref in macro_ref.raw_artifacts:
+            raw = await _get(sm, RawArtifactModel, raw_ref.artifact_id)
+            assert raw.content_sha256 == raw_ref.content_sha256
+            assert raw.byte_size == raw_ref.byte_size
+            assert raw.media_type == "application/json"
+            with store.open(raw.storage_key) as handle:
+                blob = handle.read()
+            assert hashlib.sha256(blob).hexdigest() == raw_ref.content_sha256
+
+        # (7) verify_snapshot_integrity 再跑一次仍通过（fingerprint 重算一致）。
+        macro_service = MacroPersistenceService(sm, store)
+        async with sm() as session:
+            verified = await macro_service.verify_snapshot_integrity(session, MACRO_SNAPSHOT_ID)
+        assert verified is not None
+        assert verified.snapshot_fingerprint == macro_ref.snapshot_fingerprint
+
+
+async def test_replay_macro_twice_idempotent(monkeypatch, tmp_path) -> None:
+    """spec S：同 bundle 同 target DB 重放两次，精确等价 + 无重复/覆盖。"""
+    bundle_root = tmp_path / "bundle"
+    build_macro_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        first = await rehydrator.rehydrate_case(MACRO_CASE_ID, MACRO_CASE_VERSION)
+        second = await rehydrator.rehydrate_case(MACRO_CASE_ID, MACRO_CASE_VERSION)
+
+        assert first == second
+        assert first.macro_snapshot_ids == (MACRO_SNAPSHOT_ID,)
+
+        # 行数不变：series=1, snapshot=1, observation=5, link=3, raw=4（1 doc + 3 macro）。
+        assert await _macro_counts(sm) == {
+            "company": 1,
+            "provider": 3,
+            "raw": 4,
+            "source": 1,
+            "alias": 2,
+            "series": 1,
+            "snapshot": 1,
+            "observation": 5,
+            "link": 3,
+        }
+
+
+async def test_replay_macro_mismatch_rejected(monkeypatch, tmp_path) -> None:
+    """spec S：篡改 observation 值 → 重放 reject，不覆盖。"""
+    bundle_root = tmp_path / "bundle"
+    build_macro_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        await rehydrator.rehydrate_case(MACRO_CASE_ID, MACRO_CASE_VERSION)
+
+        async with sm() as session:
+            obs = (
+                await session.execute(
+                    select(MacroObservationModel).where(
+                        MacroObservationModel.observation_id == MACRO_OBSERVATION_IDS[0]
+                    )
+                )
+            ).scalar_one()
+            obs.value_numeric = Decimal("1")
+            await session.commit()
+
+        with pytest.raises(EvalReplayIntegrityError):
+            await rehydrator.rehydrate_case(MACRO_CASE_ID, MACRO_CASE_VERSION)
+
+        # 未被覆盖。
+        async with sm() as session:
+            obs = (
+                await session.execute(
+                    select(MacroObservationModel).where(
+                        MacroObservationModel.observation_id == MACRO_OBSERVATION_IDS[0]
+                    )
+                )
+            ).scalar_one()
+            assert obs.value_numeric == Decimal("1")

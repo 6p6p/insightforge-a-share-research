@@ -25,6 +25,7 @@ from app.eval.bundle.layout import document_blob_path, snapshot_path
 from app.eval.bundle.loader import EvaluationBundleLoader
 from app.eval.errors import EvalReplayError, EvalReplayIntegrityError
 from app.eval.replay import EvaluationReplayRehydrator
+from app.services.macro_persistence_service import MacroPersistenceService
 from app.storage.raw_store import LocalRawArtifactStore
 from tests.integration.replay_bundle import CASE_ID, CASE_VERSION, build_replay_bundle
 
@@ -94,7 +95,12 @@ async def test_unsupported_media_type_rejected(tmp_path) -> None:
 
 
 def test_rehydrator_structurally_isolated(tmp_path) -> None:
-    """结构隔离：rehydrator 只持有三个注入依赖，无 source/live sessionmaker。"""
+    """结构隔离：rehydrator 只持有注入依赖 + 派生 helper，无 source/live sessionmaker。
+
+    `_macro_service` 是 `MacroPersistenceService(target_sessionmaker, raw_store)` 的
+    派生 wrapper（用于 macro closure 的 fingerprint 一致性校验），**只包装**同一对
+    注入依赖，不引入任何 source/live 引用。
+    """
     bundle_root = tmp_path / "bundle"
     build_replay_bundle(bundle_root)
     manager = DatabaseManager(database_url=_BOGUS_URL, echo=False, connect_timeout_seconds=1)
@@ -103,8 +109,14 @@ def test_rehydrator_structurally_isolated(tmp_path) -> None:
 
     rehydrator = EvaluationReplayRehydrator(manager.session_factory(), store, loader)
 
-    assert set(vars(rehydrator)) == {"_sessionmaker", "_raw_store", "_loader"}
+    assert set(vars(rehydrator)) == {
+        "_sessionmaker",
+        "_raw_store",
+        "_loader",
+        "_macro_service",
+    }
     assert rehydrator._loader is loader
+    assert isinstance(rehydrator._macro_service, MacroPersistenceService)
 
 
 @pytest.mark.asyncio

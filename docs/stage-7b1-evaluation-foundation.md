@@ -5,7 +5,8 @@
 > Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**；
 > **7B.1.2C Execution Runtime = FINAL**；**7B.1.3A Evaluation Execution Persistence
 > = FINAL**；**7B.1.4A Frozen Runtime Replayability Gate = FINAL**；
-> **7B.1.4B.1 Isolated Runtime Rehydration Foundation = FINAL**。
+> **7B.1.4B.1 Isolated Runtime Rehydration Foundation = FINAL**；
+> **7B.1.4B.2 Macro Isolated Rehydration = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -119,7 +120,12 @@ COMPARABLE_VARIANTS: tuple[EvalVariantId, ...] = tuple(EvalVariantId)
   `authority_tier_snapshot`/`critical_claim_eligible_snapshot` 为 7B.1.4A 补齐，
   见 §3.16）。
 - `FrozenMacroSnapshotRef`：`snapshot_id UUID` / `series_id UUID` /
-  `snapshot_fingerprint 64hex` / `fetched_at`。
+  `snapshot_fingerprint 64hex` / `payload_sha256 64hex` / `fetched_at` + **rehydration
+  closure**（7B.1.4B.2 补齐）：`series: FrozenMacroSeriesRef`（六字段身份）/
+  `snapshot: FrozenMacroSnapshotDetail`（行级语义字段）/ `observations` /
+  `artifact_links` / `raw_artifacts`。closure 字段**不**进入
+  `compute_source_snapshot_fingerprint`（保持 domain macro fingerprint 与 bundle 字节
+  identity 分离）；`raw_artifacts` 与 `artifact_links` 必须按 `artifact_id` 1:1 闭合。
 - `FrozenStructuredArtifactRef`：`artifact_type`（enum：`financial_metric_observation`
   / `relative_valuation_observation` / `relative_valuation_comparison`）/
   `artifact_id UUID` / `artifact_fingerprint 64hex`。
@@ -478,18 +484,22 @@ authority_tier**，`SNAPSHOT_SCHEMA_VERSION` 保持 2，`REPLAY_PROVIDER_AUTHORI
 replay_v1 脚手架保留（provider 行的 authority_tier 仍按 policy 写中性值，但它不参与
 路由语义）。
 
-### 3.17 Isolated Runtime Rehydration Foundation（7B.1.4B.1）
+### 3.17 Isolated Runtime Rehydration Foundation（7B.1.4B.1 + 7B.1.4B.2）
 
 `app/eval/replay/` 把 Frozen Evaluation Bundle **复现**到一个**隔离运行时**上，
 证明 7B.1.4A 的 frozen bundle 确实足以在「无 live PG / 0 Chroma / 0 network」下重建
 三路 variant 的运行期输入。这是 7B.1.4A 审计（§3.16）的**落地证明**，不是新的产物。
+7B.1.4B.1 落地 document 复现；7B.1.4B.2 在同一 rehydrator 内补齐 macro 复现。
 
 - **隔离边界（结构强制）**：`EvaluationReplayRehydrator` 构造函数**只**接收
   `target_sessionmaker`（隔离 PG）+ `target_raw_artifact_store`（隔离 store root）+
   `bundle_loader`（frozen bundle）。它**没有** source/live sessionmaker、**不读**
   `DEFAULT_PROVIDERS` registry、**不调用** `SourceIngestionService`。测试
   `test_rehydrator_structurally_isolated` 断言实例字段集恰为
-  `{"_sessionmaker", "_raw_store", "_loader"}`。
+  `{"_sessionmaker", "_raw_store", "_loader", "_macro_service"}`；`_macro_service`
+  是 `MacroPersistenceService(target_sessionmaker, raw_store)` 的**派生 wrapper**，
+  只包装同一对注入依赖（用于 macro closure 的 fingerprint 一致性校验），不引入任何
+  source/live 引用。
 - **精确 ID replay**：frozen 的 `company_id` / `source_record_id` / `raw_artifact_id`
   作为隔离库的 DB PK **原样**落库（`RawArtifactRepository.insert` 新增 `session.add +
   flush`，与 `create` 的 ON CONFLICT 路径不同——后者不写 `artifact_id`）。
@@ -507,10 +517,15 @@ replay_v1 脚手架保留（provider 行的 authority_tier 仍按 policy 写中�
   pipeline 重建（integration test 端到端证明）。
 - **两阶段流程**：阶段一（DB session 之外）读 blob → SHA 校验 →
   content-addressed 落盘（`media_type` dispatch：PDF→`put_pdf_stream`、JSON→
-  `put_json_bytes`、HTML→`put_html_bytes`）；阶段二单 DB 事务按 providers → company →
-  aliases → raw_artifacts → source_records 顺序 **create-or-verify** + commit。任一 blob
-  SHA 不匹配、snapshot fingerprint 与 case 引用不一致、document provider_key 不在
-  source_providers、或 `media_type` 不支持 → fail-fast，**不打开 target session**。
+  `put_json_bytes`、HTML→`put_html_bytes`）；macro raw artifacts 与 document 共用同一
+  content-addressed 布局（`blobs/sha256/<first2>/<fullsha>`，SHA 相同复用同一 blob，
+  不 base64 进 macro JSON）。阶段二单 DB 事务按 providers → company → aliases →
+  raw_artifacts → source_records → macro（RawArtifact 先行，再 series → snapshot →
+  observation → link）顺序 **create-or-verify** + commit，最后在同一事务内调用
+  `verify_snapshot_integrity` 证明 domain fingerprint 一致。任一 blob SHA 不匹配、
+  snapshot fingerprint 与 case 引用不一致、document provider_key 不在 source_providers、
+  `media_type` 不支持、macro closure 缺失、或重算 fingerprint 与 frozen 不一致 →
+  fail-fast（阶段一问题**不打开 target session**）。
 - **create-or-verify immutable replay（spec A–F）**：rehydrator **不**用
   `SourceProviderRepository.upsert` 覆盖已有行、也**不**无条件 `create`。每个实体先按
   frozen PK / provider_key `load`：不存在 → 插入；已存在 → 逐 semantic + `replay_v1`
@@ -527,35 +542,43 @@ replay_v1 脚手架保留（provider 行的 authority_tier 仍按 policy 写中�
   （`eval_replay_integrity_error`，SHA 不匹配 / 引用不自洽 / 违反 schema 约束，
   映射 `IntegrityError`）。消息**不含** raw bytes / payload / DB URL / label / prompt /
   API key。
-- **验证**：8 个 integration（真实 `alembic upgrade head` → 0045 的隔离临时库
-  `insightforge_eval_replay_<random>`：8 断言 happy path + schema violation 负例 +
+- **验证**：11 个 integration（真实 `alembic upgrade head` → 0045 的隔离临时库
+  `insightforge_eval_replay_<random>`：document happy path + schema violation 负例 +
   幂等重放/行数不变/alias 不重复 + provider/company/raw/source 四类 mismatch 拒绝 +
-  语义冲突回滚无 partial rows）+ 6 个 unit（blob tamper / snapshot fingerprint tamper /
-  跨引用破坏 / unsupported media_type / 结构隔离 / 错误消息不泄露 payload）。
-  0 LLM / 0 Chroma / 0 network。
+  语义冲突回滚无 partial rows + macro 完整闭包（series/snapshot/5 observation/3 link/
+  3 raw + `verify_snapshot_integrity` 通过）+ macro 幂等重放（行数不变）+ macro
+  mismatch 拒绝）+ 6 个 unit（blob tamper / snapshot fingerprint tamper / 跨引用破坏 /
+  unsupported media_type / 结构隔离 / 错误消息不泄露 payload）。0 LLM / 0 Chroma /
+  0 network。
 
-**宏观 / 财务 / 估值 rehydration 审计（spec R/S，本轮只审计不实现）**：
+**宏观 / 财务 / 估值 rehydration 审计（spec R/S）**：
 
-- **R1（macro payload 是否含 raw bytes？）→ 否（closure gap，7B.1.4B.2 补齐）**。
-  `build_macro_payload`（`materialization/projections.py`）投影的是**结构化 dict**
-  （snapshot_fingerprint / series / indicator / geography / observations 的序列化标量），
-  **不含** raw bytes；`MacroPersistenceService.verify_snapshot_integrity` 读的是
-  **persisted DB 行**（snapshot / series / links / observations / raw_artifacts 行），
-  其中归档 SHA 来自 `RawArtifact` **行**的 `content_sha256`，**不读** store 原始字节。
-  **但这不等于 macro replay 不需要 raw bytes**。冻结原则（§3.16）：只要目标 DB 存在
-  `RawArtifact` 行，目标 `RawArtifactStore` **必须**同时拥有真实归档字节——行的存在
-  即意味着字节的存在义务，否则 `MacroSnapshotArtifactLink` 会引用一条「有行无字节」的
-  RawArtifact。当前 macro payload 只带结构化投影、**不带** `MacroSnapshotArtifactLink`
-  → `RawArtifact` 的真实 store bytes，→ macro isolated replay 存在 **closure gap**：
-  重放出的 link 引用 RawArtifact 行但 store 无字节。**本轮（document-only）不实现**，
-  由 **7B.1.4B.2** 扩展 bundle（`FrozenRawArtifactRef` + content-addressed 字节）补齐。
-- **R2（财务/估值 fingerprint 是否绑定 source_evidence_card_id？）→ 是**。
-  `compute_metric_fingerprint`（`financial/contracts.py`）与
-  `compute_valuation_observation_fingerprint`（`valuation/contracts.py`）的 fingerprint
-  payload **均包含** `source_evidence_card_id`。→ 财务/估值 observation 的 exact-ID
-  replay 要求先重建 EvidenceCard 证据链；而 EvidenceCard 是 **derived artifact**
-  （§3.16 明确「不冻结」，各 variant 自提取），故**本轮 deferred**，待 runner 重建
-  证据链后再行结构化 replay。
+- **R1（macro payload 是否含 raw bytes？）→ 已由 7B.1.4B.2 补齐**。此前
+  `build_macro_payload` 只投影**结构化 dict**（不含 raw bytes），macro isolated
+  replay 存在 **closure gap**（重放出的 `MacroSnapshotArtifactLink` 引用 RawArtifact
+  行但 store 无字节）。7B.1.4B.2 把 closure 扩展进 bundle：`FrozenMacroSnapshotRef`
+  携带 `series` / `snapshot` / `observations` / `artifact_links` / `raw_artifacts`
+  （`FrozenMacroRawArtifactRef`：artifact_id / content_sha256 / media_type / byte_size
+  / role），raw bytes 以 content-addressed blob 存入 bundle（`blobs/sha256/<first2>/
+  <fullsha>`，与 document 共用布局，SHA 相同复用）。materializer 从真实
+  `MacroSnapshotArtifactLink` → `RawArtifact` 读 `RawArtifactStore` 字节并校验
+  `SHA(bytes) == content_sha256`；rehydrator 先落 RawArtifact（含真实字节）→ 再
+  series → snapshot → observation → link（`MacroSeries.provider_key` FK →
+  `source_providers`，故 `world_bank` provider 先重建），**保留 frozen UUID**、**不
+  重新从 WorldBank 抓取**，最后在同一事务内 `verify_snapshot_integrity` 重算 domain
+  fingerprint == frozen `snapshot_fingerprint`（不复制 fingerprint 算法，走
+  `rebuild_macro_snapshot_fingerprint`）。同一 bundle 二次重放精确等价、不重复/覆盖；
+  任一 observation 值被篡改 → `EvalReplayIntegrityError`（不覆盖）。
+- **R2（财务/估值 fingerprint 是否绑定 source_evidence_card_id？）→ 是，故结构化
+  replay 本轮不实现（structured future boundary）**。`compute_metric_fingerprint`
+  （`financial/contracts.py`）与 `compute_valuation_observation_fingerprint`
+  （`valuation/contracts.py`）的 fingerprint payload **均包含** `source_evidence_card_id`。
+  `source_evidence_card_id` 是**运行期派生的 identity**：FinancialMetricObservation /
+  ValuationMetricObservation / RelativeValuationComparison 的 provenance 回到
+  EvidenceCard → quote → Source，而 EvidenceCard 是 **derived artifact**（§3.16 明确
+  「不冻结」，各 variant 自提取）。→ 财务/估值 observation 的 exact-ID 结构化 replay
+  要求先重建 EvidenceCard 证据链，故**本轮不实现**（不新增
+  `FrozenFinancialMetricObservation` 等契约），待 runner 重建证据链后再行结构化 replay。
 
 ## 4. 验收标准（7B.1.0）
 
@@ -615,7 +638,15 @@ replay_v1 脚手架保留（provider 行的 authority_tier 仍按 policy 写中�
 - **7B.1.4B.1 ✅ FINAL**：Isolated Runtime Rehydration Foundation
   （`app/eval/replay/`；`EvaluationReplayRehydrator` 把 frozen bundle 复现到隔离
   PG + store，精确 ID replay + replay_v1 脚手架 + 不 seed derived artifact；
-  2 integration + 6 unit tests；宏观/财务/估值 rehydration 审计 deferred，见 §3.17）。
+  8 integration + 6 unit tests；宏观/财务/估值 rehydration 审计 deferred，见 §3.17）。
+- **7B.1.4B.2 ✅ FINAL**：Macro Isolated Rehydration（`FrozenMacroSnapshotRef` deep
+  closure：`FrozenMacroSeriesRef` / `FrozenMacroSnapshotDetail` /
+  `FrozenMacroObservationRef` / `FrozenMacroArtifactLinkRef` / `FrozenMacroRawArtifactRef`
+  + content-addressed raw bytes；materializer 物化真实 `MacroSnapshotArtifactLink` →
+  `RawArtifact` 字节；rehydrator 先 RawArtifact 再 series/snapshot/observation/link，
+  保留 frozen UUID、不重抓 WorldBank，同事务 `verify_snapshot_integrity` 重算 domain
+  fingerprint == frozen；3 macro integration tests；财务/估值结构化 replay 仍 deferred
+  （source_evidence_card_id 是运行期派生 identity，见 §3.17 R2））。
 - **7B.1.3B**：MetricValue / ScoringSpec / HumanLabel / Judge 持久化（本轮**未**开始）。
 - **7B.1.4**：真实/dev runner（dev/test Noop runner 用独立 identity，**不加**
   `EvalVariantId.NOOP`）+ 三路 real variant runner。

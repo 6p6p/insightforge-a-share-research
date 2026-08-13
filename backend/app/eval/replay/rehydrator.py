@@ -30,13 +30,23 @@ from app.companies.normalization import normalize_company_text
 from app.core.errors import DomainError
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
+from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
+from app.db.models.macro_observation import MacroObservationModel
+from app.db.models.macro_series import MacroSeriesModel
+from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_provider import SourceProviderModel
 from app.db.models.source_record import SourceRecordModel
+from app.domain.macro_persistence import MacroSnapshotStatus
 from app.eval.bundle.loader import EvaluationBundleLoader
 from app.eval.contracts import (
     FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
+    FrozenMacroArtifactLinkRef,
+    FrozenMacroObservationRef,
+    FrozenMacroRawArtifactRef,
+    FrozenMacroSeriesRef,
+    FrozenMacroSnapshotRef,
     FrozenSourceProviderRef,
     FrozenSourceSnapshot,
 )
@@ -59,10 +69,20 @@ from app.eval.replay.contracts import (
     RehydratedCase,
     RehydratedDocument,
 )
+from app.macro.contracts import MacroFrequency, MacroPeriodSemantics
+from app.macro.errors import MacroSnapshotIntegrityError
+from app.macro.fingerprint import (
+    MACRO_SNAPSHOT_FINGERPRINT_VERSION,
+    WORLD_BANK_NORMALIZATION_VERSION,
+)
 from app.repositories.company_repository import CompanyRepository
+from app.repositories.macro_observation_repository import MacroObservationRepository
+from app.repositories.macro_series_repository import MacroSeriesRepository
+from app.repositories.macro_snapshot_repository import MacroSnapshotRepository
 from app.repositories.raw_artifact_repository import RawArtifactRepository
 from app.repositories.source_provider_repository import SourceProviderRepository
 from app.repositories.source_record_repository import SourceRecordRepository
+from app.services.macro_persistence_service import MacroPersistenceService
 from app.storage.raw_store import LocalRawArtifactStore, StoredRawArtifact
 
 _MEDIA_TYPE_PDF = "application/pdf"
@@ -82,6 +102,9 @@ class EvaluationReplayRehydrator:
         self._sessionmaker = target_sessionmaker
         self._raw_store = target_raw_artifact_store
         self._loader = bundle_loader
+        self._macro_service = MacroPersistenceService(
+            target_sessionmaker, target_raw_artifact_store
+        )
 
     async def rehydrate_case(self, case_id: str, case_version: int) -> RehydratedCase:
         case = self._loader.load_case(case_id, case_version)
@@ -109,11 +132,27 @@ class EvaluationReplayRehydrator:
                 raise EvalReplayIntegrityError("落盘 content_sha256 与 frozen 不一致")
             stored_docs.append((doc, stored))
 
+        stored_macros: list[tuple[FrozenMacroSnapshotRef, dict[UUID, StoredRawArtifact]]] = []
+        for macro in snapshot.macro_snapshots:
+            self._require_macro_closure(macro)
+            stored_artifacts: dict[UUID, StoredRawArtifact] = {}
+            for raw_ref in macro.raw_artifacts:
+                blob = self._loader.read_document_blob(raw_ref.content_sha256)
+                if hashlib.sha256(blob).hexdigest() != raw_ref.content_sha256:
+                    raise EvalReplayIntegrityError(
+                        "macro raw artifact blob content_sha256 不匹配（篡改）"
+                    )
+                stored = self._write_blob(blob, raw_ref.media_type)
+                if stored.content_sha256 != raw_ref.content_sha256:
+                    raise EvalReplayIntegrityError("落盘 content_sha256 与 frozen 不一致")
+                stored_artifacts[raw_ref.artifact_id] = stored
+            stored_macros.append((macro, stored_artifacts))
+
         # 阶段二：单 DB 事务精确 ID 复现（语义字段 frozen-exact + replay_v1 脚手架）。
         try:
             async with self._sessionmaker() as session:
                 result = await self._persist(
-                    session, case.company_id, case.company, snapshot, stored_docs
+                    session, case.company_id, case.company, snapshot, stored_docs, stored_macros
                 )
                 await session.commit()
                 return result
@@ -143,6 +182,7 @@ class EvaluationReplayRehydrator:
         company: FrozenCompanyIdentity,
         snapshot: FrozenSourceSnapshot,
         stored_docs: list[tuple[FrozenDocumentSourceRef, StoredRawArtifact]],
+        stored_macros: list[tuple[FrozenMacroSnapshotRef, dict[UUID, StoredRawArtifact]]],
     ) -> RehydratedCase:
         provider_keys = sorted(p.provider_key for p in snapshot.source_providers)
         if not provider_keys:
@@ -214,10 +254,71 @@ class EvaluationReplayRehydrator:
                 )
             )
 
+        # 6. macro closure：RawArtifact 先行，再 series → snapshot → observation → link；
+        #    最后在同一事务内调用 verify_snapshot_integrity 证明 fingerprint 一致
+        #    （不复制 fingerprint 算法）。frozen UUID 原样复现，不回源 World Bank。
+        series_repo = MacroSeriesRepository(session)
+        snapshot_repo = MacroSnapshotRepository(session)
+        observation_repo = MacroObservationRepository(session)
+        macro_snapshot_ids: list[UUID] = []
+        for macro, stored_artifacts in stored_macros:
+            for raw_ref in macro.raw_artifacts:
+                stored = stored_artifacts[raw_ref.artifact_id]
+                expected_raw = self._macro_raw_artifact_model(raw_ref, stored)
+                existing_raw = await raw_repo.get_by_id(raw_ref.artifact_id)
+                if existing_raw is None:
+                    await raw_repo.insert(expected_raw)
+                else:
+                    self._verify_raw_artifact(existing_raw, expected_raw)
+
+            expected_series = self._macro_series_model(macro.series_id, macro.series)
+            existing_series = await series_repo.get_by_id(macro.series_id)
+            if existing_series is None:
+                await series_repo.create(expected_series)
+            else:
+                self._verify_macro_series(existing_series, expected_series)
+
+            expected_snapshot = self._macro_snapshot_model(macro)
+            existing_snapshot = await snapshot_repo.get_by_id(macro.snapshot_id)
+            if existing_snapshot is None:
+                await snapshot_repo.create(expected_snapshot)
+            else:
+                self._verify_macro_snapshot(existing_snapshot, expected_snapshot)
+
+            new_observations: list[MacroObservationModel] = []
+            for obs_ref in macro.observations:
+                expected_obs = self._macro_observation_model(macro.snapshot_id, obs_ref)
+                existing_obs = await observation_repo.get_by_id(obs_ref.observation_id)
+                if existing_obs is None:
+                    new_observations.append(expected_obs)
+                else:
+                    self._verify_macro_observation(existing_obs, expected_obs)
+            if new_observations:
+                await observation_repo.bulk_create(new_observations)
+
+            for link_ref in macro.artifact_links:
+                expected_link = self._macro_artifact_link_model(macro.snapshot_id, link_ref)
+                existing_link = await snapshot_repo.get_artifact_link_by_id(
+                    link_ref.snapshot_artifact_id
+                )
+                if existing_link is None:
+                    await snapshot_repo.add_artifact_link(expected_link)
+                else:
+                    self._verify_macro_artifact_link(existing_link, expected_link)
+
+            try:
+                await self._macro_service.verify_snapshot_integrity(session, macro.snapshot_id)
+            except MacroSnapshotIntegrityError as exc:
+                raise EvalReplayIntegrityError(
+                    f"macro snapshot rehydration fingerprint 不一致（{macro.snapshot_id}）"
+                ) from exc
+            macro_snapshot_ids.append(macro.snapshot_id)
+
         return RehydratedCase(
             company_id=company_id,
             provider_keys=tuple(provider_keys),
             documents=tuple(documents),
+            macro_snapshot_ids=tuple(macro_snapshot_ids),
         )
 
     # ------------------------------------------------------------- model builders
@@ -295,6 +396,115 @@ class EvaluationReplayRehydrator:
             acquired_at=doc.acquired_at,
         )
 
+    # ------------------------------------------------------------- macro model builders
+
+    @staticmethod
+    def _require_macro_closure(macro: FrozenMacroSnapshotRef) -> None:
+        """rehydrator 强制要求 macro closure（series + snapshot 行）；缺失 → reject。"""
+        if macro.series is None or macro.snapshot is None:
+            raise EvalReplayIntegrityError(
+                f"macro snapshot 缺少 rehydration closure（{macro.snapshot_id}）"
+            )
+
+    @staticmethod
+    def _macro_raw_artifact_model(
+        raw_ref: FrozenMacroRawArtifactRef, stored: StoredRawArtifact
+    ) -> RawArtifactModel:
+        return RawArtifactModel(
+            artifact_id=raw_ref.artifact_id,
+            content_sha256=stored.content_sha256,
+            storage_key=stored.storage_key,
+            byte_size=stored.byte_size,
+            media_type=stored.media_type,
+        )
+
+    @staticmethod
+    def _macro_series_model(series_id: UUID, series: FrozenMacroSeriesRef) -> MacroSeriesModel:
+        return MacroSeriesModel(
+            series_id=series_id,
+            provider_key=series.provider_key,
+            source_id=series.source_id,
+            external_indicator_id=series.external_indicator_id,
+            geography_type=series.geography_type,
+            geography_code=series.geography_code,
+            frequency=series.frequency,
+        )
+
+    @staticmethod
+    def _macro_snapshot_model(macro: FrozenMacroSnapshotRef) -> MacroDatasetSnapshotModel:
+        detail = macro.snapshot
+        assert detail is not None  # _require_macro_closure 已保证
+        return MacroDatasetSnapshotModel(
+            snapshot_id=macro.snapshot_id,
+            series_id=macro.series_id,
+            snapshot_fingerprint=macro.snapshot_fingerprint,
+            fingerprint_version=MACRO_SNAPSHOT_FINGERPRINT_VERSION,
+            normalization_version=WORLD_BANK_NORMALIZATION_VERSION,
+            requested_country_code=detail.requested_country_code,
+            query_start_year=detail.query_start_year,
+            query_end_year=detail.query_end_year,
+            source_id_snapshot=detail.source_id_snapshot,
+            indicator_name=detail.indicator_name,
+            indicator_unit=detail.indicator_unit,
+            source_name=detail.source_name,
+            source_note=detail.source_note,
+            source_organization=detail.source_organization,
+            topics_snapshot=[
+                {"topic_id": topic.topic_id, "name": topic.name} for topic in detail.topics_snapshot
+            ],
+            provider_country_id=detail.provider_country_id,
+            iso2_code=detail.iso2_code,
+            iso3_code=detail.iso3_code,
+            geography_name=detail.geography_name,
+            region_name=detail.region_name,
+            income_level_name=detail.income_level_name,
+            page=detail.page,
+            pages=detail.pages,
+            per_page=detail.per_page,
+            provider_total=detail.provider_total,
+            provider_last_updated=detail.provider_last_updated,
+            fetched_at=macro.fetched_at,
+            request_count=detail.request_count,
+            acquisition_method=detail.acquisition_method,
+            authority_tier_snapshot=detail.authority_tier_snapshot,
+            critical_claim_eligible_snapshot=detail.critical_claim_eligible_snapshot,
+            provider_capabilities_snapshot=list(detail.provider_capabilities_snapshot),
+            status=MacroSnapshotStatus.AVAILABLE.value,
+        )
+
+    @staticmethod
+    def _macro_observation_model(
+        snapshot_id: UUID, obs: FrozenMacroObservationRef
+    ) -> MacroObservationModel:
+        return MacroObservationModel(
+            observation_id=obs.observation_id,
+            snapshot_id=snapshot_id,
+            period=obs.period,
+            normalized_period_start=obs.normalized_period_start,
+            period_semantics=MacroPeriodSemantics.PROVIDER_YEAR_LABEL.value,
+            frequency=MacroFrequency.ANNUAL.value,
+            value_numeric=obs.value_numeric,
+            is_missing=obs.is_missing,
+            observation_status=obs.observation_status,
+            decimal_scale=obs.decimal_scale,
+        )
+
+    @staticmethod
+    def _macro_artifact_link_model(
+        snapshot_id: UUID, link: FrozenMacroArtifactLinkRef
+    ) -> MacroSnapshotArtifactModel:
+        return MacroSnapshotArtifactModel(
+            snapshot_artifact_id=link.snapshot_artifact_id,
+            snapshot_id=snapshot_id,
+            artifact_id=link.artifact_id,
+            role=link.role,
+            page=link.page,
+            response_status=link.response_status,
+            final_hostname=link.final_hostname,
+            content_type=link.content_type,
+            fetched_at=link.fetched_at,
+        )
+
     # ------------------------------------------------------------- create-or-verify
 
     @staticmethod
@@ -369,6 +579,73 @@ class EvaluationReplayRehydrator:
         ):
             raise EvalReplayIntegrityError(
                 f"source_record 已存在但字段不一致（{existing.source_id}）"
+            )
+
+    @staticmethod
+    def _verify_macro_series(existing: MacroSeriesModel, expected: MacroSeriesModel) -> None:
+        if (
+            existing.provider_key != expected.provider_key
+            or existing.source_id != expected.source_id
+            or existing.external_indicator_id != expected.external_indicator_id
+            or existing.geography_type != expected.geography_type
+            or existing.geography_code != expected.geography_code
+            or existing.frequency != expected.frequency
+        ):
+            raise EvalReplayIntegrityError(
+                f"macro series 已存在但身份字段不一致（{existing.series_id}）"
+            )
+
+    @staticmethod
+    def _verify_macro_snapshot(
+        existing: MacroDatasetSnapshotModel, expected: MacroDatasetSnapshotModel
+    ) -> None:
+        # semantic identity（snapshot_fingerprint）+ 冻结 fetched_at + replay 脚手架；
+        # 其余行级字段的完整证明由 verify_snapshot_integrity 的 fingerprint 重算完成。
+        if (
+            existing.snapshot_fingerprint != expected.snapshot_fingerprint
+            or existing.series_id != expected.series_id
+            or existing.fetched_at != expected.fetched_at
+            or existing.fingerprint_version != expected.fingerprint_version
+            or existing.normalization_version != expected.normalization_version
+            or existing.status != expected.status
+        ):
+            raise EvalReplayIntegrityError(
+                f"macro snapshot 已存在但字段不一致（{existing.snapshot_id}）"
+            )
+
+    @staticmethod
+    def _verify_macro_observation(
+        existing: MacroObservationModel, expected: MacroObservationModel
+    ) -> None:
+        if (
+            existing.period != expected.period
+            or existing.normalized_period_start != expected.normalized_period_start
+            or existing.period_semantics != expected.period_semantics
+            or existing.frequency != expected.frequency
+            or existing.value_numeric != expected.value_numeric
+            or existing.is_missing != expected.is_missing
+            or existing.observation_status != expected.observation_status
+            or existing.decimal_scale != expected.decimal_scale
+        ):
+            raise EvalReplayIntegrityError(
+                f"macro observation 已存在但字段不一致（{existing.observation_id}）"
+            )
+
+    @staticmethod
+    def _verify_macro_artifact_link(
+        existing: MacroSnapshotArtifactModel, expected: MacroSnapshotArtifactModel
+    ) -> None:
+        if (
+            existing.artifact_id != expected.artifact_id
+            or existing.role != expected.role
+            or existing.page != expected.page
+            or existing.response_status != expected.response_status
+            or existing.final_hostname != expected.final_hostname
+            or existing.content_type != expected.content_type
+            or existing.fetched_at != expected.fetched_at
+        ):
+            raise EvalReplayIntegrityError(
+                f"macro artifact link 已存在但字段不一致（{existing.snapshot_artifact_id}）"
             )
 
     async def _replay_aliases(

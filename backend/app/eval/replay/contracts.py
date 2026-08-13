@@ -63,3 +63,4 @@ class RehydratedCase:
     company_id: UUID
     provider_keys: tuple[str, ...]
     documents: tuple[RehydratedDocument, ...]
+    macro_snapshot_ids: tuple[UUID, ...] = ()
