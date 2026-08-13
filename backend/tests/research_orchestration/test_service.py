@@ -1143,9 +1143,10 @@ async def test_resume_research_backflow_source_required_schedules_supplemental(m
     assert result.orchestration_id == _OID
 
 
-async def test_resume_structured_refresh_schedules_supplemental(monkeypatch) -> None:
-    """K2：reason=structured_data_refresh_required 同样可恢复（走已有 Source Library
-    重跑补充研究）。"""
+async def test_resume_structured_refresh_rejected(monkeypatch) -> None:
+    """D2：reason=structured_data_refresh_required **不在** RESUME_BACKFLOW_MANUAL_
+    REASONS → InvalidAction 稳定拒绝（结构化 refresh 不在 automatic 文档补充研究
+    范围，补 PDF / URL 不能解决）；不调度。"""
     active = make_orchestration(
         orchestration_id=_OID,
         task_id=_TASK_ID,
@@ -1165,9 +1166,9 @@ async def test_resume_structured_refresh_schedules_supplemental(monkeypatch) -> 
         return active
 
     monkeypatch.setattr(ResearchOrchestrationRepository, "get_by_id", fake_get)
-    result = await service.resume_after_source_acquisition(_OID)
-    assert manager.resumed == [(_OID, RESUME_KIND_SUPPLEMENTAL_RESEARCH)]
-    assert result.orchestration_id == _OID
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await service.resume_after_source_acquisition(_OID)
+    assert manager.resumed == []
 
 
 async def test_resume_limit_reached_rejected(monkeypatch) -> None:

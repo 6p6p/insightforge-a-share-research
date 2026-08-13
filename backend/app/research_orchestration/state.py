@@ -54,15 +54,17 @@ class ResearchOrchestrationState(TypedDict, total=False):
     backflow_manual_reasons: list[str]
     # execute_supplemental_research 投影的 executor 级 manual_required_reasons
     # （7A Product Gate spec I/J：per-need 缺 eligible source → 聚合
-    # source_acquisition_required，结构化缺数据 → structured_data_refresh_required）。
-    # 与 plan 级 `backflow_manual_reasons` 分开——verify_progress 理由优先级：
-    # plan reasons > executor reasons > research_backflow_no_progress。
+    # source_acquisition_required；executor 只执行 document need，不产 structured）。
+    # 与 plan 级 `backflow_manual_reasons` 分开——verify_progress 理由优先级
+    # （7A Product Gate spec C，plan 级 structured 恒常优先，不随 has_progress 翻转）：
+    # plan reasons > 纯 document 进度 > executor reasons > research_backflow_no_progress。
     backflow_executor_manual_reasons: list[str]
-    # verify_progress 结果：True → 有进度（进入 Stage4 attempt N+1）；False →
-    # manual_required（reason=research_backflow_no_progress）。
+    # verify_progress 结果：True → 纯 document 进度，继续 Stage4 next attempt；
+    # False → manual_required（reason=backflow_manual_reason）。
     backflow_progress: bool
     # backflow terminal 的稳定 reason（research_backflow_limit_reached /
-    # research_backflow_no_progress；checkpoint state observability）。
+    # research_backflow_no_progress / source_acquisition_required /
+    # structured_data_refresh_required；checkpoint state observability）。
     backflow_manual_reason: str
     # fulfill_request 之后：consumed 的新 SynthesisResult 的 fulfillment 行 id
     # （build_stage5_continuation_request 据此重建 Stage5 attempt 的 request）。

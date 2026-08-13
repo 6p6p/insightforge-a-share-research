@@ -255,9 +255,7 @@ def test_resume_source_acquisition_dispatch(app) -> None:
     fake = FakeOrchestrationService()
     fake.result = _result(status="waiting_human", current_phase="waiting_manual")
     with _client(app, fake) as client:
-        response = client.post(
-            f"/api/v1/research-orchestrations/{_OID}/resume-source-acquisition"
-        )
+        response = client.post(f"/api/v1/research-orchestrations/{_OID}/resume-source-acquisition")
     assert response.status_code == 200
     assert fake.resume_calls == [_OID]
     body = response.json()

@@ -333,9 +333,7 @@ async def test_product_case1_one_click_full_chain(env, monkeypatch, connection_u
 # ---------------------------------------------------------------- Case 2 (K1)
 
 
-async def test_product_case2_waiting_manual_resume(
-    env, monkeypatch, connection_uri
-) -> None:
+async def test_product_case2_waiting_manual_resume(env, monkeypatch, connection_uri) -> None:
     """Case 2（K1）：首启 not_ready → fulfill 后仍 not_ready → waiting_manual
     （0 child）；用户补 source → `resume_after_source_acquisition` → **同一
     orchestration + 同一顶层线程** → prepare 重算 ready → Stage4/Stage5 →
@@ -437,9 +435,7 @@ async def test_product_case3_backflow_resume_same_request(env, monkeypatch, conn
             sessionmaker,
             manager,
             request,
-            audit_model=_audit_model(
-                _SequencedAuditDecision(research_decision, pass_decision)
-            ),
+            audit_model=_audit_model(_SequencedAuditDecision(research_decision, pass_decision)),
             prep_outcomes=[
                 (True, request, []),
                 (True, request, []),

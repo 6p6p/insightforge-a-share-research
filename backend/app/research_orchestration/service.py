@@ -31,9 +31,11 @@
 - **resume_after_source_acquisition(orchestration_id)**（7A Product Gate spec
   J/K/L）：受控补资料后**同线程恢复**（不换顶层 thread / 不新建 orchestration）。
   服务端读 checkpoint 分类：waiting_manual → K1 prepare 重路由；research_backflow
-  且 reason ∈ RESUME_BACKFLOW_MANUAL_REASONS → K2 同 round 重跑补充研究；
-  reason=limit_reached → K3 拒绝；awaiting_stage5 → L 拒绝（与 HumanReviewDecision
-  分开）。后台 `schedule_resume`，返回投影供轮询。
+  且 reason=source_acquisition_required（RESUME_BACKFLOW_MANUAL_REASONS 唯一成员）
+  → K2 同 round 重跑补充研究；reason=structured_data_refresh_required → D2 拒绝
+  （结构化 refresh 不在 automatic 文档补充研究范围）；reason=limit_reached → K3
+  拒绝；awaiting_stage5 → L 拒绝（与 HumanReviewDecision 分开）。后台
+  `schedule_resume`，返回投影供轮询。
 """
 
 from __future__ import annotations
@@ -677,11 +679,14 @@ class ResearchOrchestrationService:
         - phase=waiting_manual → **K1** kind=prepare：ensure_route → prepare 重算
           route_readiness（补资料后）→ ready→Stage4 attempt 1 | 仍缺→waiting_manual
           END（同 orchestration_id + 同顶层 thread，不换 thread）；
-        - phase=research_backflow 且 `backflow_manual_reason` ∈
-          RESUME_BACKFLOW_MANUAL_REASONS（source_acquisition_required /
-          structured_data_refresh_required）→ **K2** kind=supplemental_research：
-          同 research_request_id + 同 backflow_round 重跑 execute_supplemental_
-          research（不 round+1、不新建 SupplementalPlan）；
+        - phase=research_backflow 且 `backflow_manual_reason` =
+          source_acquisition_required（唯一 ∈ RESUME_BACKFLOW_MANUAL_REASONS）→
+          **K2** kind=supplemental_research：同 research_request_id + 同
+          backflow_round 重跑 execute_supplemental_research（不 round+1、不新建
+          SupplementalPlan）；
+        - reason=structured_data_refresh_required → **D2 拒绝**（InvalidAction：
+          结构化 refresh 不在 automatic 文档补充研究范围，上传 PDF / URL 不能解决，
+          resume 不得伪装成 document retrieval 已解决）；
         - reason=research_backflow_limit_reached → **K3 拒绝**（InvalidAction：
           MAX rounds 不可绕过，须 retry 新 orchestration）；
         - phase=awaiting_stage5（Stage5 人工裁决）→ **L：InvalidAction，与

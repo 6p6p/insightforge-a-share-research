@@ -58,11 +58,14 @@ export interface ResearchOrchestrationResponse {
   updated_at: string;
 }
 
-/** 需要补充资料后可 resume 的 manual_reason 集合（与后端 RESUME_BACKFLOW_MANUAL_REASONS 对齐）。 */
-export const RESUME_MANUAL_REASONS: readonly string[] = [
-  'source_acquisition_required',
-  'structured_data_refresh_required',
-];
+/** 需要补充资料后可 resume 的 manual_reason 集合（与后端 RESUME_BACKFLOW_MANUAL_REASONS 对齐；
+ * 7A Product Gate spec D：structured_data_refresh_required 不在其中——结构化 refresh 不在
+ * automatic 文档补充研究范围，补 PDF / URL 不能解决，后端 resume 以 InvalidAction 拒绝）。 */
+export const RESUME_MANUAL_REASONS: readonly string[] = ['source_acquisition_required'];
+
+/** 结构化数据补充缺口（7A.2B.3 scope 冻结）：不在 automatic 文档补充研究范围，
+ * 上传 PDF / URL 不能解决 → 前端展示明确警告，不提供 resume-source-acquisition。 */
+export const STRUCTURED_DATA_REFRESH_REASON = 'structured_data_refresh_required';
 
 /** 回填达到上限：不能再绕过（后端 resume 会以 InvalidAction 拒绝）。 */
 export const BACKFLOW_LIMIT_REASON = 'research_backflow_limit_reached';

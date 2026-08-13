@@ -594,16 +594,21 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
     verified deterministic artifact 且新 Stage4 SynthesisResult ≠ 旧且新 run
     fingerprint ≠ 旧）。backflow executor 只产出 EvidenceCard；deterministic
     artifact（macro/calculation/valuation）是 production pools 的既有产物，非本
-    loop 新增——分支 B 预留。无进度 → `research_backflow_manual`：若 plan 已投影
-    structured 需求（`backflow_manual_reasons` 非空）→ 稳定 reason
-    structured_data_refresh_required（**不误报 no_progress**）；否则
-    research_backflow_no_progress（复用 ResearchBackflowNoProgress 语义）。
+    loop 新增——分支 B 预留。
+    **7A Product Gate spec C**：plan 级 `backflow_manual_reasons`（structured
+    financial/macro/valuation refresh 需求）**恒常优先，不随 has_progress 翻转**。
+    plan 同时含 document 自动 need + structured manual need 时，executor 产出新
+    Document EvidenceCard 只是 document 侧进度，**不**代表 structured 缺口已解决
+    （C3：document evidence 保留、不 rollback，但最终 waiting_human
+    manual_reason=structured_data_refresh_required，不得进入 Stage4 next attempt /
+    fulfillment / Stage5 continuation）。纯 document 进度 → 继续 Stage4 next attempt。
     """
 
     async def verify_progress(state) -> dict:
         has_progress = bool(state.get("backflow_new_evidence_card_ids"))
-        # 无进度 → manual_required 稳定 reason，优先级：
+        # manual_required 稳定 reason 优先级（恒常，不随 has_progress 翻转）：
         #   plan 级 structured 需求（backflow_manual_reasons）>
+        #   纯 document 进度（has_progress）>
         #   executor 级 manual reasons（backflow_executor_manual_reasons，7A Product
         #     Gate spec I/J：缺 eligible source → source_acquisition_required、
         #     index/evidence 未就绪 → 对应 reason）>
@@ -612,15 +617,18 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
         # source_acquisition_required（可补资料后同线程恢复）与 genuine no-progress。
         manual_reasons = state.get("backflow_manual_reasons") or []
         executor_reasons = state.get("backflow_executor_manual_reasons") or []
-        manual_reason = (
-            manual_reasons[0]
-            if (not has_progress and manual_reasons)
-            else (
-                executor_reasons[0]
-                if (not has_progress and executor_reasons)
-                else (None if has_progress else RESEARCH_BACKFLOW_NO_PROGRESS)
-            )
-        )
+        if manual_reasons:
+            can_advance = False
+            manual_reason = manual_reasons[0]
+        elif has_progress:
+            can_advance = True
+            manual_reason = None
+        elif executor_reasons:
+            can_advance = False
+            manual_reason = executor_reasons[0]
+        else:
+            can_advance = False
+            manual_reason = RESEARCH_BACKFLOW_NO_PROGRESS
         await _persist_phase(
             deps.sessionmaker,
             state["orchestration_id"],
@@ -628,7 +636,7 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
             _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         )
         return {
-            "backflow_progress": has_progress,
+            "backflow_progress": can_advance,
             "backflow_manual_reason": manual_reason,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         }

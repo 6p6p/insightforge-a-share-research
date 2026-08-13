@@ -157,6 +157,68 @@
 - **本轮不做（边界）**：Stage7B Evaluation、README 大改、简历、CrewAI、新
   hidden provider、Playwright、验证码、自动交易、技术分析。
 
+### 7A FINAL Product Acceptance 收口（completed，FINAL，2026-08-13）
+
+- **Mixed Document+Structured 修复（spec C，根因）**：旧 `verify_progress` 以
+  `has_progress`（是否新增 EvidenceCard）直接决定 `backflow_progress`。plan 同时含
+  document 自动 need + structured manual need 时，executor 产出新 Document
+  EvidenceCard → has_progress=True → 错误进入 Stage4 next attempt / fulfillment /
+  Stage5 continuation，structured 缺口被跳过。**修复（C3）**：plan 级
+  `backflow_manual_reasons`（structured refresh）**恒常优先，不随 has_progress
+  翻转**——mixed 时最终 waiting_human manual_reason=structured_data_refresh_required，
+  document evidence 保留不 rollback，但 0 新增 fulfillment、0 Stage4/5 backflow
+  attempt；纯 document 进度才继续 Stage4 next attempt。
+- **Resume 语义收紧（spec D2）**：`RESUME_BACKFLOW_MANUAL_REASONS` 收窄为
+  `{source_acquisition_required}`（唯一可补资料后同线程恢复）。structured_data_
+  refresh_required **不在其中**——结构化 refresh 不在 automatic 文档补充研究范围
+  （7A.2B.3 scope 冻结），上传 PDF / URL 不能解决 → `resume_after_source_acquisition`
+  以 `ResearchOrchestrationInvalidAction` 稳定拒绝，**不伪装成 document retrieval 已
+  解决**；limit_reached K3 拒绝（须显式 retry）；awaiting_stage5 L 拒绝（走 /actions）。
+- **前端（spec E）**：`OrchestrationBanner` 对 structured_data_refresh_required 显示
+  「需要结构化数据补充」警告（明确自动补充研究仅支持文档资料），**不提供** 补资料
+  面板 / resume-source-acquisition 按钮；`RESUME_MANUAL_REASONS` 前端常量与后端对齐
+  （仅 source_acquisition_required）。
+- **Mixed 语义测试（spec F）**：graph 级 `test_mixed_document_progress_and_structured_
+  manual_reason`（断言 structured 恒常优先 + fulfillments==[] + stage4/5_attempts==
+  [1]）；service 级 `test_resume_structured_refresh_rejected`（InvalidAction 不调度）；
+  `test_resume_limit_reached_rejected`（K3）；source_acquisition resume works
+  （K2 调度）；`tests/research_orchestration/` 137 passed。
+- **Real controlled acquisition E2E（spec G，新文件
+  `tests/integration/test_research_orchestration_acquisition_e2e.py`）**：
+  G1 真实 prep 缺 annual_report_2025 → waiting_manual；G2 调用真实
+  `SourceIngestionService.ingest_upload` 正式 PDF 上传（机器生成 PDF fixture，不用
+  直接 INSERT / 不绕 prep）→ RawArtifact + SourceRecord（company_id == orchestration
+  verified company_id、content_sha256 存在、media_type=application/pdf、
+  provider=sse、document_type=annual_report、acquisition_method=user_upload、
+  reporting_period_end=2025-12-31）；G3 走既有正式管线 SourceParsing → Chunking →
+  VectorIndexService（真实 Chroma）→ Retrieval → EvidenceExtraction，**不手动构造
+  ParsedSource/DocumentChunk/RetrievalHit/EvidenceCard**，Gate C
+  （research_question_sha256 == planning question）断言；G4 调用真实
+  `resume_after_source_acquisition(orchestration_id)`——**相同 orchestration_id +
+  相同顶层 thread_id、无 orchestration attempt2**，内部 Stage4 child 正常创建；
+  G5 证明 waiting_manual → real upload → production prep 可见 → same-thread resume →
+  离开 waiting_manual → Stage4 attempt1 → Stage5 → completed（1 orchestration run、
+  attempt 1、无 attempt2、5 claims、(1,1) synthesis、1 report、2 runs）。
+- **Company isolation 负向（spec H）**：company B 上传正确 document_type PDF →
+  company A prep 仍不满足 annual_report_2025（`_load_resolution_data` 按 A 过滤）；
+  A 上传自己的 source → prep ready → resume → completed。
+- **Approved URL（spec I）**：0 live network；确认 Web/API 仍调用正式 approved-URL
+  import endpoint（`POST /source-records/import-url` → `ingest_url`）；已有
+  MockTransport（tests/acquisition/test_http_fetcher.py）+ url_policy
+  （tests/source_registry/test_url_policy.py）+ API dispatch（tests/api/
+  test_source_records.py）完整覆盖，无需新代码。
+- **scope 冻结确认**：Automatic supplemental research v1 = **Document Source Library**
+  （真实 Retrieval→Chroma→EvidenceCard）；Structured financial / macro / valuation
+  refresh = **manual_required（structured_data_refresh_required）**，不在 automatic loop。
+- **验证（2026-08-13）**：非集成 2089 + 集成 1003 全绿（串行，共享 PG
+  127.0.0.1:5433）；前端 typecheck ✓ + build ✓ + vitest 14 files/78 tests
+  （OrchestrationBanner 8 tests）；pip check ✓；ruff check ✓；ruff format --check ✓；
+  alembic 0044（head，check 无新迁移）；0 真实 DeepSeek / 0 live network（自动测试
+  套件全部 fake models + MockTransport）。
+- **本轮不做（边界）**：Stage7B Evaluation / Stage7C Fault Injection、新 Agent / 新
+  Provider / CrewAI、README 大改、简历、Playwright、OCR、验证码 / 反爬、hidden API、
+  automatic structured refresh。
+
 ## 7B：三路系统评估（3-way System Evaluation，planned，frozen）
 
 - **三路对照，不是三种评估通道**：对同一批 **frozen cases / snapshots / questions /

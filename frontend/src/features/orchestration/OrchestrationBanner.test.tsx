@@ -212,4 +212,25 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
     expect(screen.getByText('研究已暂停，等待人工介入')).toBeInTheDocument();
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
   });
+
+  it('research_backflow + structured_data_refresh_required → 显示结构化缺口警告，不显示补资料面板/继续研究', () => {
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'research_backflow',
+          manual_reason: 'structured_data_refresh_required',
+          missing_need_codes: ['macro:gdp_growth'],
+        })}
+        companyId="c1"
+      />,
+    );
+    expect(screen.getByText('需要结构化数据补充')).toBeInTheDocument();
+    expect(
+      screen.getByText(/当前自动补充研究仅支持文档资料，该缺口需要人工处理或后续结构化数据刷新能力。/),
+    ).toBeInTheDocument();
+    // 不提供「上传 PDF / 导入官方 URL / 继续研究」的补资料面板。
+    expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '继续研究' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '上传并保存' })).not.toBeInTheDocument();
+  });
 });

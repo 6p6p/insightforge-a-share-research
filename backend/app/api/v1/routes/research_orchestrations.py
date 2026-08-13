@@ -128,8 +128,10 @@ async def resume_source_acquisition(
 
     用户在 Workspace 补 PDF / approved URL import 成功后调用：
     - waiting_manual → K1（补资料后 prepare 重路由 → Stage4 attempt 1 / 仍缺）；
-    - research_backflow 且 reason ∈ resumable set（source_acquisition_required /
-      structured_data_refresh_required）→ K2（同 round 重跑补充研究）；
+    - research_backflow 且 reason=source_acquisition_required（唯一 resumable
+      reason）→ K2（同 round 重跑补充研究）；
+    - reason=structured_data_refresh_required → 400（D2：结构化 refresh 不在
+      automatic 文档补充研究范围，补 PDF / URL 不能解决，拒绝 resume）；
     - reason=research_backflow_limit_reached → K3 拒绝（400，须 retry 新
       orchestration）；
     - awaiting_stage5 → 400（L：与 HumanReviewDecision 分开，走 /actions）。

@@ -553,6 +553,49 @@ async def test_research_required_structured_manual_reason(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mixed_document_progress_and_structured_manual_reason(monkeypatch) -> None:
+    """7A Product Gate spec C3：plan 同时含 document 自动 need + structured manual
+    need，executor 产出新 Document EvidenceCard（has_progress=True）→ **仍必须**
+    waiting_human manual_reason=structured_data_refresh_required，**不得**进入
+    Stage4 next attempt / fulfillment / Stage5 continuation（verify_progress 的
+    plan 级 manual_reasons 恒常优先，不随 has_progress 翻转）。"""
+    harness = _Harness(
+        stage5_outcome="research_required",
+        backflow_new_cards=("00000000-0000-0000-0000-0000000000a1",),
+        backflow_plan_payload={
+            "need_specs": [
+                {
+                    "need_code": "unsupported_by_evidence",
+                    "target_section_ids": [],
+                    "related_claim_ids": [],
+                    "related_evidence_card_ids": [],
+                    "retrieval_queries": ["x"],
+                    "allowed_source_types": ["annual_report"],
+                }
+            ],
+            "max_queries_per_need": 3,
+            "manual_required_reasons": ["structured_data_refresh_required"],
+        },
+    )
+    harness.bind(monkeypatch)
+    final = await harness.runner().run_orchestration(_ORCH_ID)
+
+    assert harness.terminal_status is None
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.RESEARCH_BACKFLOW.value,
+    )
+    # structured 恒常优先：即使有新 Document 证据卡，reason 仍是 structured。
+    assert final["backflow_manual_reason"] == "structured_data_refresh_required"
+    assert final["backflow_round"] == 1
+    assert harness.backflow_executor.calls == 1
+    # 0 新增 fulfillment、0 Stage4/Stage5 backflow attempt（attempt 只有首启 1）。
+    assert harness.backflow_service.fulfillments == []
+    assert harness.child_service.stage4_attempts == [1]
+    assert harness.child_service.stage5_attempts == [1]
+
+
+@pytest.mark.asyncio
 async def test_executor_source_acquisition_reason_propagates(monkeypatch) -> None:
     """7A Product Gate spec I：executor 级 manual reason（缺 eligible source →
     source_acquisition_required）投影进 `backflow_executor_manual_reasons`，

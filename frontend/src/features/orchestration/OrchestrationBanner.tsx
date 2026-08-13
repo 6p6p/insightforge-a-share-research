@@ -39,6 +39,7 @@ import {
   type OrchestrationPhase,
   type ResearchOrchestrationResponse,
   RESUME_MANUAL_REASONS,
+  STRUCTURED_DATA_REFRESH_REASON,
 } from '../../types/orchestration';
 import { CONTROLLED_DOCUMENT_TYPES, type SourceDocumentType } from '../../types/source';
 
@@ -126,6 +127,12 @@ export function OrchestrationBanner({
       orchestration.manual_reason != null &&
       RESUME_MANUAL_REASONS.includes(orchestration.manual_reason));
 
+  // 7A Product Gate spec E：结构化数据补充缺口不在 automatic 文档补充研究范围，
+  // 上传 PDF / URL 不能解决 → 显示明确警告，**不提供**「继续研究」resume。
+  const structuredGap =
+    current_phase === 'research_backflow' &&
+    orchestration.manual_reason === STRUCTURED_DATA_REFRESH_REASON;
+
   const awaitingStage5 = status === 'waiting_human' && current_phase === 'awaiting_stage5';
 
   return (
@@ -150,13 +157,33 @@ export function OrchestrationBanner({
           <SourceAcquisitionPanel orchestration={orchestration} companyId={companyId} />
         ) : null}
 
+        {structuredGap ? (
+          // 7A Product Gate spec E：结构化缺口不能用「补 PDF / URL」解决，也不提供
+          // resume-source-acquisition 按钮；明确告知人工处理或后续结构化刷新能力。
+          <Alert
+            type="warning"
+            showIcon
+            message="需要结构化数据补充"
+            description={
+              <Space direction="vertical" size={0}>
+                <div>当前自动补充研究仅支持文档资料，该缺口需要人工处理或后续结构化数据刷新能力。</div>
+                <div>原因：{orchestration.manual_reason}</div>
+                {orchestration.missing_need_codes.length > 0 ? (
+                  <div>缺失需求代码：{orchestration.missing_need_codes.join('、')}</div>
+                ) : null}
+              </Space>
+            }
+          />
+        ) : null}
+
         {awaitingStage5 ? (
           <OrchestrationHumanActionCard orchestration={orchestration} />
         ) : null}
 
-        {status === 'waiting_human' && !needsSource && !awaitingStage5 ? (
-          // 例如 research_backflow_limit_reached：顶层已暂停，但没有可 resume 的
-          // 补资料路径，也没有 Stage 5 人工决策 → 明确告知（不可绕过 MAX rounds）。
+        {status === 'waiting_human' && !needsSource && !structuredGap && !awaitingStage5 ? (
+          // 例如 research_backflow_limit_reached / research_backflow_no_progress：顶层
+          // 已暂停，但没有可 resume 的补资料路径，也没有 Stage 5 人工决策 → 明确告知
+          // （不可绕过 MAX rounds / 无新增证据）。
           <Alert
             type="warning"
             showIcon
