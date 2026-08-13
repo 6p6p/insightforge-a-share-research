@@ -1,0 +1,268 @@
+"""Eval 数据契约测试（stage 7B.1.0）。"""
+
+from datetime import datetime
+from decimal import Decimal
+from uuid import uuid4
+
+import pytest
+from pydantic import ValidationError
+
+from app.eval.contracts import (
+    ClaimSupportLabel,
+    ClaimSupportStatus,
+    EvalCase,
+    EvalDatasetCaseRef,
+    EvalDatasetManifest,
+    EvalExecutionSpec,
+    FinancialFactLabel,
+    FrozenDocumentSourceRef,
+    FrozenMacroSnapshotRef,
+    FrozenSourceSnapshot,
+    FrozenStructuredArtifactRef,
+    HumanLabel,
+    MacroCausalLabel,
+    RiskTopicLabel,
+    StructuredArtifactType,
+)
+from app.eval.variants import EvalVariantId
+
+
+def _sha(tag: str = "a") -> str:
+    return tag * 64
+
+
+def _doc_ref(tag: str = "a") -> FrozenDocumentSourceRef:
+    return FrozenDocumentSourceRef(
+        source_record_id=uuid4(),
+        raw_artifact_id=uuid4(),
+        content_sha256=_sha(tag),
+        provider_key="cninfo",
+        document_type="annual_report",
+        media_type="application/pdf",
+    )
+
+
+def _case(**overrides) -> EvalCase:
+    kwargs = dict(
+        case_id="acme-2024-fundamental",
+        case_version=1,
+        company_id=uuid4(),
+        security_code="000001",
+        research_question="Acme 2024 年基本面是否支撑当前估值？",
+        analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
+        source_snapshot_fingerprint=_sha("b"),
+    )
+    kwargs.update(overrides)
+    return EvalCase(**kwargs)
+
+
+def test_contracts_frozen() -> None:
+    case = _case()
+    with pytest.raises(ValidationError):
+        case.case_id = "mutated"
+
+
+def test_invalid_hex_char_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FrozenDocumentSourceRef(
+            source_record_id=uuid4(),
+            raw_artifact_id=uuid4(),
+            content_sha256="g" * 64,
+            provider_key="cninfo",
+            document_type="annual_report",
+            media_type="application/pdf",
+        )
+
+
+def test_wrong_length_hex_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FrozenDocumentSourceRef(
+            source_record_id=uuid4(),
+            raw_artifact_id=uuid4(),
+            content_sha256="ab",
+            provider_key="cninfo",
+            document_type="annual_report",
+            media_type="application/pdf",
+        )
+
+
+def test_duplicate_source_identity_rejected() -> None:
+    sha = _sha("a")
+    ref1 = FrozenDocumentSourceRef(
+        source_record_id=uuid4(),
+        raw_artifact_id=uuid4(),
+        content_sha256=sha,
+        provider_key="cninfo",
+        document_type="annual_report",
+        media_type="application/pdf",
+    )
+    ref2 = FrozenDocumentSourceRef(
+        source_record_id=uuid4(),
+        raw_artifact_id=uuid4(),
+        content_sha256=sha,
+        provider_key="cninfo",
+        document_type="annual_report",
+        media_type="application/pdf",
+    )
+    with pytest.raises(ValidationError):
+        FrozenSourceSnapshot(document_sources=(ref1, ref2))
+
+
+def test_duplicate_dataset_case_rejected() -> None:
+    ref = EvalDatasetCaseRef(case_id="acme-2024", case_version=1, case_fingerprint=_sha("a"))
+    with pytest.raises(ValidationError):
+        EvalDatasetManifest(dataset_id="a_share_eval_v1", dataset_version=1, cases=(ref, ref))
+
+
+def test_case_id_rejects_uuid_only() -> None:
+    with pytest.raises(ValidationError):
+        _case(case_id=str(uuid4()))
+
+
+def test_case_excludes_runtime_fields() -> None:
+    forbidden = {
+        "workflow_run_id",
+        "orchestration_id",
+        "created_at",
+        "status",
+        "execution_status",
+    }
+    assert forbidden.isdisjoint(set(EvalCase.model_fields))
+
+
+def test_snapshot_covers_three_categories() -> None:
+    snapshot = FrozenSourceSnapshot(
+        document_sources=(_doc_ref("a"),),
+        macro_snapshots=(
+            FrozenMacroSnapshotRef(
+                snapshot_id=uuid4(),
+                series_id=uuid4(),
+                snapshot_fingerprint=_sha("c"),
+                fetched_at=datetime(2026, 8, 1, 12, 0, 0),
+            ),
+        ),
+        structured_artifacts=(
+            FrozenStructuredArtifactRef(
+                artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
+                artifact_id=uuid4(),
+                artifact_fingerprint=_sha("d"),
+            ),
+        ),
+    )
+    assert len(snapshot.document_sources) == 1
+    assert len(snapshot.macro_snapshots) == 1
+    assert len(snapshot.structured_artifacts) == 1
+
+
+def test_structured_artifact_type_enum() -> None:
+    assert (
+        StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION.value == "financial_metric_observation"
+    )
+    assert (
+        StructuredArtifactType.RELATIVE_VALUATION_OBSERVATION.value
+        == "relative_valuation_observation"
+    )
+    assert (
+        StructuredArtifactType.RELATIVE_VALUATION_COMPARISON.value
+        == "relative_valuation_comparison"
+    )
+    with pytest.raises(ValidationError):
+        FrozenStructuredArtifactRef(
+            artifact_type="unknown",
+            artifact_id=uuid4(),
+            artifact_fingerprint=_sha("d"),
+        )
+
+
+def test_human_label_all_four_typed_collections() -> None:
+    label = HumanLabel(
+        case_id="acme-2024",
+        case_version=1,
+        label_version=1,
+        financial_facts=(
+            FinancialFactLabel(
+                metric_code="net_profit",
+                period="FY2024",
+                unit="cny_yuan",
+                expected_value=Decimal("100000000"),
+            ),
+        ),
+        risk_topics=(RiskTopicLabel(risk_code="R1", required=True),),
+        claim_support_labels=(
+            ClaimSupportLabel(
+                claim_label_id="c1",
+                expected_support_status=ClaimSupportStatus.SUPPORTED,
+            ),
+        ),
+        macro_causal_labels=(
+            MacroCausalLabel(
+                driver_code="gdp_growth",
+                company_exposure_expected=True,
+                causal_claim_allowed=True,
+            ),
+        ),
+    )
+    assert label.financial_facts[0].label_type == "financial_fact"
+    assert label.risk_topics[0].label_type == "risk_topic"
+    assert label.claim_support_labels[0].label_type == "claim_support"
+    assert label.macro_causal_labels[0].label_type == "macro_causal"
+
+
+def test_human_label_wrong_typed_item_rejected() -> None:
+    with pytest.raises(ValidationError):
+        HumanLabel(
+            case_id="acme-2024",
+            case_version=1,
+            label_version=1,
+            financial_facts=(RiskTopicLabel(risk_code="R1", required=True),),
+        )
+
+
+def test_label_discriminator_literal() -> None:
+    with pytest.raises(ValidationError):
+        FinancialFactLabel(
+            label_type="risk_topic",
+            metric_code="net_profit",
+            period="FY2024",
+            unit="cny_yuan",
+            expected_value=Decimal("1"),
+        )
+
+
+def test_tolerance_nonnegative() -> None:
+    with pytest.raises(ValidationError):
+        FinancialFactLabel(
+            metric_code="net_profit",
+            period="FY2024",
+            unit="cny_yuan",
+            expected_value=Decimal("1"),
+            absolute_tolerance=Decimal("-1"),
+        )
+
+
+def test_annotation_is_separate_non_ground_truth_field() -> None:
+    label = HumanLabel(
+        case_id="acme-2024",
+        case_version=1,
+        label_version=1,
+        annotation="human note",
+    )
+    assert label.annotation == "human note"
+    assert label.financial_facts == ()
+    assert label.risk_topics == ()
+    assert label.claim_support_labels == ()
+    assert label.macro_causal_labels == ()
+
+
+def test_execution_spec_excludes_label_fields() -> None:
+    spec = EvalExecutionSpec(
+        case_fingerprint=_sha("a"),
+        source_snapshot_fingerprint=_sha("b"),
+        execution_config_fingerprint=_sha("c"),
+        variant_id=EvalVariantId.INSIGHTFORGE_FULL,
+    )
+    fields = set(EvalExecutionSpec.model_fields)
+    assert "human_label_fingerprint" not in fields
+    assert "metric_registry_version" not in fields
+    assert "judge_config_fingerprint" not in fields
+    assert spec.variant_id == EvalVariantId.INSIGHTFORGE_FULL
