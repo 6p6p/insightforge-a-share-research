@@ -298,8 +298,11 @@ class _FakeChunking:
 
 
 class _FakeVectorIndexService:
-    def __init__(self, sessionmaker, embedding, chroma, collection_name=None) -> None:
+    def __init__(
+        self, sessionmaker, embedding, chroma, collection_name=None, *, runtime_scope="production"
+    ) -> None:
         self.collection_name = collection_name
+        self.runtime_scope = runtime_scope
         self.force_rebuild_calls = []
 
     async def index_chunk_set(self, chunk_set_id, *, force_rebuild=False) -> None:
@@ -322,8 +325,12 @@ def _patch_rag(monkeypatch, hits):
     """monkeypatch runner 里的 VectorIndexService / RetrievalService，返回实例 holder。"""
     created: dict = {}
 
-    def vec_factory(sessionmaker, embedding, chroma, collection_name=None):
-        inst = _FakeVectorIndexService(sessionmaker, embedding, chroma, collection_name)
+    def vec_factory(
+        sessionmaker, embedding, chroma, collection_name=None, *, runtime_scope="production"
+    ):
+        inst = _FakeVectorIndexService(
+            sessionmaker, embedding, chroma, collection_name, runtime_scope=runtime_scope
+        )
         created["vector"] = inst
         return inst
 
@@ -561,6 +568,10 @@ async def test_collection_isolated_across_trials(monkeypatch) -> None:
     assert name_a != name_b
     assert name_a.startswith("eval_single_rag_")
     assert name_b.startswith("eval_single_rag_")
+    # manifest runtime_scope 也按 attempt 隔离（不同 execution_id → 各自 manifest）。
+    assert created_a["vector"].runtime_scope == f"eval:single_rag:{uuid_a.hex}"
+    assert created_b["vector"].runtime_scope == f"eval:single_rag:{uuid_b.hex}"
+    assert created_a["vector"].runtime_scope != created_b["vector"].runtime_scope
 
 
 @pytest.mark.asyncio
@@ -596,6 +607,10 @@ async def test_collection_isolated_within_trial(monkeypatch) -> None:
     assert name_c != name_d
     assert name_c == f"eval_single_rag_{uuid_c.hex}"
     assert name_d == f"eval_single_rag_{uuid_d.hex}"
+    # 同 trial 内 Attempt1/Attempt2 也各自独立 manifest scope。
+    assert created_c["vector"].runtime_scope == f"eval:single_rag:{uuid_c.hex}"
+    assert created_d["vector"].runtime_scope == f"eval:single_rag:{uuid_d.hex}"
+    assert created_c["vector"].runtime_scope != created_d["vector"].runtime_scope
 
 
 # ---------------------------------------------------------------- normalize hard failure

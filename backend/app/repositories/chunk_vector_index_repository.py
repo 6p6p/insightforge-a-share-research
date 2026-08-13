@@ -30,14 +30,22 @@ class ChunkVectorIndexRepository:
         embedding_model_id: str,
         embedding_model_revision: str,
         collection_schema_version: int,
+        runtime_scope: str,
     ) -> ChunkVectorIndexModel | None:
-        """按自然身份精确定位 manifest（同 ChunkSet + 同模型配置 → 最多 1 行）。"""
+        """按自然身份精确定位 manifest（同 ChunkSet + 同模型配置 + 同 runtime
+        scope → 最多 1 行）。
+
+        `runtime_scope` 是自然身份的一部分：production 传 `"production"`；eval
+        每个 attempt 传 `"eval:<variant>:<execution_id.hex>"`——不同 attempt 即使
+        index 同一个 ChunkSet，也命中各自的 manifest row，不会互相 reset。
+        """
         result = await self._session.execute(
             select(ChunkVectorIndexModel).where(
                 ChunkVectorIndexModel.chunk_set_id == chunk_set_id,
                 ChunkVectorIndexModel.embedding_model_id == embedding_model_id,
                 ChunkVectorIndexModel.embedding_model_revision == embedding_model_revision,
                 ChunkVectorIndexModel.collection_schema_version == collection_schema_version,
+                ChunkVectorIndexModel.runtime_scope == runtime_scope,
             )
         )
         return result.scalar_one_or_none()
@@ -45,10 +53,11 @@ class ChunkVectorIndexRepository:
     async def create_or_get(
         self, index: ChunkVectorIndexModel
     ) -> tuple[ChunkVectorIndexModel, bool]:
-        """INSERT ... ON CONFLICT(自然身份) DO NOTHING RETURNING。
+        """INSERT ... ON CONFLICT(自然身份，含 runtime_scope) DO NOTHING RETURNING。
 
-        并发重建同 ChunkSet + 同模型配置：输家回查既有 manifest（created=False），
-        双方共享同一行做确定性 upsert（幂等），最终仍只有 1 个 manifest。
+        并发重建同 ChunkSet + 同模型配置 + 同 runtime scope：输家回查既有
+        manifest（created=False），双方共享同一行做确定性 upsert（幂等），最终
+        仍只有 1 个 manifest。
         """
         excluded = {"created_at", "ready_at"}
         values = {
@@ -65,6 +74,7 @@ class ChunkVectorIndexRepository:
                     ChunkVectorIndexModel.embedding_model_id,
                     ChunkVectorIndexModel.embedding_model_revision,
                     ChunkVectorIndexModel.collection_schema_version,
+                    ChunkVectorIndexModel.runtime_scope,
                 ]
             )
             .returning(ChunkVectorIndexModel)
@@ -78,6 +88,7 @@ class ChunkVectorIndexRepository:
             index.embedding_model_id,
             index.embedding_model_revision,
             index.collection_schema_version,
+            index.runtime_scope,
         )
         if existing is None:
             raise RuntimeError("chunk vector index conflict without existing row")

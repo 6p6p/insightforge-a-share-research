@@ -82,10 +82,13 @@ class VectorIndexService:
         embedding_provider: EmbeddingProvider,
         chroma: ChromaManager,
         collection_name: str | None = None,
+        *,
+        runtime_scope: str = "production",
     ) -> None:
         self._sessionmaker = sessionmaker
         self._provider = embedding_provider
         self._chroma = chroma
+        self._runtime_scope = runtime_scope
         if collection_name is not None:
             # 测试注入：真实 Chroma 测试用独立 collection（uuid 后缀）做隔离。
             self._collection_name = collection_name
@@ -108,7 +111,13 @@ class VectorIndexService:
         重置为 building 并重建进当前 collection。eval 每 attempt 隔离场景使用——同一
         ChunkSet（幂等 parse/chunk 复用）在不同 attempt 各自重建进独立的
         per-attempt collection；重建成功后 manifest.collection_name 指向实际写入的
-        collection。生产默认路径行为不变。
+        collection。
+
+        **隔离不变量**：manifest 自然身份含 `runtime_scope`（构造注入）。production
+        默认 `"production"`；eval 每 attempt 传 `eval:<variant>:<execution_id.hex>`。
+        因此不同 attempt 即使 index 同一个 ChunkSet，也各自命中/创建**自己的** manifest
+        row——`force_rebuild` 只重建**当前 scope 自己的** manifest，不会覆盖其它
+        attempt 的 manifest。生产默认路径行为不变。
         """
         spec = self._provider.model_info
         if spec.revision is None:
@@ -219,12 +228,14 @@ class VectorIndexService:
         *,
         force_rebuild: bool = False,
     ) -> tuple[UUID, ChunkVectorIndexModel | None]:
-        """manifest create-or-get（自然身份）。返回 (vector_index_id, existing 或 None)。
+        """manifest create-or-get（自然身份，含 `self._runtime_scope`）。
+
+        返回 (vector_index_id, existing 或 None)。
 
         - 无 manifest → 创建 building；
         - failed / building → 重置为 building（retry，确定性 id + upsert 幂等）；
         - ready → 原样返回（replay 由调用方决定）；`force_rebuild=True` 时 ready 也
-          重置为 building（eval 每 attempt 重建进独立 collection）。
+          重置为 building（eval 同 scope retry 重建进自己的 collection）。
         """
         async with self._sessionmaker() as session:
             repo = ChunkVectorIndexRepository(session)
@@ -233,6 +244,7 @@ class VectorIndexService:
                 spec.model_id,
                 spec.revision,
                 CHROMA_COLLECTION_SCHEMA_VERSION,
+                self._runtime_scope,
             )
             if existing is not None:
                 if not force_rebuild and existing.status == "ready":
@@ -247,6 +259,7 @@ class VectorIndexService:
                 chunk_set_id=chunk_set_id,
                 embedding_model_id=spec.model_id,
                 embedding_model_revision=spec.revision,
+                runtime_scope=self._runtime_scope,
                 embedding_dimension=spec.dimension,
                 normalize_embeddings=spec.normalize_embeddings,
                 collection_name=self._collection_name,

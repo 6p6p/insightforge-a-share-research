@@ -222,22 +222,28 @@ def _collection_name(spec=_TEST_SPEC) -> str:
     )
 
 
-def _service(env: dict, *, provider=None, chroma=None, collection_name=None):
+def _service(
+    env: dict, *, provider=None, chroma=None, collection_name=None, runtime_scope="production"
+):
     return VectorIndexService(
         sessionmaker=env["sessionmaker"],
         embedding_provider=provider or FakeEmbeddingProvider(_TEST_SPEC),
         chroma=chroma or FakeChromaManager(),
         collection_name=collection_name,
+        runtime_scope=runtime_scope,
     )
 
 
-async def _manifest(env: dict, chunk_set_id, spec=_TEST_SPEC) -> ChunkVectorIndexModel | None:
+async def _manifest(
+    env: dict, chunk_set_id, spec=_TEST_SPEC, runtime_scope="production"
+) -> ChunkVectorIndexModel | None:
     async with env["sessionmaker"]() as session:
         return await ChunkVectorIndexRepository(session).get_by_identity(
             chunk_set_id,
             spec.model_id,
             spec.revision,
             CHROMA_COLLECTION_SCHEMA_VERSION,
+            runtime_scope,
         )
 
 
@@ -453,6 +459,71 @@ async def test_concurrent_index_single_manifest_and_records(env) -> None:
     ids, _ = await _chroma_records(chroma, chunk_set_id)
     assert len(ids) == 3
     assert len(set(ids)) == 3  # Chroma 每 chunk 恰好 1 条
+
+
+# ---------------------------------------------------------------- eval runtime scope 隔离
+
+
+async def test_eval_runtime_scopes_isolate_manifests(env) -> None:
+    """同 chunk_set + 同 embedding 配置，两个不同 eval runtime_scope 并发索引同一
+    ChunkSet：各自得到独立 manifest row（不同 runtime_scope + 不同 collection_name），
+    互不覆盖、互不 reset，两个 Chroma collection 各有完整 records。
+
+    这正是 Single RAG 两个 execution_id 的 derived-state race 回归：
+    Attempt B 绝不能让 Attempt A 的 manifest 变成指向 B 的 collection。
+    """
+    chunk_set_id = await _chunk_set_id(env)
+    chroma = FakeChromaManager()
+    scope_a = f"eval:single_rag:{uuid4().hex}"
+    scope_b = f"eval:single_rag:{uuid4().hex}"
+    coll_a = f"eval_single_rag_{uuid4().hex}"
+    coll_b = f"eval_single_rag_{uuid4().hex}"
+    assert scope_a != scope_b and coll_a != coll_b
+
+    results = await asyncio.gather(
+        _service(
+            env,
+            chroma=chroma,
+            collection_name=coll_a,
+            runtime_scope=scope_a,
+        ).index_chunk_set(chunk_set_id),
+        _service(
+            env,
+            chroma=chroma,
+            collection_name=coll_b,
+            runtime_scope=scope_b,
+        ).index_chunk_set(chunk_set_id),
+    )
+
+    assert {r.status for r in results} == {"ready"}
+
+    # 两个独立 manifest row：不同 runtime_scope + 不同 collection_name，均 ready。
+    manifest_a = await _manifest(env, chunk_set_id, runtime_scope=scope_a)
+    manifest_b = await _manifest(env, chunk_set_id, runtime_scope=scope_b)
+    assert manifest_a is not None and manifest_b is not None
+    assert manifest_a.vector_index_id != manifest_b.vector_index_id
+    assert manifest_a.runtime_scope == scope_a
+    assert manifest_b.runtime_scope == scope_b
+    assert manifest_a.collection_name == coll_a  # A row 始终指向 A collection
+    assert manifest_b.collection_name == coll_b  # B row 始终指向 B collection
+    assert manifest_a.status == "ready" and manifest_b.status == "ready"
+
+    async with env["sessionmaker"]() as session:
+        total = (
+            await session.execute(
+                select(func.count())
+                .select_from(ChunkVectorIndexModel)
+                .where(ChunkVectorIndexModel.chunk_set_id == chunk_set_id)
+            )
+        ).scalar_one()
+    assert total == 2  # 同 ChunkSet 两个 scope → 两行，不是共享一行
+
+    # 两个 Chroma collection 各自有完整 records（互不覆盖）。
+    collection_a = await chroma.client.get_or_create_collection(coll_a)
+    collection_b = await chroma.client.get_or_create_collection(coll_b)
+    for collection in (collection_a, collection_b):
+        got = await collection.get(where={"chunk_set_id": str(chunk_set_id)}, include=["metadatas"])
+        assert len(got["ids"]) == 3 and len(set(got["ids"])) == 3
 
 
 # ---------------------------------------------------------------- 错误路径

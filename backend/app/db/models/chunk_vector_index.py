@@ -6,8 +6,13 @@
 collection、指纹是多少"，不存 embedding 本身。
 
 - 自然身份 UNIQUE(chunk_set_id, embedding_model_id, embedding_model_revision,
-  collection_schema_version)：同 ChunkSet + 同模型配置 → 最多 1 个 manifest，
-  并发重建共享同一行（确定性 id + upsert 幂等）。
+  collection_schema_version, runtime_scope)：同 ChunkSet + 同模型配置 + 同
+  runtime scope → 最多 1 个 manifest，并发重建共享同一行（确定性 id + upsert
+  幂等）。
+- `runtime_scope` 把 manifest 按运行环境隔离：production 默认 `"production"`；
+  eval 每个 attempt 用 `eval:<variant>:<execution_id.hex>`——不同 attempt 即使
+  index 同一个 ChunkSet（parse/chunk 幂等复用），也各得自己的 manifest row，
+  不会用 force_rebuild 覆盖其它 attempt 的 manifest。
 - index_fingerprint 不含 timestamps / DB ID / status，只含可重建语义的字段。
 - chunk_set_id RESTRICT：上游 ChunkSet 存在期间，manifest 不会被级联删除。
 """
@@ -36,6 +41,7 @@ from app.db.base import Base
 
 _SHA256_CHECK = "~ '^[0-9a-f]{64}$'"
 _STATUS_CHECK = "status IN ('building','ready','failed')"
+_RUNTIME_SCOPE_CHECK = "btrim(runtime_scope) <> ''"
 
 
 class ChunkVectorIndexModel(Base):
@@ -74,6 +80,10 @@ class ChunkVectorIndexModel(Base):
             "btrim(collection_name) <> ''",
             name="ck_chunk_vector_indexes_collection_name_not_blank",
         ),
+        CheckConstraint(
+            _RUNTIME_SCOPE_CHECK,
+            name="ck_chunk_vector_indexes_runtime_scope_not_blank",
+        ),
         UniqueConstraint(
             "index_fingerprint",
             name="uq_chunk_vector_indexes_fingerprint",
@@ -83,6 +93,7 @@ class ChunkVectorIndexModel(Base):
             "embedding_model_id",
             "embedding_model_revision",
             "collection_schema_version",
+            "runtime_scope",
             name="uq_chunk_vector_indexes_identity",
         ),
         Index("ix_chunk_vector_indexes_chunk_set_id", "chunk_set_id"),
@@ -98,6 +109,12 @@ class ChunkVectorIndexModel(Base):
     )
     embedding_model_id: Mapped[str] = mapped_column(String(200), nullable=False)
     embedding_model_revision: Mapped[str] = mapped_column(String(200), nullable=False)
+    runtime_scope: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        default="production",
+        server_default=text("'production'"),
+    )
     embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
     normalize_embeddings: Mapped[bool] = mapped_column(Boolean, nullable=False)
     collection_name: Mapped[str] = mapped_column(String(200), nullable=False)

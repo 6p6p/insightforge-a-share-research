@@ -112,20 +112,27 @@ class SingleRagVariantRunner:
         if not rehydrated.documents:
             raise EvalSingleRagInputError("rehydration 未产出任何 document source")
 
-        # 5. per-attempt collection 命名空间（绑定 execution_id；派生索引，不写回
-        #    bundle，不同 execution_id 的 attempt 互相不可见）。
+        # 5. per-attempt collection 命名空间 + manifest runtime_scope（均绑定
+        #    execution_id；派生索引，不写回 bundle，不同 execution_id 的 attempt
+        #    互相不可见，也不同享/改写彼此 manifest row）。
         collection_name = self._collection_name(runtime_context.execution_id)
+        runtime_scope = f"eval:single_rag:{runtime_context.execution_id.hex}"
         index_service = VectorIndexService(
-            self._sessionmaker, self._embedding, self._chroma, collection_name=collection_name
+            self._sessionmaker,
+            self._embedding,
+            self._chroma,
+            collection_name=collection_name,
+            runtime_scope=runtime_scope,
         )
         retrieval_service = RetrievalService(
             self._sessionmaker, self._embedding, self._chroma, collection_name=collection_name
         )
 
         # 6. parse → chunk → index（每条 frozen document 走真实 deterministic pipeline）。
-        #    parse/chunk 是幂等 create-or-get（跨 attempt 复用同一 ChunkSet），因此
-        #    index 必须 force_rebuild：把 manifest 重置并重建进本 attempt 自己的
-        #    collection，避免 ready replay 校验到空 collection。
+        #    parse/chunk 是幂等 create-or-get（跨 attempt 复用同一 ChunkSet）。manifest
+        #    自然身份含 runtime_scope，因此每个 attempt 都命中/创建**自己的** manifest
+        #    row；force_rebuild 只重建本 attempt 自己的 manifest（同 scope retry 时
+        #    防御 collection 被清理），不会覆盖其它 attempt 的 manifest。
         for doc in rehydrated.documents:
             parsed = await self._parsing.parse_source(doc.source_record_id)
             chunked = await self._chunking.chunk_parsed_source(parsed.parsed_source_id)
