@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
@@ -232,6 +232,39 @@ class MacroPersistenceService:
                 artifact_count=len(captured.responses),
                 observation_count=observation_count,
             )
+
+    async def verify_snapshot_integrity(
+        self, session: AsyncSession, snapshot_id: UUID
+    ) -> MacroDatasetSnapshotModel | None:
+        """公开的结构化完整性校验（不重算 fingerprint，供 Eval materializer 等复用）。
+
+        只校验 persisted 结构不变量：snapshot 存在 / status=available /
+        fingerprint_version / normalization_version / series 存在 / 至少 1 条
+        artifact link / 至少 1 条 observation。发现损坏只抛
+        MacroSnapshotIntegrityError，不自动修复；snapshot 不存在返回 None。
+
+        不重算 snapshot fingerprint：其算法依赖归档 artifact 内容 SHA + 领域
+        结果，其中部分字段（source_id / geography 等）未持久化到 snapshot 行，
+        无法从 DB 重建。frozen materializer 只做结构校验，并信任 persisted
+        `snapshot_fingerprint` 作为 content identity。
+        """
+        snapshot_repo = MacroSnapshotRepository(session)
+        snapshot = await snapshot_repo.get_by_id(snapshot_id)
+        if snapshot is None:
+            return None
+        if snapshot.status != MacroSnapshotStatus.AVAILABLE.value:
+            raise MacroSnapshotIntegrityError("snapshot status is not available")
+        if snapshot.fingerprint_version != MACRO_SNAPSHOT_FINGERPRINT_VERSION:
+            raise MacroSnapshotIntegrityError("snapshot fingerprint version mismatch")
+        if snapshot.normalization_version != WORLD_BANK_NORMALIZATION_VERSION:
+            raise MacroSnapshotIntegrityError("snapshot normalization version mismatch")
+        if await MacroSeriesRepository(session).get_by_id(snapshot.series_id) is None:
+            raise MacroSnapshotIntegrityError("snapshot series missing")
+        if await snapshot_repo.count_artifact_links(snapshot.snapshot_id) < 1:
+            raise MacroSnapshotIntegrityError("snapshot artifact link count < 1")
+        if await MacroObservationRepository(session).count_for_snapshot(snapshot.snapshot_id) < 1:
+            raise MacroSnapshotIntegrityError("snapshot observation count < 1")
+        return snapshot
 
     # ------------------------------------------------------------------ 内部
 

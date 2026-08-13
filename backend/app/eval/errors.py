@@ -1,8 +1,8 @@
 """Evaluation runtime errors (stage 7B.1.0).
 
 稳定错误层次：`EvalError` → `EvalContractError` / `EvalFingerprintError` /
-`EvalVariantError`。错误消息**不**塞 payload / labels / raw source text / 完整
-fingerprint / API key。
+`EvalVariantError` / `EvalMaterializationError`。错误消息**不**塞 payload /
+labels / raw source text / 完整 fingerprint / API key。
 """
 
 
@@ -28,3 +28,10 @@ class EvalVariantError(EvalError):
     """Eval variant 非法（未知 variant id 等）。"""
 
     code = "eval_variant_error"
+
+
+class EvalMaterializationError(EvalError):
+    """Snapshot materialization 失败（缺失 / 跨公司 / 未来证据 / 字节篡改 /
+    领域 verifier 校验失败等）。"""
+
+    code = "eval_materialization_error"
