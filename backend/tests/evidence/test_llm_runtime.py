@@ -5,6 +5,7 @@ Settings。真实调用（extract）不在自动测试范围（conftest 禁止�
 """
 
 import asyncio
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -149,7 +150,7 @@ def test_production_adapter_explicitly_disables_thinking() -> None:
 
 def test_adapter_extract_passes_thinking_disabled_and_model() -> None:
     """真实调用路径：adapter.extract() 构造的 ChatDeepSeek 使用 deepseek-v4-flash
-    且显式传 thinking disabled。
+    且显式传 thinking disabled，并经 instrumentation 上报 usage。
 
     用替身捕获 ChatDeepSeek 构造参数与 with_structured_output 链，不发起
     任何真实网络请求。
@@ -158,24 +159,39 @@ def test_adapter_extract_passes_thinking_disabled_and_model() -> None:
 
     captured = {}
 
+    class _RecordingObserver:
+        def __init__(self):
+            self.records = []
+
+        async def record(self, record):
+            self.records.append(record)
+
     class _FakeStructured:
         async def ainvoke(self, messages):
-            return _FAKE_DECISION
+            return {
+                "raw": SimpleNamespace(
+                    usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+                ),
+                "parsed": _FAKE_DECISION,
+                "parsing_error": None,
+            }
 
     class _FakeChat:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, include_raw=True):
+            assert include_raw is True
             return _FakeStructured()
 
     original = lds.ChatDeepSeek
     lds.ChatDeepSeek = _FakeChat
+    observer = _RecordingObserver()
     try:
         from app.evidence.extractor.adapters import DeepSeekEvidenceExtractionModel
         from app.rag.retrieval.contracts import RetrievalHit
 
-        model = DeepSeekEvidenceExtractionModel(_settings())
+        model = DeepSeekEvidenceExtractionModel(_settings(), usage_observer=observer)
         hit = RetrievalHit(
             rank=1,
             chunk_id=_CHUNK_ID,
@@ -205,6 +221,18 @@ def test_adapter_extract_passes_thinking_disabled_and_model() -> None:
     # 不依赖 provider 默认 thinking：显式 disabled 已传入。
     assert captured["extra_body"]["thinking"]["type"] == "disabled"
     assert captured["temperature"] == 0.0
+
+    # adapter → instrumentation wrapper → observer 端到端接线。
+    assert len(observer.records) == 1
+    rec = observer.records[0]
+    assert rec.component_name == "evidence_extraction"
+    assert rec.provider == "deepseek"
+    assert rec.model_id == "deepseek:deepseek-v4-flash"
+    assert rec.outcome == "success"
+    assert rec.usage_status == "reported"
+    assert rec.input_tokens == 10
+    assert rec.output_tokens == 5
+    assert rec.total_tokens == 15
 
 
 def test_has_llm_credentials() -> None:

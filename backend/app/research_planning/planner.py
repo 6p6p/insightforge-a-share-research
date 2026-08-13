@@ -20,8 +20,10 @@ from typing import Protocol, runtime_checkable
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.llm.components import COMPONENT_RESEARCH_PLANNER
 from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import UnsupportedLLMProviderError
+from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.research_planning.contracts import (
     ResearchPlannerRequest,
     ResearchPlanPayload,
@@ -136,9 +138,10 @@ class DeepSeekResearchPlannerModel:
     adapter 不依赖 langchain 已安装）。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_observer: LlmUsageObserver | None = None) -> None:
         self._settings = settings
         self._model_id = f"{settings.llm_provider}:{settings.llm_model}"
+        self._usage_observer = usage_observer
 
     @property
     def model_id(self) -> str:
@@ -161,9 +164,16 @@ class DeepSeekResearchPlannerModel:
             # 显式关闭 thinking（同现有 analyst adapter 约定）。
             extra_body={"thinking": {"type": "disabled"}},
         )
-        structured = llm.with_structured_output(ResearchPlanPayload)
         try:
-            return await structured.ainvoke(messages)
+            return await invoke_structured_with_usage(
+                llm,
+                ResearchPlanPayload,
+                messages,
+                component_name=COMPONENT_RESEARCH_PLANNER,
+                provider=self._settings.llm_provider,
+                model_id=self._model_id,
+                usage_observer=self._usage_observer,
+            )
         except ValidationError as exc:
             raise ResearchPlannerMalformedOutput() from exc
         except Exception as exc:

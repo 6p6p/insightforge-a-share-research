@@ -16,6 +16,7 @@ with_structured_output 链，不发起任何真实网络请求。
 
 import asyncio
 from datetime import date
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -104,13 +105,19 @@ def test_planner_generate_passes_thinking_disabled_and_structured_output() -> No
 
         async def ainvoke(self, messages):
             captured["messages"] = messages
-            return ResearchPlanPayload.model_validate(_payload())
+            return {
+                "raw": SimpleNamespace(
+                    usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+                ),
+                "parsed": ResearchPlanPayload.model_validate(_payload()),
+                "parsing_error": None,
+            }
 
     class _FakeChat:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, include_raw=True):
             captured["structured_schema"] = schema
             return _FakeStructured(schema)
 

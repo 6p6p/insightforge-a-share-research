@@ -30,6 +30,8 @@ from app.evidence.extractor.errors import (
     EvidenceExtractorUnavailable,
 )
 from app.evidence.extractor.prompt import ExtractionContext, build_extraction_messages
+from app.llm.components import COMPONENT_EVIDENCE_EXTRACTION
+from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.rag.retrieval.contracts import RetrievalHit
 
 
@@ -40,9 +42,10 @@ class DeepSeekEvidenceExtractionModel:
     adapter 不依赖 langchain 已安装）。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_observer: LlmUsageObserver | None = None) -> None:
         self._settings = settings
         self._model_id = f"{settings.llm_provider}:{settings.llm_model}"
+        self._usage_observer = usage_observer
 
     @property
     def model_id(self) -> str:
@@ -80,9 +83,16 @@ class DeepSeekEvidenceExtractionModel:
             extra_body={"thinking": {"type": "disabled"}},
             # 只启用 structured-output；不绑定 tools / web search / function side effects。
         )
-        structured = llm.with_structured_output(EvidenceExtractionDecision)
         try:
-            return await structured.ainvoke(messages)
+            return await invoke_structured_with_usage(
+                llm,
+                EvidenceExtractionDecision,
+                messages,
+                component_name=COMPONENT_EVIDENCE_EXTRACTION,
+                provider=self._settings.llm_provider,
+                model_id=self._model_id,
+                usage_observer=self._usage_observer,
+            )
         except OutputParserException as exc:
             raise EvidenceExtractionMalformedOutput() from exc
         except Exception as exc:

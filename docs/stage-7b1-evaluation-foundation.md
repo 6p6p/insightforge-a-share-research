@@ -2,7 +2,7 @@
 
 > 状态：**7B.1.0 契约 = FINAL**；**7B.1.1A Frozen Evaluation Bundle = FINAL**；
 > **7B.1.1B PG→Frozen Snapshot Materializer = FINAL**；**7B.1.2A Deterministic Metrics
-> Foundation = FINAL**。
+> Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -14,10 +14,11 @@
 仓库**尚无** eval / telemetry / token-usage 基础：
 
 - 无 `eval/`、`evaluation/`、`metrics/`、`telemetry/` 包。
-- 无 token usage / cost 捕获；LLM 调用分散在 9 个独立 `DeepSeek*Model` adapter
+- 无 token usage / cost 捕获；LLM 调用分散在 10 个独立 `DeepSeek*Model` adapter
   （evidence/extractor、analysis/{financial,macro,synthesis,valuation,claims}、
-  audit、revision、draft_section），各自 `with_structured_output(...).ainvoke()`
-  并**丢弃** `usage_metadata`。**无统一调用收口**（→ 效率维度依赖 7B.1.2 捕获层）。
+  audit、revision、draft_section、research_planner），各自 `with_structured_output(...)
+  .ainvoke()` 并**丢弃** `usage_metadata`。**无统一调用收口**（→ 效率维度依赖 7B.1.2
+  捕获层；已于 7B.1.2B 解决，见 §3.13）。
 - 无 LangSmith / Langfuse / OpenTelemetry；只有 structlog JSON 日志。
 - 可复用基础：`run_checks`（10 个确定性 check，见 `app/report/checks.py`）、
   canonical JSON SHA-256 fingerprint（20+ 处，见 `app/macro/fingerprint.py`、
@@ -68,6 +69,15 @@ app/eval/
     context.py    #   EvalScoringContext（output + snapshot + exec fp，无 label）
     deterministic.py # citation_validity / citation_coverage v1 + 结构校验
     registry.py   #   deterministic calculator 注册表 + 可用集合
+  usage/          # 7B.1.2B：LLM 调用 usage 收集 + 聚合
+    collector.py  #   EvalLlmUsageCollector（按 exec fp / variant / case 绑定）
+    aggregation.py#   aggregate_llm_usage → 4 个 runtime metric
+```
+`app/llm/`（通用层，不在 eval 包内）：
+```
+app/llm/
+  instrumentation.py # invoke_structured_with_usage 统一包装 + LlmCallUsageRecord
+  components.py      # COMPONENT_* 组件名常量 + INSTRUMENTED_LLM_COMPONENTS
 ```
 
 ## 3. 冻结契约（7B.1.0）
@@ -235,7 +245,41 @@ judge / DB / LLM / network）：
     citation；0 claim → `not_applicable`。
 - **未实现**（registry 暴露为 unavailable，不复制公式）：
   `claim_support_rate` / `unsupported_claim_ratio` / `conflict_preservation` /
-  `financial_accuracy` 等；这些留待 7B.1.2B（judge 依赖）或 human-label 阶段。
+  `financial_accuracy` 等；这些留待 judge 依赖或 human-label 阶段。
+
+### 3.13 LLM Usage Instrumentation Foundation（7B.1.2B）
+
+统一 LLM 调用收口，捕获每次 structured-output 调用的 usage 记录，回填全部
+**10 个**生产 adapter（evidence/extractor、analysis/{financial,macro,synthesis,
+valuation,claims}、audit、revision、draft_section、research_planner），为效率维度
+（token/call-count）提供数据源。**0 真实 DeepSeek / 0 network**（验证全用 fake）。
+
+- **`app/llm/instrumentation.py`**（通用层，不依赖 eval）：
+  - `LlmCallUsageRecord` frozen dataclass：`component_name` / `provider` / `model_id`
+    / `outcome`（success|parsing_error|invocation_error）/ `duration_ms`（≥0）/
+    `usage_status`（reported|unavailable）/ 三个 token 字段 + `input_token_details` /
+    `output_token_details`。**不含** raw response / prompt / AIMessage.content /
+    reasoning_content / tool args / API key；usage reported → 三 token 完整非负；
+    usage None → **不**自动填 0。
+  - `LlmUsageObserver` Protocol + `NullLlmUsageObserver`（no-op）。
+  - `invoke_structured_with_usage(model, schema, input, *, component_name, provider,
+    model_id, usage_observer)`：`with_structured_output(schema, include_raw=True)`，
+    读 `result["raw"]/["parsed"]/["parsing_error"]`；**先记 usage 再抛 parsing_error**；
+    ainvoke 异常先记 attempt+duration+invocation_error 再 re-raise。
+- **`app/eval/usage/`**：
+  - `EvalLlmUsageCollector`：绑定 `execution_spec_fingerprint` / `variant_id` /
+    `case_id`；实例级 list（**无模块全局**，适配 LangGraph 并行 worker）。
+  - `aggregate_llm_usage(records)` → `{llm_call_count, input_tokens, output_tokens,
+    total_tokens}` 四个 `MetricValue`。`llm_call_count` 统计**全部** attempt（含
+    parsing_error / invocation_error）；token 指标仅当**所有** record
+    `usage_status=reported` 且完整才 computed，否则 unavailable（reason_code=
+    `incomplete_llm_usage`）；0 调用 → call_count=0 computed，token computed=0。
+- **不**：estimated_cost / 价格 hardcode / 把 per-call duration 累加为 latency_ms /
+  web fetch 价格进 runtime。
+
+回填语义：各 adapter 返回类型 / model identity / thinking disabled / temperature /
+config / prompt / schema / tool 权限**全部不变**；adapter 构造新增可选
+`usage_observer` 参数（默认 None）。
 
 ## 4. 验收标准（7B.1.0）
 
@@ -256,7 +300,7 @@ judge / DB / LLM / network）：
 
 | # | 风险 | 影响 | 缓解（归属 slice） |
 |---|---|---|---|
-| R1 | **token/cost/latency 无法测量**：9 adapter 各自 `ainvoke` 且丢 `usage_metadata`，无统一收口 | 效率维度缺失 | 7B.1.2 引入统一 LLM 调用包装 + 捕获记录并回填 9 adapter；7B.1.0 只冻结 `MetricValue` 契约 |
+| R1 | **token/cost/latency 无法测量**：10 adapter 各自 `ainvoke` 且丢 `usage_metadata`，无统一收口 | 效率维度缺失 | 7B.1.2 引入统一 LLM 调用包装 + 捕获记录并回填 10 adapter（✅ 7B.1.2B 已落地）；7B.1.0 只冻结 `MetricValue` 契约 |
 | R2 | **snapshot 漂移**：Stage4/5 读 live PG/Chroma，非 snapshot | frozen snapshot 与「实际读取」不一致 | snapshot 是字节寻址 manifest；runner 启动前校验读取内容 sha256 匹配 snapshot，不匹配 fail-fast（7B.1.1/1.4） |
 | R3 | **baseline 偷跑**：给 single_rag / multi_stage_no_audit 喂 Full 才生成的最终 EvidenceCards | 三路比较失去意义 | snapshot 是 raw source，不是 EvidenceCard/Claim；各 variant 自提取（§1.3） |
 | R4 | **judge 自评** | quality 分数虚高 | judge 模型独立固定，`FrozenModelConfig` 逐 variant 冻结（§1.5） |
@@ -276,8 +320,9 @@ judge / DB / LLM / network）：
 - **7B.1.2A ✅ FINAL**：Cross-Variant Deterministic Metrics Foundation（`app/eval/scoring/`；
   实现 citation_validity / citation_coverage v1 + 结构校验 + registry；只做真正公平、
   不依赖 label/judge/DB/LLM 的指标）。
-- **7B.1.2B（下一步，未开始）**：token/cost/latency 捕获层（统一 LLM 调用包装，回填 9
-  adapter）+ 其余 deterministic 指标（conflict_preservation / 证据链 closure 类）。
+- **7B.1.2B ✅ FINAL**：LLM Usage Instrumentation（`app/llm/instrumentation.py` 统一
+  包装 + `app/llm/components.py` + `app/eval/usage/` collector/aggregation；回填 10
+  adapter，采集 llm_call_count / input_tokens / output_tokens / total_tokens）。
 - **7B.1.3**：eval 持久化（alembic migration + models + repository，镜像 `ReportCheckResult`）。
 - **7B.1.4**：variant runner 契约（`VariantRunner` Protocol）+ dev/test Noop runner。
 - **7B.1.5**：offline CLI `python -m app.cli.eval run --variant ... --dataset ...`。

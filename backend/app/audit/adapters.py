@@ -25,6 +25,8 @@ from app.audit.errors import (
 from app.audit.packs import AuditPack
 from app.audit.prompt import build_audit_messages
 from app.core.config import Settings
+from app.llm.components import COMPONENT_AUDIT
+from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 
 
 class DeepSeekAuditModel:
@@ -34,9 +36,10 @@ class DeepSeekAuditModel:
     adapter 不依赖 langchain 已安装）。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_observer: LlmUsageObserver | None = None) -> None:
         self._settings = settings
         self._model_id = f"{settings.llm_provider}:{settings.llm_model}"
+        self._usage_observer = usage_observer
 
     @property
     def model_id(self) -> str:
@@ -64,9 +67,16 @@ class DeepSeekAuditModel:
             extra_body={"thinking": {"type": "disabled"}},
             # 只启用 structured-output；不绑定 tools / web search / function side effects。
         )
-        structured = llm.with_structured_output(AuditDecision)
         try:
-            return await structured.ainvoke(messages)
+            return await invoke_structured_with_usage(
+                llm,
+                AuditDecision,
+                messages,
+                component_name=COMPONENT_AUDIT,
+                provider=self._settings.llm_provider,
+                model_id=self._model_id,
+                usage_observer=self._usage_observer,
+            )
         except OutputParserException as exc:
             raise ReportAuditMalformedOutput() from exc
         except Exception as exc:

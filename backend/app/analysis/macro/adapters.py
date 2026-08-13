@@ -27,6 +27,8 @@ from app.analysis.macro.errors import (
 from app.analysis.macro.packs import CompanyEvidencePack, MacroDriverPack
 from app.analysis.macro.prompt import build_analysis_messages
 from app.core.config import Settings
+from app.llm.components import COMPONENT_MACRO_ANALYSIS
+from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 
 
 class DeepSeekMacroAnalysisModel:
@@ -36,9 +38,10 @@ class DeepSeekMacroAnalysisModel:
     adapter 不依赖 langchain 已安装）。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, usage_observer: LlmUsageObserver | None = None) -> None:
         self._settings = settings
         self._model_id = f"{settings.llm_provider}:{settings.llm_model}"
+        self._usage_observer = usage_observer
 
     @property
     def model_id(self) -> str:
@@ -75,9 +78,16 @@ class DeepSeekMacroAnalysisModel:
             extra_body={"thinking": {"type": "disabled"}},
             # 只启用 structured-output；不绑定 tools / web search / function side effects。
         )
-        structured = llm.with_structured_output(MacroAnalysisDecision)
         try:
-            return await structured.ainvoke(messages)
+            return await invoke_structured_with_usage(
+                llm,
+                MacroAnalysisDecision,
+                messages,
+                component_name=COMPONENT_MACRO_ANALYSIS,
+                provider=self._settings.llm_provider,
+                model_id=self._model_id,
+                usage_observer=self._usage_observer,
+            )
         except OutputParserException as exc:
             raise MacroAnalysisMalformedOutput() from exc
         except Exception as exc:
