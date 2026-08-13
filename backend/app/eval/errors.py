@@ -48,3 +48,15 @@ class EvalOutputStructureError(EvalError):
     source 未命中 frozen snapshot）。"""
 
     code = "eval_output_structure_error"
+
+
+class EvalExecutionAssemblyError(EvalError):
+    """execution benchmark 装配失败（spec↔case↔snapshot / spec↔trial↔attempt
+    fingerprint 不一致）。
+
+    这是 **benchmark assembly corruption**，不是 variant 执行失败：harness 必须在
+    调用 runner **之前** fail-fast（runner 0 calls），**不得**收敛为 failed
+    `EvalExecutionAttemptResult`。
+    """
+
+    code = "eval_execution_assembly_error"

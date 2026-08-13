@@ -235,7 +235,7 @@ def compute_execution_spec_fingerprint(spec: EvalExecutionSpec) -> str:
 def compute_scoring_spec_fingerprint(spec: EvalScoringSpec) -> str:
     payload = {
         "schema_version": spec.schema_version,
-        "execution_result_fingerprint": spec.execution_result_fingerprint,
+        "variant_output_fingerprint": spec.variant_output_fingerprint,
         "human_label_fingerprint": spec.human_label_fingerprint,
         "metric_registry_version": spec.metric_registry_version,
         "judge_config_fingerprint": spec.judge_config_fingerprint,

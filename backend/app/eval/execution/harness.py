@@ -1,31 +1,54 @@
-"""Evaluation execution harness (stage 7B.1.2C spec N/O/P).
+"""Evaluation execution harness (stage 7B.1.2C spec B/C/D/E/N/O/P).
 
-`execute_variant_attempt` 编排一次 variant attempt：
+`execute_variant_attempt` 编排一次 variant attempt，分两段：
 
-1. 前置校验 `runner.variant_id == spec.variant_id`（不一致 = 装配错误，抛
-   `EvalVariantError`，不属于 variant 执行失败）；
-2. 创建 `EvalLlmUsageCollector` 并注入 runner（runner 必须线程到内部 LLM adapter；
-   0 record = 0 LLM call）；
-3. 单调时钟 `time.perf_counter_ns()` 计量 `wall_latency_ms`（**不** datetime、
-   **不**把 per-call LLM duration 求和映射为 latency）；
-4. `await runner.run(...)` → 校验 output variant/case identity → hard identity
-   校验（duplicate id）→ 计算 output fingerprint → 返回 success / failed result；
-5. 失败路径：error_code = 异常稳定 `.code` 或 `"eval_variant_execution_error"`；
+**assembly preflight（fail-fast，runner 0 calls，抛异常而非 failed result）**：
+1. `trial_spec.execution_spec_fingerprint == compute_execution_spec_fingerprint(spec)`
+   （spec↔trial 一致）；
+2. `compute_trial_fingerprint(trial_spec) == attempt.trial_fingerprint`
+   （trial↔attempt 一致）；
+3. `spec.case_fingerprint == execution_case.case_fingerprint` 且
+   `spec.source_snapshot_fingerprint == compute_source_snapshot_fingerprint(case.snapshot)`
+   （spec↔case↔snapshot 一致）；
+4. `runner.variant_id == spec.variant_id`（runner 装配正确）。
+
+任一失败 = benchmark assembly corruption，抛 `EvalExecutionAssemblyError`（1-3）或
+`EvalVariantError`（4），**不**记为 variant execution failure。
+
+**runtime（preflight 全过后才开始 `perf_counter_ns`）**：
+5. 创建 `EvalLlmUsageCollector` 并注入 runner（0 record = 0 LLM call）；
+6. `await runner.run(...)` → 校验 output variant/case identity → hard identity
+   校验（duplicate id）→ 计算 output fingerprint → success / failed result；
+7. 失败路径：error_code = 异常稳定 `.code` 或 `"eval_variant_execution_error"`；
    **不**保存 exception message / traceback / prompt / raw response / reasoning。
+
+注意：output case/variant identity mismatch 发生在 runner **已执行之后**，因此收敛
+为 failed `EvalExecutionAttemptResult`（actual attempt 输出问题），保持 7B.1.2C
+原语义。
 """
 
 from __future__ import annotations
 
 import time
-from uuid import UUID
 
 from app.eval.bundle.loader import LoadedEvalExecutionCase
 from app.eval.contracts import EvalExecutionSpec
-from app.eval.errors import EvalOutputStructureError, EvalVariantError
-from app.eval.execution.contracts import EvalExecutionAttemptResult, ExecutionAttemptStatus
+from app.eval.errors import (
+    EvalExecutionAssemblyError,
+    EvalOutputStructureError,
+    EvalVariantError,
+)
+from app.eval.execution.contracts import (
+    EvalExecutionAttempt,
+    EvalExecutionAttemptResult,
+    EvalTrialSpec,
+    ExecutionAttemptStatus,
+    compute_trial_fingerprint,
+)
 from app.eval.execution.runner import VariantRunner
 from app.eval.fingerprints import (
     compute_execution_spec_fingerprint,
+    compute_source_snapshot_fingerprint,
     compute_variant_output_fingerprint,
 )
 from app.eval.scoring.context import EvalScoringContext
@@ -73,29 +96,52 @@ def _verify_output(
 
 async def execute_variant_attempt(
     *,
-    runner: VariantRunner,
-    execution_case: LoadedEvalExecutionCase,
+    attempt: EvalExecutionAttempt,
+    trial_spec: EvalTrialSpec,
     execution_spec: EvalExecutionSpec,
-    trial_fingerprint: str,
-    attempt_no: int,
-    execution_id: UUID,
+    execution_case: LoadedEvalExecutionCase,
+    runner: VariantRunner,
 ) -> EvalExecutionAttemptResult:
     """执行一次 variant attempt，返回冻结 success/failed result。
 
-    `runner.variant_id != spec.variant_id` 抛 `EvalVariantError`（装配错误）；其余
-    runner 异常 / output 校验失败 → failed result（error_code 取异常稳定 `.code`）。
+    assembly preflight 任一失败 → 抛 `EvalExecutionAssemblyError` /
+    `EvalVariantError`（runner 0 calls）；只有 runner 执行 / 输出校验失败才收敛为
+    failed `EvalExecutionAttemptResult`。
     """
+    # ---- assembly preflight（benchmark corruption，fail-fast，不记 failed result）----
+    execution_spec_fingerprint = compute_execution_spec_fingerprint(execution_spec)
+    if trial_spec.execution_spec_fingerprint != execution_spec_fingerprint:
+        raise EvalExecutionAssemblyError(
+            "trial_spec.execution_spec_fingerprint 与 execution_spec fingerprint 不一致"
+        )
+    if compute_trial_fingerprint(trial_spec) != attempt.trial_fingerprint:
+        raise EvalExecutionAssemblyError(
+            "compute_trial_fingerprint(trial_spec) 与 attempt.trial_fingerprint 不一致"
+        )
+    if execution_spec.case_fingerprint != execution_case.case_fingerprint:
+        raise EvalExecutionAssemblyError(
+            "execution_spec.case_fingerprint 与 execution_case.case_fingerprint 不一致"
+        )
+    snapshot_fingerprint = compute_source_snapshot_fingerprint(execution_case.snapshot)
+    if execution_spec.source_snapshot_fingerprint != snapshot_fingerprint:
+        raise EvalExecutionAssemblyError(
+            "execution_spec.source_snapshot_fingerprint 与 execution_case.snapshot 不一致"
+        )
     if runner.variant_id != execution_spec.variant_id:
         raise EvalVariantError(
             f"runner variant {runner.variant_id.value} != spec variant "
             f"{execution_spec.variant_id.value}"
         )
-    execution_spec_fingerprint = compute_execution_spec_fingerprint(execution_spec)
+
+    # ---- runtime 开始 ----
     collector = EvalLlmUsageCollector(
         execution_spec_fingerprint=execution_spec_fingerprint,
         variant_id=execution_spec.variant_id,
         case_id=execution_case.case_id,
     )
+    trial_fingerprint = attempt.trial_fingerprint
+    attempt_no = attempt.attempt_no
+    execution_id = attempt.execution_id
     start_ns = time.perf_counter_ns()
     try:
         output = await runner.run(execution_case, execution_spec, usage_observer=collector)

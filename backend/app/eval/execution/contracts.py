@@ -3,9 +3,9 @@
 `EvalExecutionSpec`（已冻结于 `app.eval.contracts`）描述「系统实际看到什么 + 以什么
 配置运行」；在它之下冻结 **Trial → Attempt** 两层执行身份（persistence 前）：
 
-- `EvalTrialSpec`：同一 execution spec 的一次复现变体（`execution_spec_fingerprint`
-  + `trial_no` + `random_seed`）；trial fingerprint = 三者 canonical SHA-256，
-  同一 spec 下 trial1 ≠ trial2（trial_no 不同）。
+- `EvalTrialSpec`：同一 execution spec 的一次复现变体（`schema_version` +
+  `execution_spec_fingerprint` + `trial_no`）；trial fingerprint = 三者 canonical
+  SHA-256，同一 spec 下 trial1 ≠ trial2（trial_no 不同）。
 - `EvalExecutionAttempt`：trial 内的一次重试；`execution_id` 是 runtime UUID，
   **不**进入 semantic identity（attempt identity = `(trial_fingerprint, attempt_no)`）。
 - `EvalExecutionAttemptResult`：一次 attempt 的冻结执行结果（success / failed），
@@ -49,14 +49,18 @@ def _require_nonneg_int(value: int, field: str) -> None:
 class EvalTrialSpec:
     """一次 execution 的复现变体（frozen，persistence 前）。
 
-    `schema_version=1`；`random_seed=None` 表示确定性 trial（无随机种子）。
-    同一 execution spec 下靠 `trial_no` 区分多个 trial。
+    `schema_version=1`；同一 execution spec 下靠 `trial_no` 区分多个 trial。
+
+    冻结语义（spec A）：trial fingerprint **不**包含 `random_seed`——当前
+    `VariantRunner.run()` 拿不到 TrialSpec，生产 model config 也未真正应用 seed，
+    把 seed 放进 semantic fingerprint 等于给一个不影响真实执行的字段记账。若未来
+    provider 真正支持 deterministic seed，seed 必须进入 `EvalExecutionConfig` /
+    `FrozenModelConfig` 并由 real runner 实际应用后，才允许进入 fingerprint。
     """
 
     execution_spec_fingerprint: str
     trial_no: int
     schema_version: int = 1
-    random_seed: int | None = None
 
     def __post_init__(self) -> None:
         if not _is_sha256_hex(self.execution_spec_fingerprint):
@@ -64,21 +68,14 @@ class EvalTrialSpec:
         _require_int_ge_1(self.trial_no, "trial_no")
         if self.schema_version != 1:
             raise ValueError(f"schema_version 必须为 1，得到 {self.schema_version!r}")
-        if self.random_seed is not None and (
-            not isinstance(self.random_seed, int) or isinstance(self.random_seed, bool)
-        ):
-            raise ValueError(f"random_seed 必须是 int 或 None，得到 {self.random_seed!r}")
 
 
 def compute_trial_fingerprint(trial: EvalTrialSpec) -> str:
-    """trial semantic identity = execution_spec_fingerprint + trial_no + random_seed。
-
-    `random_seed=None` 在 fingerprint 中规范为 JSON `null`（与 `0` 不同）。
-    """
+    """trial semantic identity = schema_version + execution_spec_fingerprint + trial_no。"""
     payload = {
+        "schema_version": trial.schema_version,
         "execution_spec_fingerprint": trial.execution_spec_fingerprint,
         "trial_no": trial.trial_no,
-        "random_seed": trial.random_seed,
     }
     return hashlib.sha256(canonical_json_str(payload).encode("utf-8")).hexdigest()
 

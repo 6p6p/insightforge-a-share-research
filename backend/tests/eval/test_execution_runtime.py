@@ -1,8 +1,9 @@
-"""Evaluation execution runtime 测试（stage 7B.1.2C spec Q，14 cases）。
+"""Evaluation execution runtime 测试（stage 7B.1.2C spec Q，14 cases + preflight）。
 
 覆盖 ExecutionSpec → Trial → Attempt 三层冻结身份、`EvalExecutionAttemptResult`
 success/failed 不变式，以及 `execute_variant_attempt` harness 的：
-- 前置 runner.variant_id == spec.variant_id 校验；
+- 前置 assembly preflight（spec↔trial↔attempt、spec↔case↔snapshot、runner.variant，
+  失败 fail-fast → runner 0 calls，抛异常而非 failed result）；
 - collector 注入 runner（0 record = 0 LLM call）；
 - 输出 variant/case identity 校验；
 - success / failed 收敛与 error_code 稳定映射（无 exception message 泄漏）。
@@ -16,8 +17,13 @@ from uuid import UUID
 import pytest
 
 from app.eval.bundle.loader import LoadedEvalExecutionCase
-from app.eval.contracts import EvalExecutionSpec, EvalVariantOutput, FrozenSourceSnapshot
-from app.eval.errors import EvalOutputStructureError, EvalVariantError
+from app.eval.contracts import (
+    EvalExecutionSpec,
+    EvalVariantOutput,
+    FrozenDocumentSourceRef,
+    FrozenSourceSnapshot,
+)
+from app.eval.errors import EvalExecutionAssemblyError, EvalOutputStructureError, EvalVariantError
 from app.eval.execution.contracts import (
     EvalExecutionAttempt,
     EvalExecutionAttemptResult,
@@ -26,7 +32,11 @@ from app.eval.execution.contracts import (
     compute_trial_fingerprint,
 )
 from app.eval.execution.harness import execute_variant_attempt
-from app.eval.fingerprints import compute_variant_output_fingerprint
+from app.eval.fingerprints import (
+    compute_execution_spec_fingerprint,
+    compute_source_snapshot_fingerprint,
+    compute_variant_output_fingerprint,
+)
 from app.eval.usage.collector import EvalLlmUsageCollector
 from app.eval.variants import EvalVariantId
 
@@ -37,11 +47,15 @@ TRIAL_FP = "d" * 64
 CASE_ID = "test-case"
 UID = UUID("00000000-0000-0000-0000-000000000001")
 
+# 空 snapshot 的语义 fingerprint（`_spec()` 与 `_case()` 共享同一 snapshot 身份）。
+_SNAPSHOT = FrozenSourceSnapshot()
+_SNAP_FP = compute_source_snapshot_fingerprint(_SNAPSHOT)
+
 
 def _spec() -> EvalExecutionSpec:
     return EvalExecutionSpec(
         case_fingerprint=EXEC_FP,
-        source_snapshot_fingerprint=SNAP_FP,
+        source_snapshot_fingerprint=_SNAP_FP,
         execution_config_fingerprint=CONFIG_FP,
         variant_id=EvalVariantId.SINGLE_RAG,
     )
@@ -57,7 +71,22 @@ def _case() -> LoadedEvalExecutionCase:
         research_question="test question",
         analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
         tags=(),
-        snapshot=FrozenSourceSnapshot(),
+        snapshot=_SNAPSHOT,
+    )
+
+
+def _trial_spec() -> EvalTrialSpec:
+    return EvalTrialSpec(
+        execution_spec_fingerprint=compute_execution_spec_fingerprint(_spec()),
+        trial_no=1,
+    )
+
+
+def _attempt() -> EvalExecutionAttempt:
+    return EvalExecutionAttempt(
+        trial_fingerprint=compute_trial_fingerprint(_trial_spec()),
+        attempt_no=1,
+        execution_id=UID,
     )
 
 
@@ -83,8 +112,10 @@ class _FakeRunner:
         self._output = output
         self._exc = exc
         self.seen_observer = None
+        self.calls = 0
 
     async def run(self, execution_case, execution_spec, *, usage_observer=None):
+        self.calls += 1
         self.seen_observer = usage_observer
         if self._exc is not None:
             raise self._exc
@@ -98,9 +129,7 @@ class _FakeRunner:
 def test_trial_spec_valid_and_defaults() -> None:
     trial = EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=1)
     assert trial.schema_version == 1
-    assert trial.random_seed is None
-    seeded = EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=2, random_seed=42)
-    assert seeded.random_seed == 42
+    assert trial.trial_no == 1
 
 
 def test_trial_spec_rejects_invalid() -> None:
@@ -108,21 +137,16 @@ def test_trial_spec_rejects_invalid() -> None:
         EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=0)
     with pytest.raises(ValueError):
         EvalTrialSpec(execution_spec_fingerprint="not-hex", trial_no=1)
-    with pytest.raises(ValueError):
-        EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=1, random_seed="x")
 
 
 def test_trial_fingerprint_deterministic_and_distinct() -> None:
     t1 = EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=1)
     t1_again = EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=1)
     t2 = EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=2)
-    seeded = EvalTrialSpec(execution_spec_fingerprint=EXEC_FP, trial_no=1, random_seed=0)
 
     assert compute_trial_fingerprint(t1) == compute_trial_fingerprint(t1_again)
-    # 同一 spec 下 trial1 ≠ trial2
+    # 同一 spec 下 trial1 ≠ trial2（trial_no 不同）
     assert compute_trial_fingerprint(t1) != compute_trial_fingerprint(t2)
-    # random_seed=None（null）与 0 不同
-    assert compute_trial_fingerprint(t1) != compute_trial_fingerprint(seeded)
 
 
 # ---------------------------------------------------------------- attempt
@@ -254,7 +278,125 @@ def test_result_failed_invariant() -> None:
         )
 
 
-# ---------------------------------------------------------------- harness
+# ---------------------------------------------------------------- harness preflight
+
+
+@pytest.mark.asyncio
+async def test_harness_case_fingerprint_mismatch_raises() -> None:
+    bad_case = LoadedEvalExecutionCase(
+        case_fingerprint="f" * 64,  # 与 spec.case_fingerprint (EXEC_FP) 不一致
+        case_id=CASE_ID,
+        case_version=1,
+        company_id=UID,
+        security_code="600519",
+        research_question="test question",
+        analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
+        tags=(),
+        snapshot=_SNAPSHOT,
+    )
+    runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
+    with pytest.raises(EvalExecutionAssemblyError):
+        await execute_variant_attempt(
+            attempt=_attempt(),
+            trial_spec=_trial_spec(),
+            execution_spec=_spec(),
+            execution_case=bad_case,
+            runner=runner,
+        )
+    assert runner.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_harness_snapshot_mismatch_raises() -> None:
+    other_snapshot = FrozenSourceSnapshot(
+        document_sources=(
+            FrozenDocumentSourceRef(
+                source_record_id=UID,
+                raw_artifact_id=UID,
+                content_sha256="e" * 64,
+                provider_key="cninfo",
+                document_type="annual_report",
+                media_type="application/pdf",
+            ),
+        ),
+    )
+    bad_case = LoadedEvalExecutionCase(
+        case_fingerprint=EXEC_FP,
+        case_id=CASE_ID,
+        case_version=1,
+        company_id=UID,
+        security_code="600519",
+        research_question="test question",
+        analysis_as_of=datetime(2026, 8, 1, 12, 0, 0),
+        tags=(),
+        snapshot=other_snapshot,
+    )
+    runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
+    with pytest.raises(EvalExecutionAssemblyError):
+        await execute_variant_attempt(
+            attempt=_attempt(),
+            trial_spec=_trial_spec(),
+            execution_spec=_spec(),
+            execution_case=bad_case,
+            runner=runner,
+        )
+    assert runner.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_harness_trial_exec_fp_mismatch_raises() -> None:
+    bad_trial = EvalTrialSpec(execution_spec_fingerprint="e" * 64, trial_no=1)
+    attempt = EvalExecutionAttempt(
+        trial_fingerprint=compute_trial_fingerprint(bad_trial),
+        attempt_no=1,
+        execution_id=UID,
+    )
+    runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
+    with pytest.raises(EvalExecutionAssemblyError):
+        await execute_variant_attempt(
+            attempt=attempt,
+            trial_spec=bad_trial,
+            execution_spec=_spec(),
+            execution_case=_case(),
+            runner=runner,
+        )
+    assert runner.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_harness_trial_attempt_fingerprint_mismatch_raises() -> None:
+    attempt = EvalExecutionAttempt(
+        trial_fingerprint="c" * 64,  # 与 compute_trial_fingerprint(_trial_spec()) 不一致
+        attempt_no=1,
+        execution_id=UID,
+    )
+    runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
+    with pytest.raises(EvalExecutionAssemblyError):
+        await execute_variant_attempt(
+            attempt=attempt,
+            trial_spec=_trial_spec(),
+            execution_spec=_spec(),
+            execution_case=_case(),
+            runner=runner,
+        )
+    assert runner.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_harness_runner_variant_mismatch_raises() -> None:
+    runner = _FakeRunner(EvalVariantId.MULTI_STAGE_NO_AUDIT, output=_output())
+    with pytest.raises(EvalVariantError):
+        await execute_variant_attempt(
+            attempt=_attempt(),
+            trial_spec=_trial_spec(),
+            execution_spec=_spec(),
+            execution_case=_case(),
+            runner=runner,
+        )
+    assert runner.calls == 0
+
+
+# ---------------------------------------------------------------- harness runtime
 
 
 @pytest.mark.asyncio
@@ -265,12 +407,11 @@ async def test_harness_success_returns_result() -> None:
     runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=output)
 
     result = await execute_variant_attempt(
-        runner=runner,
-        execution_case=case,
+        attempt=_attempt(),
+        trial_spec=_trial_spec(),
         execution_spec=spec,
-        trial_fingerprint=TRIAL_FP,
-        attempt_no=1,
-        execution_id=UID,
+        execution_case=case,
+        runner=runner,
     )
 
     assert result.status == ExecutionAttemptStatus.SUCCESS
@@ -279,6 +420,9 @@ async def test_harness_success_returns_result() -> None:
     assert result.variant_id == EvalVariantId.SINGLE_RAG
     assert result.case_id == CASE_ID
     assert result.case_version == 1
+    assert result.trial_fingerprint == compute_trial_fingerprint(_trial_spec())
+    assert result.attempt_no == 1
+    assert result.execution_id == UID
     assert isinstance(result.wall_latency_ms, int) and result.wall_latency_ms >= 0
     assert result.error_code is None
     assert result.usage_records == ()
@@ -290,12 +434,11 @@ async def test_harness_failure_eval_error_code() -> None:
         EvalVariantId.SINGLE_RAG, exc=EvalOutputStructureError("duplicate claim_id")
     )
     result = await execute_variant_attempt(
-        runner=runner,
-        execution_case=_case(),
+        attempt=_attempt(),
+        trial_spec=_trial_spec(),
         execution_spec=_spec(),
-        trial_fingerprint=TRIAL_FP,
-        attempt_no=1,
-        execution_id=UID,
+        execution_case=_case(),
+        runner=runner,
     )
     assert result.status == ExecutionAttemptStatus.FAILED
     assert result.error_code == "eval_output_structure_error"
@@ -307,12 +450,11 @@ async def test_harness_failure_eval_error_code() -> None:
 async def test_harness_failure_plain_exception() -> None:
     runner = _FakeRunner(EvalVariantId.SINGLE_RAG, exc=ValueError("boom"))
     result = await execute_variant_attempt(
-        runner=runner,
-        execution_case=_case(),
+        attempt=_attempt(),
+        trial_spec=_trial_spec(),
         execution_spec=_spec(),
-        trial_fingerprint=TRIAL_FP,
-        attempt_no=1,
-        execution_id=UID,
+        execution_case=_case(),
+        runner=runner,
     )
     assert result.status == ExecutionAttemptStatus.FAILED
     assert result.error_code == "eval_variant_execution_error"
@@ -328,42 +470,27 @@ async def test_harness_output_identity_mismatch() -> None:
     )
     runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=bad)
     result = await execute_variant_attempt(
-        runner=runner,
-        execution_case=_case(),
+        attempt=_attempt(),
+        trial_spec=_trial_spec(),
         execution_spec=_spec(),
-        trial_fingerprint=TRIAL_FP,
-        attempt_no=1,
-        execution_id=UID,
+        execution_case=_case(),
+        runner=runner,
     )
     assert result.status == ExecutionAttemptStatus.FAILED
     assert result.error_code == "eval_output_structure_error"
 
 
 @pytest.mark.asyncio
-async def test_harness_runner_variant_mismatch_raises() -> None:
-    runner = _FakeRunner(EvalVariantId.MULTI_STAGE_NO_AUDIT, output=_output())
-    with pytest.raises(EvalVariantError):
-        await execute_variant_attempt(
-            runner=runner,
-            execution_case=_case(),
-            execution_spec=_spec(),
-            trial_fingerprint=TRIAL_FP,
-            attempt_no=1,
-            execution_id=UID,
-        )
-
-
-@pytest.mark.asyncio
 async def test_harness_passes_collector_to_runner() -> None:
     runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
     await execute_variant_attempt(
-        runner=runner,
-        execution_case=_case(),
+        attempt=_attempt(),
+        trial_spec=_trial_spec(),
         execution_spec=_spec(),
-        trial_fingerprint=TRIAL_FP,
-        attempt_no=1,
-        execution_id=UID,
+        execution_case=_case(),
+        runner=runner,
     )
+    assert runner.calls == 1
     assert runner.seen_observer is not None
     assert isinstance(runner.seen_observer, EvalLlmUsageCollector)
 
@@ -372,12 +499,11 @@ async def test_harness_passes_collector_to_runner() -> None:
 async def test_harness_zero_llm_calls_zero_records() -> None:
     runner = _FakeRunner(EvalVariantId.SINGLE_RAG, output=_output())
     result = await execute_variant_attempt(
-        runner=runner,
-        execution_case=_case(),
+        attempt=_attempt(),
+        trial_spec=_trial_spec(),
         execution_spec=_spec(),
-        trial_fingerprint=TRIAL_FP,
-        attempt_no=1,
-        execution_id=UID,
+        execution_case=_case(),
+        runner=runner,
     )
     # fake runner 未调用任何 LLM / 未线程 observer → 0 record
     assert result.usage_records == ()

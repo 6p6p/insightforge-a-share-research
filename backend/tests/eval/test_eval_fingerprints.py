@@ -182,13 +182,27 @@ def test_execution_spec_fingerprint_excludes_label() -> None:
     assert compute_execution_spec_fingerprint(spec2) == fp1
 
 
+def test_scoring_spec_deterministic_no_label_no_judge_valid() -> None:
+    """deterministic scoring：只绑 output fp，label/judge 均为 None 也合法。"""
+    spec = EvalScoringSpec(variant_output_fingerprint=_sha("a"))
+    assert spec.human_label_fingerprint is None
+    assert spec.judge_config_fingerprint is None
+    assert compute_scoring_spec_fingerprint(spec) == compute_scoring_spec_fingerprint(spec)
+
+
+def test_scoring_spec_output_fingerprint_changes_scoring_fp() -> None:
+    base = EvalScoringSpec(variant_output_fingerprint=_sha("a"))
+    changed = EvalScoringSpec(variant_output_fingerprint=_sha("b"))
+    assert compute_scoring_spec_fingerprint(base) != compute_scoring_spec_fingerprint(changed)
+
+
 def test_scoring_spec_fingerprint_includes_label() -> None:
     base = EvalScoringSpec(
-        execution_result_fingerprint=_sha("a"),
+        variant_output_fingerprint=_sha("a"),
         human_label_fingerprint=_sha("b"),
     )
     changed = EvalScoringSpec(
-        execution_result_fingerprint=_sha("a"),
+        variant_output_fingerprint=_sha("a"),
         human_label_fingerprint=_sha("c"),
     )
     assert compute_scoring_spec_fingerprint(base) != compute_scoring_spec_fingerprint(changed)
