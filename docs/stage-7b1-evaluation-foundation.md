@@ -61,7 +61,7 @@ app/eval/
     loader.py     #   identity → path → 读取（label leakage boundary）
     integrity.py  #   12 步 referential integrity 校验
     _io.py        #   底层读写 + 稳定错误包装
-  materialization/# 7B.1.1B：PG/Chroma 物化为 frozen snapshot（依赖详见 §3.11）
+  materialization/# 7B.1.1B：PG + RawArtifactStore 物化为 frozen snapshot（依赖详见 §3.11）
     service.py    #   document / macro / structured 三路 payload 投影
     projections.py#   payload bytes + sha256 + semantic fingerprint
   scoring/        # 7B.1.2A：cross-variant deterministic metrics
