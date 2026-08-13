@@ -26,9 +26,15 @@ from app.eval.fingerprints import compute_eval_case_fingerprint, compute_human_l
 
 @dataclass(frozen=True)
 class LoadedEvalExecutionCase:
-    """execution 侧加载结果：不含 HumanLabel / human_label_fingerprint / label path。"""
+    """execution 侧加载结果：不含 HumanLabel / human_label_fingerprint / label path。
+
+    `case_id` / `case_version` 是 execution runtime 归属输出所需的稳定语义身份
+    （harness 用它校验 variant output 的 case identity），不是 label 信息。
+    """
 
     case_fingerprint: str
+    case_id: str
+    case_version: int
     company_id: UUID
     security_code: str
     research_question: str
@@ -116,6 +122,8 @@ class EvaluationBundleLoader:
         snapshot = self.load_snapshot(case.source_snapshot_fingerprint)
         return LoadedEvalExecutionCase(
             case_fingerprint=compute_eval_case_fingerprint(case),
+            case_id=case.case_id,
+            case_version=case.case_version,
             company_id=case.company_id,
             security_code=case.security_code,
             research_question=case.research_question,

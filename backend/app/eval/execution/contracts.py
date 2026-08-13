@@ -1,0 +1,152 @@
+"""Evaluation execution runtime contracts (stage 7B.1.2C spec G/I/J/K).
+
+`EvalExecutionSpec`（已冻结于 `app.eval.contracts`）描述「系统实际看到什么 + 以什么
+配置运行」；在它之下冻结 **Trial → Attempt** 两层执行身份（persistence 前）：
+
+- `EvalTrialSpec`：同一 execution spec 的一次复现变体（`execution_spec_fingerprint`
+  + `trial_no` + `random_seed`）；trial fingerprint = 三者 canonical SHA-256，
+  同一 spec 下 trial1 ≠ trial2（trial_no 不同）。
+- `EvalExecutionAttempt`：trial 内的一次重试；`execution_id` 是 runtime UUID，
+  **不**进入 semantic identity（attempt identity = `(trial_fingerprint, attempt_no)`）。
+- `EvalExecutionAttemptResult`：一次 attempt 的冻结执行结果（success / failed），
+  **不含** exception message / traceback / prompt / raw response / reasoning。
+
+这些是**纯 Python frozen dataclass**（与 `LlmCallUsageRecord` 一致），不是 JSON
+持久化契约；DB schema 需镜像 `ExecutionSpec 1:N Trial 1:N Attempt`（spec R）。
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from enum import StrEnum
+from uuid import UUID
+
+from app.eval.canonical import canonical_json_str
+from app.eval.contracts import EvalVariantOutput, _is_sha256_hex, _validate_slug
+from app.eval.variants import EvalVariantId
+from app.llm.instrumentation import LlmCallUsageRecord
+
+
+class ExecutionAttemptStatus(StrEnum):
+    """一次 attempt 的终态。"""
+
+    SUCCESS = "success"
+    FAILED = "failed"
+
+
+def _require_int_ge_1(value: int, field: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{field} 必须是 >= 1 的 int，得到 {value!r}")
+
+
+def _require_nonneg_int(value: int, field: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{field} 必须是 >= 0 的 int，得到 {value!r}")
+
+
+@dataclass(frozen=True)
+class EvalTrialSpec:
+    """一次 execution 的复现变体（frozen，persistence 前）。
+
+    `schema_version=1`；`random_seed=None` 表示确定性 trial（无随机种子）。
+    同一 execution spec 下靠 `trial_no` 区分多个 trial。
+    """
+
+    execution_spec_fingerprint: str
+    trial_no: int
+    schema_version: int = 1
+    random_seed: int | None = None
+
+    def __post_init__(self) -> None:
+        if not _is_sha256_hex(self.execution_spec_fingerprint):
+            raise ValueError("execution_spec_fingerprint 必须是 64 位小写 hex")
+        _require_int_ge_1(self.trial_no, "trial_no")
+        if self.schema_version != 1:
+            raise ValueError(f"schema_version 必须为 1，得到 {self.schema_version!r}")
+        if self.random_seed is not None and (
+            not isinstance(self.random_seed, int) or isinstance(self.random_seed, bool)
+        ):
+            raise ValueError(f"random_seed 必须是 int 或 None，得到 {self.random_seed!r}")
+
+
+def compute_trial_fingerprint(trial: EvalTrialSpec) -> str:
+    """trial semantic identity = execution_spec_fingerprint + trial_no + random_seed。
+
+    `random_seed=None` 在 fingerprint 中规范为 JSON `null`（与 `0` 不同）。
+    """
+    payload = {
+        "execution_spec_fingerprint": trial.execution_spec_fingerprint,
+        "trial_no": trial.trial_no,
+        "random_seed": trial.random_seed,
+    }
+    return hashlib.sha256(canonical_json_str(payload).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class EvalExecutionAttempt:
+    """trial 内的一次重试。
+
+    attempt identity = `(trial_fingerprint, attempt_no)`；`execution_id` 是 runtime
+    UUID（去重 / provenance），**不**进入 semantic fingerprint。
+    """
+
+    trial_fingerprint: str
+    attempt_no: int
+    execution_id: UUID
+
+    def __post_init__(self) -> None:
+        if not _is_sha256_hex(self.trial_fingerprint):
+            raise ValueError("trial_fingerprint 必须是 64 位小写 hex")
+        _require_int_ge_1(self.attempt_no, "attempt_no")
+        if not isinstance(self.execution_id, UUID):
+            raise ValueError(f"execution_id 必须是 UUID，得到 {self.execution_id!r}")
+
+
+@dataclass(frozen=True)
+class EvalExecutionAttemptResult:
+    """一次 attempt 的冻结执行结果（success / failed）。
+
+    - success：`variant_output` + `variant_output_fingerprint` 齐备，`error_code=None`；
+    - failed：`variant_output` / `variant_output_fingerprint` 为 None，`error_code` 必填。
+    - **不保存** exception message / traceback / prompt / raw response / reasoning。
+    """
+
+    execution_id: UUID
+    trial_fingerprint: str
+    attempt_no: int
+    variant_id: EvalVariantId
+    case_id: str
+    case_version: int
+    status: ExecutionAttemptStatus
+    wall_latency_ms: int
+    variant_output: EvalVariantOutput | None
+    variant_output_fingerprint: str | None
+    usage_records: tuple[LlmCallUsageRecord, ...]
+    error_code: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution_id, UUID):
+            raise ValueError(f"execution_id 必须是 UUID，得到 {self.execution_id!r}")
+        if not _is_sha256_hex(self.trial_fingerprint):
+            raise ValueError("trial_fingerprint 必须是 64 位小写 hex")
+        _require_int_ge_1(self.attempt_no, "attempt_no")
+        _validate_slug(self.case_id)
+        _require_int_ge_1(self.case_version, "case_version")
+        _require_nonneg_int(self.wall_latency_ms, "wall_latency_ms")
+        if self.status == ExecutionAttemptStatus.SUCCESS:
+            if self.variant_output is None:
+                raise ValueError("success 时 variant_output 必须存在")
+            if not self.variant_output_fingerprint or not _is_sha256_hex(
+                self.variant_output_fingerprint
+            ):
+                raise ValueError("success 时 variant_output_fingerprint 必须是 64 位小写 hex")
+            if self.error_code is not None:
+                raise ValueError("success 时 error_code 必须为 None")
+        else:
+            if self.variant_output is not None:
+                raise ValueError("failed 时 variant_output 必须为 None")
+            if self.variant_output_fingerprint is not None:
+                raise ValueError("failed 时 variant_output_fingerprint 必须为 None")
+            if not self.error_code or not self.error_code.strip():
+                raise ValueError("failed 时 error_code 必须非空")

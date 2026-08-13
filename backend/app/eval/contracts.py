@@ -569,26 +569,31 @@ class EvalExecutionSpec(BaseModel):
 
 
 class EvalScoringSpec(BaseModel):
-    """评分侧：绑定 execution 产出 + human label + metric registry + judge config。"""
+    """评分侧：绑定 execution 产出 + human label + metric registry + judge config。
+
+    `human_label_fingerprint` 与 `judge_config_fingerprint` 均为可选（None canonical）：
+    deterministic scoring spec（只跑 citation_validity / citation_coverage）无需 label
+    或 judge；label 缺失不改变 spec 有效性，None 在 fingerprint 中规范为 `null`。
+    """
 
     model_config = ConfigDict(frozen=True)
 
     schema_version: int = EVAL_SCORING_SPEC_SCHEMA_VERSION
     execution_result_fingerprint: str
-    human_label_fingerprint: str
+    human_label_fingerprint: str | None = None
     metric_registry_version: int = METRIC_REGISTRY_VERSION
     judge_config_fingerprint: str | None = None
 
-    @field_validator("execution_result_fingerprint", "human_label_fingerprint")
+    @field_validator("execution_result_fingerprint")
     @classmethod
     def _v_sha_required(cls, v: str) -> str:
         return _validate_sha256(v, field="scoring fingerprint")
 
-    @field_validator("judge_config_fingerprint")
+    @field_validator("human_label_fingerprint", "judge_config_fingerprint")
     @classmethod
     def _v_sha_optional(cls, v: str | None) -> str | None:
         if v is not None:
-            return _validate_sha256(v, field="judge_config_fingerprint")
+            return _validate_sha256(v, field="scoring fingerprint")
         return v
 
     @field_validator("metric_registry_version")

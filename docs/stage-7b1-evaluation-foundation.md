@@ -2,7 +2,8 @@
 
 > 状态：**7B.1.0 契约 = FINAL**；**7B.1.1A Frozen Evaluation Bundle = FINAL**；
 > **7B.1.1B PG→Frozen Snapshot Materializer = FINAL**；**7B.1.2A Deterministic Metrics
-> Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**。
+> Foundation = FINAL**；**7B.1.2B LLM Usage Instrumentation = FINAL**；
+> **7B.1.2C Execution Runtime = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -72,6 +73,11 @@ app/eval/
   usage/          # 7B.1.2B：LLM 调用 usage 收集 + 聚合
     collector.py  #   EvalLlmUsageCollector（按 exec fp / variant / case 绑定）
     aggregation.py#   aggregate_llm_usage → 4 个 runtime metric
+  execution/      # 7B.1.2C：ExecutionSpec → Trial → Attempt 执行运行时
+    contracts.py  #   EvalTrialSpec / EvalExecutionAttempt / EvalExecutionAttemptResult
+                  #     + ExecutionAttemptStatus + compute_trial_fingerprint
+    runner.py     #   VariantRunner Protocol（label leakage boundary）
+    harness.py    #   execute_variant_attempt（collector 注入 + 身份校验 + 收敛 success/failed）
 ```
 `app/llm/`（通用层，不在 eval 包内）：
 ```
@@ -163,7 +169,10 @@ bounded）；`component_name` 唯一，canonical 按 `component_name` 排序；
 `source_snapshot_fingerprint` / `execution_config_fingerprint` / `variant_id`；
 **不含** human_label_fingerprint / metric_registry_version / judge。
 `EvalScoringSpec`：`schema_version=1` / `execution_result_fingerprint` /
-`human_label_fingerprint` / `metric_registry_version` / `judge_config_fingerprint?`。
+`human_label_fingerprint?` / `metric_registry_version` / `judge_config_fingerprint?`。
+`human_label_fingerprint` 与 `judge_config_fingerprint` 均为可选（None canonical）：
+deterministic scoring spec（只跑 citation_validity / citation_coverage）无需 label 或
+judge；None 在 fingerprint 中规范为 `null`。
 
 ### 3.8 Normalized Eval Output（`contracts.py`）
 
@@ -281,6 +290,50 @@ valuation,claims}、audit、revision、draft_section、research_planner），为
 config / prompt / schema / tool 权限**全部不变**；adapter 构造新增可选
 `usage_observer` 参数（默认 None）。
 
+### 3.14 Execution Runtime Semantics（7B.1.2C）
+
+`app/eval/execution/` 冻结 `EvalExecutionSpec → Trial → Attempt` 三层执行身份 +
+`VariantRunner` + `execute_variant_attempt` harness。纯 Python；0 DB / 0 LLM /
+0 network（不含真实 variant runner）。
+
+- `EvalTrialSpec`（frozen dataclass）：`execution_spec_fingerprint 64hex` /
+  `trial_no>=1` / `schema_version=1` / `random_seed int?`。trial fingerprint =
+  `execution_spec_fingerprint + trial_no + random_seed` 的 canonical SHA-256
+  （`compute_trial_fingerprint`，位于 execution/contracts.py）；同一 spec 下
+  trial1 ≠ trial2（trial_no 不同）；`random_seed=None` 规范为 JSON null（≠ 0）。
+  **无** attempt_no / UUID / started_at / latency。
+- `EvalExecutionAttempt`（frozen dataclass）：`trial_fingerprint 64hex` /
+  `attempt_no>=1` / `execution_id UUID`。attempt identity =
+  `(trial_fingerprint, attempt_no)`；`execution_id` 是 runtime UUID（去重 /
+  provenance），**不进** semantic identity。
+- `ExecutionAttemptStatus`：`success` / `failed`。
+- `EvalExecutionAttemptResult`（frozen dataclass）：`execution_id` /
+  `trial_fingerprint` / `attempt_no` / `variant_id` / `case_id` / `case_version` /
+  `status` / `wall_latency_ms>=0` / `variant_output?` / `variant_output_fingerprint?` /
+  `usage_records tuple[LlmCallUsageRecord]` / `error_code?`。success → output + fp
+  齐备、error_code=None；failed → output/fp=None、error_code 必填。**不含**
+  exception message / traceback / prompt / raw response / reasoning。
+- `VariantRunner` Protocol（`runner.py`）：`variant_id: EvalVariantId` +
+  `async run(execution_case, execution_spec, *, usage_observer) -> EvalVariantOutput`；
+  只收 execution 侧输入，**不含** HumanLabel / EvalScoringSpec（label leakage
+  boundary）；`usage_observer` 由 harness 注入并线程到内部全部 LLM adapter。
+  Fake/Noop runner 仅供测试，**不加** `EvalVariantId.NOOP`。
+- `execute_variant_attempt(...)`（`harness.py`）：前置校验
+  `runner.variant_id == spec.variant_id`（不一致抛 `EvalVariantError`）；创建
+  `EvalLlmUsageCollector` 注入 runner（0 record = 0 LLM call）；单调时钟
+  `time.perf_counter_ns()` 计 `wall_latency_ms`（**不** datetime、**不**把 per-call
+  LLM duration 求和映射为 latency）；输出 variant/case identity 校验 + hard identity
+  （duplicate id）校验 + `compute_variant_output_fingerprint`；任何 runner 异常 /
+  校验失败收敛为 failed result，error_code = 异常稳定 `.code` 或
+  `"eval_variant_execution_error"`（不保存 exception message）。
+- `LoadedEvalExecutionCase` 现在额外携带 `case_id` / `case_version`（execution 侧
+  output identity 校验所需，仍不含任何 label 信息）。
+
+**DB schema 约束（spec R）**：持久化层（7B.1.3）的 schema 必须镜像
+`ExecutionSpec 1:N Trial 1:N Attempt`——attempt 的 `execution_id` 是行 UUID（非
+semantic identity），`(trial_fingerprint, attempt_no)` 才是去重身份。执行语义先于
+持久化冻结，7B.1.3 只做镜像迁移，**不得**在 DB 层重新发明身份。
+
 ## 4. 验收标准（7B.1.0）
 
 1. `app/eval/` 六模块；**无 DB / LLM / network / Chroma / 新依赖**。
@@ -323,6 +376,12 @@ config / prompt / schema / tool 权限**全部不变**；adapter 构造新增可
 - **7B.1.2B ✅ FINAL**：LLM Usage Instrumentation（`app/llm/instrumentation.py` 统一
   包装 + `app/llm/components.py` + `app/eval/usage/` collector/aggregation；回填 10
   adapter，采集 llm_call_count / input_tokens / output_tokens / total_tokens）。
-- **7B.1.3**：eval 持久化（alembic migration + models + repository，镜像 `ReportCheckResult`）。
-- **7B.1.4**：variant runner 契约（`VariantRunner` Protocol）+ dev/test Noop runner。
+- **7B.1.2C ✅ FINAL**：Execution Runtime Semantics（`app/eval/execution/`；
+  `EvalTrialSpec` / `EvalExecutionAttempt` / `EvalExecutionAttemptResult` 三层身份 +
+  `VariantRunner` Protocol + `execute_variant_attempt` harness；0 DB / 0 LLM /
+  0 network；14 tests）。
+- **7B.1.3**：eval 持久化（alembic migration + models + repository，镜像
+  `ExecutionSpec 1:N Trial 1:N Attempt`，见 §3.14 spec R）。
+- **7B.1.4**：真实/dev runner（dev/test Noop runner 用独立 identity，**不加**
+  `EvalVariantId.NOOP`）+ 三路 real variant runner。
 - **7B.1.5**：offline CLI `python -m app.cli.eval run --variant ... --dataset ...`。
