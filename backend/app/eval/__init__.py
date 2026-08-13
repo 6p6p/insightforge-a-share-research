@@ -1,15 +1,24 @@
-"""Stage 7B.1.0 evaluation foundation（纯 Python；0 DB / 0 LLM / 0 network）。
+"""Stage 7B evaluation foundation（纯 Python；0 DB / 0 LLM / 0 network）。
 
-导出三路系统评估的契约、variant identity、metric surface、fingerprint 函数与
-错误类型。
+导出三路系统评估的契约、variant identity、metric surface、fingerprint 函数、
+canonical JSON、错误类型，以及 7B.1.1A 的 frozen evaluation bundle。
 """
 
+from app.eval.bundle import (
+    EvaluationBundleLoader,
+    EvaluationBundleWriter,
+    LoadedEvalExecutionCase,
+    VerifiedEvaluationBundle,
+    verify_bundle_integrity,
+)
+from app.eval.canonical import canonical_json_bytes, canonical_json_str
 from app.eval.contracts import (
     ClaimSupportLabel,
     ClaimSupportStatus,
     EvalCase,
     EvalCitation,
     EvalClaim,
+    EvalComponentVersion,
     EvalDatasetCaseRef,
     EvalDatasetManifest,
     EvalExecutionConfig,
@@ -56,6 +65,7 @@ __all__ = [
     "EvalCase",
     "EvalCitation",
     "EvalClaim",
+    "EvalComponentVersion",
     "EvalContractError",
     "EvalDatasetCaseRef",
     "EvalDatasetManifest",
@@ -67,12 +77,15 @@ __all__ = [
     "EvalVariantError",
     "EvalVariantId",
     "EvalVariantOutput",
+    "EvaluationBundleLoader",
+    "EvaluationBundleWriter",
     "FinancialFactLabel",
     "FrozenDocumentSourceRef",
     "FrozenMacroSnapshotRef",
     "FrozenSourceSnapshot",
     "FrozenStructuredArtifactRef",
     "HumanLabel",
+    "LoadedEvalExecutionCase",
     "METRIC_REGISTRY_VERSION",
     "METRIC_SPECS",
     "MacroCausalLabel",
@@ -84,6 +97,9 @@ __all__ = [
     "MetricValue",
     "RiskTopicLabel",
     "StructuredArtifactType",
+    "VerifiedEvaluationBundle",
+    "canonical_json_bytes",
+    "canonical_json_str",
     "compute_dataset_fingerprint",
     "compute_eval_case_fingerprint",
     "compute_execution_config_fingerprint",
@@ -92,4 +108,5 @@ __all__ = [
     "compute_scoring_spec_fingerprint",
     "compute_source_snapshot_fingerprint",
     "compute_variant_output_fingerprint",
+    "verify_bundle_integrity",
 ]

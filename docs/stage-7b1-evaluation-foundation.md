@@ -1,6 +1,7 @@
 # Stage 7B.1 — Evaluation Foundation
 
-> 状态：设计（frozen contracts）。实现按 slice 逐块交付，每块小而完整。
+> 状态：**7B.1.0 契约 = FINAL**；**7B.1.1A Frozen Evaluation Bundle = 完成**。
+> 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
 > 持久化、offline CLI、fingerprint。
@@ -49,8 +50,15 @@ app/eval/
   errors.py       # EvalError 层次（稳定 code，不塞 payload/label/raw source）
   variants.py     # EvalVariantId（3 项，无 noop）+ COMPARABLE_VARIANTS
   metrics.py      # MetricDimension/Kind/Status + MetricName + MetricSpec + MetricValue
-  contracts.py    # snapshot / case / dataset / label / config / spec / output
+  contracts.py    # snapshot / case / dataset / label / config / spec / output / component
   fingerprints.py # 8 个 fingerprint 函数
+  canonical.py    # canonical JSON（sort_keys / compact / ensure_ascii=False）
+  bundle/         # 7B.1.1A：frozen bundle 的 layout / writer / loader / integrity
+    layout.py     #   path 派生 + 路径 segment 守卫（拒绝 traversal）
+    writer.py     #   atomic 写 + replay（语义一致 no-op）+ content-address blob
+    loader.py     #   identity → path → 读取（label leakage boundary）
+    integrity.py  #   12 步 referential integrity 校验
+    _io.py        #   底层读写 + 稳定错误包装
 ```
 
 ## 3. 冻结契约（7B.1.0）
@@ -79,8 +87,10 @@ COMPARABLE_VARIANTS: tuple[EvalVariantId, ...] = tuple(EvalVariantId)
   / `relative_valuation_observation` / `relative_valuation_comparison`）/
   `artifact_id UUID` / `artifact_fingerprint 64hex`。
 - `FrozenSourceSnapshot`：`snapshot_schema_version=1` + 三类 tuple；`frozen=True`；
-  duplicate identity 构造时拒绝（doc 按 `content_sha256`、macro 按 `snapshot_id`、
-  structured 按 `(artifact_type, artifact_id)`）；**不保存 raw bytes**。
+  duplicate identity 构造时拒绝（doc 按 `content_sha256`、macro 按
+  `snapshot_fingerprint`、structured 按 `(artifact_type, artifact_fingerprint)`）；
+  UUID（`snapshot_id` / `artifact_id`）只是 provenance 指针，**不是** semantic
+  identity，不参与去重；**不保存 raw bytes**。
 
 ### 3.3 EvalCase（`contracts.py`）
 
@@ -123,7 +133,10 @@ created_at / local path。
 `temperature Decimal` / `max_output_tokens?` / `structured_output bool`；**不含 API key**。
 `EvalExecutionConfig`：`config_schema_version=1` / `variant_id` / `model` /
 `variant_version` / `prompt_version` / `retrieval_version` / `pipeline_version` /
-`retrieval_top_k?`。
+`retrieval_top_k?` / `component_versions tuple[EvalComponentVersion]`（可空）。
+`EvalComponentVersion`：`component_name` / `component_version`（各自 strip 非空 +
+bounded）；`component_name` 唯一，canonical 按 `component_name` 排序；
+`compute_execution_config_fingerprint` **包含** `component_versions`。
 
 ### 3.7 Execution 与 Scoring 分离（`contracts.py`）
 
@@ -205,8 +218,13 @@ collection canonical sort。
 
 ## 6. Slice 路线（后续）
 
-- **7B.1.1**：dataset 物化（JSON 文件 + loader）+ frozen snapshot manifest 生成/校验 +
-  human label 文件格式/loader。
+- **7B.1.1A ✅ 完成**：Frozen Evaluation Bundle（offline / 无 DB）。把 Dataset Manifest /
+  EvalCase / FrozenSourceSnapshot / HumanLabel / source payload 组织成可复制、可校验、
+  可重放的目录；atomic 写 + replay + content-address blob；loader 由 identity 派生 path
+  （防 traversal）+ label leakage boundary；`verify_bundle_integrity` 12 步 referential
+  integrity；synthetic test bundle + 17 tests。
+- **7B.1.1B（下一步，未开始）**：PG snapshot materializer（把 live PG/Chroma 物化成 frozen
+  bundle 的输入）。
 - **7B.1.2**：确定性指标计算器（复用 `run_checks` 10 check → citation_validity /
   unsupported_claim_ratio / conflict_preservation / forbidden-language；证据链 closure →
   claim_support_rate / citation_coverage）+ token/cost/latency 捕获层（回填 9 adapter）。
