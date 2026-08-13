@@ -33,9 +33,12 @@ from app.core.errors import (
 from app.core.runtime import configure_asyncio_runtime
 from app.db.models.company import CompanyModel
 from app.db.models.research_task import ResearchTaskModel
+from app.db.models.source_provider import SourceProviderModel
 from app.db.session import DatabaseManager
+from app.domain.sources import SourceCapability
 from app.financial.calculations.contracts import CalculationCode, InputRole
 from app.repositories.research_task_repository import ResearchTaskRepository
+from app.repositories.source_provider_repository import SourceProviderRepository
 from app.research_planning.contracts import (
     ResearchPlanPayload,
 )
@@ -53,7 +56,9 @@ from app.research_planning.router import (
     ROUTER_NAME,
     ROUTER_VERSION,
     ResearchSourceRouter,
+    SourceRoutePlan,
     SourceRouteType,
+    compute_route_fingerprint,
 )
 from app.research_planning.service import (
     ResearchPlanningService,
@@ -550,6 +555,100 @@ async def test_route_mapping_and_provider_snapshot(env) -> None:
     assert entries["events"]["route_type"] == SourceRouteType.NEWS_ARTICLE.value
     assert entries["pe_valuation"]["route_type"] == SourceRouteType.COMPANY_ANNOUNCEMENT.value
     assert entries["pe_valuation"]["provider_keys"]
+
+
+async def test_authority_tier_does_not_leak_into_route(env) -> None:
+    """spec 7B.1.4 G/H authority_tier 语义审计（Case B 证明）。
+
+    authority_tier 只影响 `SourceProviderRepository.list_providers` 的行序；router
+    `_build_entries` 立即用 `sorted({provider_key})` 折叠 providers，丢弃 ORDER BY
+    authority_tier → 不进入 `provider_keys` / `route_fingerprint` / 后续 provider
+    selection。因此 authority_tier **不是**语义字段，继续不冻结（不进入
+    FrozenSourceProviderRef）。
+
+    用真实 `list_providers` + 真实 `_build_entries`（**不 mock 排序代码**），先证明
+    测试对 authority_tier 敏感（repo 行序确实随 tier 反转），再证明 router 的可观测
+    输出（provider_keys + route fingerprint）在 authority_tier 变化下完全不变。
+    """
+    sessionmaker = env["sessionmaker"]
+    payload = _plan_payload()
+    fake = FakeResearchPlannerModel(payload)
+    router = _router(sessionmaker, fake)
+
+    def _provider(key: str, tier: int) -> SourceProviderModel:
+        return SourceProviderModel(
+            provider_key=key,
+            display_name=key,
+            provider_type="general_web",
+            authority_tier=tier,
+            homepage_url=f"https://audit.invalid/{key}",
+            allowed_domains=[],
+            capabilities=["news_article"],
+            acquisition_methods=["public_html"],
+            exchange_scope=[],
+            requires_api_key=False,
+            critical_claim_eligible=False,
+            enabled=True,
+        )
+
+    async with sessionmaker() as session:
+        session.add(_provider("audit_tier_a", 1))
+        session.add(_provider("audit_tier_b", 4))
+        await session.commit()
+
+    async def _repo_order() -> list[str]:
+        async with sessionmaker() as session:
+            rows = await SourceProviderRepository(session).list_providers(
+                authority_tier=None,
+                capability=SourceCapability.NEWS_ARTICLE,
+                acquisition_method=None,
+                exchange=None,
+                enabled_only=True,
+            )
+        return [r.provider_key for r in rows]
+
+    async def _observable_output() -> tuple[list[str], str]:
+        entries = await router._build_entries(payload)
+        news = next(e for e in entries if e.need_code == "news_docs")
+        fp = compute_route_fingerprint(
+            plan_fingerprint="f" * 64,
+            router_name=ROUTER_NAME,
+            router_version=ROUTER_VERSION,
+            payload=SourceRoutePlan(entries=entries).normalized_payload(),
+        )
+        return news.provider_keys, fp
+
+    try:
+        # (1) 测试敏感：tier A=1 / B=4 → 行序 [A, B]；router 输出为字母序。
+        order = await _repo_order()
+        assert order.index("audit_tier_a") < order.index("audit_tier_b")
+        keys_first, fp_first = await _observable_output()
+        assert "audit_tier_a" in keys_first and "audit_tier_b" in keys_first
+        assert keys_first.index("audit_tier_a") < keys_first.index("audit_tier_b")
+
+        # (2) 交换 authority_tier（同 key/capability/enabled）→ 行序反转。
+        async with sessionmaker() as session:
+            await session.execute(
+                text(
+                    "UPDATE source_providers SET authority_tier = "
+                    "CASE provider_key WHEN 'audit_tier_a' THEN 4 ELSE 1 END "
+                    "WHERE provider_key IN ('audit_tier_a', 'audit_tier_b')"
+                )
+            )
+            await session.commit()
+        order = await _repo_order()
+        assert order.index("audit_tier_b") < order.index("audit_tier_a")
+
+        # (3) router 可观测输出完全不变（provider_keys + route fingerprint）。
+        keys_second, fp_second = await _observable_output()
+        assert keys_second == keys_first
+        assert fp_second == fp_first
+    finally:
+        async with sessionmaker() as session:
+            await session.execute(
+                text("DELETE FROM source_providers WHERE provider_key LIKE 'audit_tier_%'")
+            )
+            await session.commit()
 
 
 async def test_route_snapshot_survives_registry_change(env) -> None:

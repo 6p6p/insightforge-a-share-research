@@ -22,6 +22,7 @@ import hashlib
 import io
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,6 +37,7 @@ from app.eval.bundle.loader import EvaluationBundleLoader
 from app.eval.contracts import (
     FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
+    FrozenSourceProviderRef,
     FrozenSourceSnapshot,
 )
 from app.eval.errors import EvalReplayError, EvalReplayIntegrityError
@@ -149,97 +151,58 @@ class EvaluationReplayRehydrator:
             )
         identity_provider_key = provider_keys[0]
 
-        # 1. providers（frozen-exact + replay_v1 脚手架；不读 DEFAULT_PROVIDERS）。
+        # 1. providers：load-or-insert + create-or-verify。禁用 upsert 覆盖：已存在 →
+        #    逐 semantic + replay_v1 脚手架字段比对，完全一致 → replay，任何不一致 →
+        #    EvalReplayIntegrityError（不覆盖、不静默改写）。
         provider_repo = SourceProviderRepository(session)
         for p in snapshot.source_providers:
-            await provider_repo.upsert(
-                SourceProviderModel(
-                    provider_key=p.provider_key,
-                    display_name=p.display_name,
-                    provider_type=REPLAY_PROVIDER_TYPE,
-                    authority_tier=REPLAY_PROVIDER_AUTHORITY_TIER,
-                    homepage_url=REPLAY_PROVIDER_HOMEPAGE_URL,
-                    allowed_domains=list(REPLAY_PROVIDER_ALLOWED_DOMAINS),
-                    capabilities=list(p.capabilities),
-                    acquisition_methods=list(REPLAY_PROVIDER_ACQUISITION_METHODS),
-                    exchange_scope=list(REPLAY_PROVIDER_EXCHANGE_SCOPE),
-                    requires_api_key=REPLAY_PROVIDER_REQUIRES_API_KEY,
-                    critical_claim_eligible=REPLAY_PROVIDER_CRITICAL_CLAIM_ELIGIBLE,
-                    enabled=p.enabled,
-                )
-            )
+            expected = self._provider_model(p)
+            existing = await provider_repo.get_by_key(p.provider_key)
+            if existing is None:
+                await provider_repo.upsert(expected)
+            else:
+                self._verify_provider(existing, expected)
 
-        # 2. company（精确 ID + frozen 语义字段 + replay_v1 脚手架）。
+        # 2. company：load-or-insert + create-or-verify（精确 ID）。
         company_repo = CompanyRepository(session)
-        await company_repo.create(
-            CompanyModel(
-                company_id=company_id,
-                exchange=company.exchange,
-                security_code=company.security_code,
-                identity_key=f"{company.exchange}:{company.security_code}",
-                board=company.board,
-                official_name=company.official_name,
-                short_name=company.short_name or company.security_code,
-                listing_status=REPLAY_COMPANY_LISTING_STATUS,
-                identity_source_provider_key=identity_provider_key,
-                identity_source_url=REPLAY_IDENTITY_SOURCE_URL,
-            )
+        expected_company = self._company_model(company_id, company, identity_provider_key)
+        existing_company = await company_repo.get_by_id(company_id)
+        if existing_company is None:
+            await company_repo.create(expected_company)
+        else:
+            self._verify_company(existing_company, expected_company)
+
+        # 3. aliases：exact 已存在 → replay；缺失 → create；同 normalized identity 但
+        #    alias 语义不同 → reject；不产生重复。
+        await self._replay_aliases(
+            session, company_repo, company_id, company, identity_provider_key
         )
 
-        # 3. aliases（frozen alias 原样落库，normalized_alias 按生产规则派生）。
-        for alias in company.aliases:
-            await company_repo.add_alias(
-                CompanyAliasModel(
-                    company_id=company_id,
-                    alias=alias,
-                    normalized_alias=normalize_company_text(alias),
-                    alias_type=REPLAY_ALIAS_TYPE,
-                    source_provider_key=identity_provider_key,
-                    source_url=REPLAY_IDENTITY_SOURCE_URL,
-                )
-            )
-
-        # 4. raw artifacts（精确 ID；storage_key 来自真实落盘）。
+        # 4. raw artifacts：load-or-insert + create-or-verify（storage_key 不覆盖）。
         raw_repo = RawArtifactRepository(session)
         for doc, stored in stored_docs:
-            await raw_repo.insert(
-                RawArtifactModel(
-                    artifact_id=doc.raw_artifact_id,
-                    content_sha256=stored.content_sha256,
-                    storage_key=stored.storage_key,
-                    byte_size=stored.byte_size,
-                    media_type=stored.media_type,
-                )
-            )
+            expected_raw = self._raw_artifact_model(doc, stored)
+            existing_raw = await raw_repo.get_by_id(doc.raw_artifact_id)
+            if existing_raw is None:
+                await raw_repo.insert(expected_raw)
+            else:
+                self._verify_raw_artifact(existing_raw, expected_raw)
 
-        # 5. source records（精确 ID + frozen-exact + replay_v1 脚手架；
-        #    不调用 SourceIngestionService）。
+        # 5. source records：load-or-insert + create-or-verify（不调用 SourceIngestionService）。
         source_repo = SourceRecordRepository(session)
         capabilities_by_key = {
             p.provider_key: list(p.capabilities) for p in snapshot.source_providers
         }
         documents: list[RehydratedDocument] = []
         for doc, stored in stored_docs:
-            await source_repo.create(
-                SourceRecordModel(
-                    source_id=doc.source_record_id,
-                    company_id=company_id,
-                    provider_key=doc.provider_key,
-                    artifact_id=doc.raw_artifact_id,
-                    document_type=doc.document_type,
-                    title=doc.title,
-                    published_at=doc.published_at,
-                    reporting_period_end=doc.reporting_period_end,
-                    source_url=doc.source_url,
-                    acquisition_method=REPLAY_SOURCE_ACQUISITION_METHOD,
-                    external_document_id=None,
-                    authority_tier_snapshot=doc.authority_tier_snapshot,
-                    critical_claim_eligible_snapshot=doc.critical_claim_eligible_snapshot,
-                    provider_capabilities_snapshot=capabilities_by_key[doc.provider_key],
-                    status=REPLAY_SOURCE_STATUS,
-                    acquired_at=doc.acquired_at,
-                )
+            expected_source = self._source_record_model(
+                doc, company_id, capabilities_by_key[doc.provider_key]
             )
+            existing_source = await source_repo.get_by_id(doc.source_record_id)
+            if existing_source is None:
+                await source_repo.create(expected_source)
+            else:
+                self._verify_source_record(existing_source, expected_source)
             documents.append(
                 RehydratedDocument(
                     source_record_id=doc.source_record_id,
@@ -256,3 +219,200 @@ class EvaluationReplayRehydrator:
             provider_keys=tuple(provider_keys),
             documents=tuple(documents),
         )
+
+    # ------------------------------------------------------------- model builders
+
+    @staticmethod
+    def _provider_model(p: FrozenSourceProviderRef) -> SourceProviderModel:
+        return SourceProviderModel(
+            provider_key=p.provider_key,
+            display_name=p.display_name,
+            provider_type=REPLAY_PROVIDER_TYPE,
+            authority_tier=REPLAY_PROVIDER_AUTHORITY_TIER,
+            homepage_url=REPLAY_PROVIDER_HOMEPAGE_URL,
+            allowed_domains=list(REPLAY_PROVIDER_ALLOWED_DOMAINS),
+            capabilities=list(p.capabilities),
+            acquisition_methods=list(REPLAY_PROVIDER_ACQUISITION_METHODS),
+            exchange_scope=list(REPLAY_PROVIDER_EXCHANGE_SCOPE),
+            requires_api_key=REPLAY_PROVIDER_REQUIRES_API_KEY,
+            critical_claim_eligible=REPLAY_PROVIDER_CRITICAL_CLAIM_ELIGIBLE,
+            enabled=p.enabled,
+        )
+
+    @staticmethod
+    def _company_model(
+        company_id: UUID,
+        company: FrozenCompanyIdentity,
+        identity_provider_key: str,
+    ) -> CompanyModel:
+        return CompanyModel(
+            company_id=company_id,
+            exchange=company.exchange,
+            security_code=company.security_code,
+            identity_key=f"{company.exchange}:{company.security_code}",
+            board=company.board,
+            official_name=company.official_name,
+            short_name=company.short_name or company.security_code,
+            listing_status=REPLAY_COMPANY_LISTING_STATUS,
+            identity_source_provider_key=identity_provider_key,
+            identity_source_url=REPLAY_IDENTITY_SOURCE_URL,
+        )
+
+    @staticmethod
+    def _raw_artifact_model(
+        doc: FrozenDocumentSourceRef, stored: StoredRawArtifact
+    ) -> RawArtifactModel:
+        return RawArtifactModel(
+            artifact_id=doc.raw_artifact_id,
+            content_sha256=stored.content_sha256,
+            storage_key=stored.storage_key,
+            byte_size=stored.byte_size,
+            media_type=stored.media_type,
+        )
+
+    @staticmethod
+    def _source_record_model(
+        doc: FrozenDocumentSourceRef,
+        company_id: UUID,
+        capabilities: list[str],
+    ) -> SourceRecordModel:
+        return SourceRecordModel(
+            source_id=doc.source_record_id,
+            company_id=company_id,
+            provider_key=doc.provider_key,
+            artifact_id=doc.raw_artifact_id,
+            document_type=doc.document_type,
+            title=doc.title,
+            published_at=doc.published_at,
+            reporting_period_end=doc.reporting_period_end,
+            source_url=doc.source_url,
+            acquisition_method=REPLAY_SOURCE_ACQUISITION_METHOD,
+            external_document_id=None,
+            authority_tier_snapshot=doc.authority_tier_snapshot,
+            critical_claim_eligible_snapshot=doc.critical_claim_eligible_snapshot,
+            provider_capabilities_snapshot=capabilities,
+            status=REPLAY_SOURCE_STATUS,
+            acquired_at=doc.acquired_at,
+        )
+
+    # ------------------------------------------------------------- create-or-verify
+
+    @staticmethod
+    def _verify_provider(existing: SourceProviderModel, expected: SourceProviderModel) -> None:
+        if (
+            existing.display_name != expected.display_name
+            or existing.enabled != expected.enabled
+            or list(existing.capabilities) != list(expected.capabilities)
+            or existing.provider_type != expected.provider_type
+            or existing.authority_tier != expected.authority_tier
+            or existing.homepage_url != expected.homepage_url
+            or list(existing.allowed_domains) != list(expected.allowed_domains)
+            or list(existing.acquisition_methods) != list(expected.acquisition_methods)
+            or list(existing.exchange_scope) != list(expected.exchange_scope)
+            or existing.requires_api_key != expected.requires_api_key
+            or existing.critical_claim_eligible != expected.critical_claim_eligible
+        ):
+            raise EvalReplayIntegrityError(
+                f"provider 已存在但 semantic/脚手架字段不一致（{existing.provider_key}）"
+            )
+
+    @staticmethod
+    def _verify_company(existing: CompanyModel, expected: CompanyModel) -> None:
+        if (
+            existing.exchange != expected.exchange
+            or existing.security_code != expected.security_code
+            or existing.identity_key != expected.identity_key
+            or existing.board != expected.board
+            or existing.official_name != expected.official_name
+            or existing.short_name != expected.short_name
+            or existing.listing_status != expected.listing_status
+            or existing.identity_source_provider_key != expected.identity_source_provider_key
+            or existing.identity_source_url != expected.identity_source_url
+        ):
+            raise EvalReplayIntegrityError(
+                f"company 已存在但 semantic/脚手架字段不一致（{existing.company_id}）"
+            )
+
+    @staticmethod
+    def _verify_raw_artifact(existing: RawArtifactModel, expected: RawArtifactModel) -> None:
+        if (
+            existing.artifact_id != expected.artifact_id
+            or existing.content_sha256 != expected.content_sha256
+            or existing.byte_size != expected.byte_size
+            or existing.media_type != expected.media_type
+            or existing.storage_key != expected.storage_key
+        ):
+            raise EvalReplayIntegrityError(
+                f"raw_artifact 已存在但字段不一致（{existing.artifact_id}）"
+            )
+
+    @staticmethod
+    def _verify_source_record(existing: SourceRecordModel, expected: SourceRecordModel) -> None:
+        if (
+            existing.company_id != expected.company_id
+            or existing.provider_key != expected.provider_key
+            or existing.artifact_id != expected.artifact_id
+            or existing.document_type != expected.document_type
+            or existing.title != expected.title
+            or existing.source_url != expected.source_url
+            or existing.published_at != expected.published_at
+            or existing.acquired_at != expected.acquired_at
+            or existing.reporting_period_end != expected.reporting_period_end
+            or existing.authority_tier_snapshot != expected.authority_tier_snapshot
+            or existing.critical_claim_eligible_snapshot
+            != expected.critical_claim_eligible_snapshot
+            or existing.acquisition_method != expected.acquisition_method
+            or existing.status != expected.status
+            or list(existing.provider_capabilities_snapshot)
+            != list(expected.provider_capabilities_snapshot)
+            or existing.external_document_id != expected.external_document_id
+        ):
+            raise EvalReplayIntegrityError(
+                f"source_record 已存在但字段不一致（{existing.source_id}）"
+            )
+
+    async def _replay_aliases(
+        self,
+        session: AsyncSession,
+        company_repo: CompanyRepository,
+        company_id: UUID,
+        company: FrozenCompanyIdentity,
+        identity_provider_key: str,
+    ) -> None:
+        existing_aliases = (
+            (
+                await session.execute(
+                    select(CompanyAliasModel).where(CompanyAliasModel.company_id == company_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_alias = {a.alias: a for a in existing_aliases}
+        by_normalized: dict[str, list[CompanyAliasModel]] = {}
+        for a in existing_aliases:
+            by_normalized.setdefault(a.normalized_alias, []).append(a)
+
+        for alias in company.aliases:
+            normalized = normalize_company_text(alias)
+            if alias in by_alias:
+                existing_a = by_alias[alias]
+                if existing_a.normalized_alias != normalized:
+                    raise EvalReplayIntegrityError(
+                        f"alias 已存在但 normalized_alias 不一致（{alias}）"
+                    )
+                continue  # exact replay
+            if normalized in by_normalized:
+                raise EvalReplayIntegrityError(
+                    f"alias normalized identity 冲突（语义不同，{alias}）"
+                )
+            await company_repo.add_alias(
+                CompanyAliasModel(
+                    company_id=company_id,
+                    alias=alias,
+                    normalized_alias=normalized,
+                    alias_type=REPLAY_ALIAS_TYPE,
+                    source_provider_key=identity_provider_key,
+                    source_url=REPLAY_IDENTITY_SOURCE_URL,
+                )
+            )

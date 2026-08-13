@@ -14,6 +14,7 @@
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -260,3 +261,189 @@ async def test_replay_schema_violation_raises_integrity_error(monkeypatch, tmp_p
             _drop_temp_db(temp_db)
         finally:
             get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------- create-or-verify（spec A–I）
+
+
+@asynccontextmanager
+async def _isolated_target(monkeypatch, tmp_path):
+    """创建独立临时 PG + 升级 head，yield (sessionmaker, raw_store)，finally 清理。"""
+    shared_url = get_settings().database_url
+    temp_db = f"insightforge_eval_replay_{uuid4().hex[:12]}"
+    temp_url = _temp_url(shared_url, temp_db)
+    _create_temp_db(temp_db)
+    monkeypatch.setenv("DATABASE_URL", temp_url)
+    get_settings.cache_clear()
+
+    iso_manager = DatabaseManager(database_url=temp_url, echo=False, connect_timeout_seconds=5)
+    iso_store = LocalRawArtifactStore(root=tmp_path / "raw", max_bytes=1024 * 1024)
+    try:
+        await _upgrade_head(temp_url)
+        yield iso_manager.session_factory(), iso_store
+    finally:
+        await iso_manager.dispose()
+        try:
+            _drop_temp_db(temp_db)
+        finally:
+            get_settings.cache_clear()
+
+
+async def _counts(sessionmaker) -> dict:
+    """按模型统计行数（用于 idempotency / rollback 断言）。"""
+    models = {
+        "company": CompanyModel,
+        "provider": SourceProviderModel,
+        "raw": RawArtifactModel,
+        "source": SourceRecordModel,
+        "alias": CompanyAliasModel,
+    }
+    out: dict = {}
+    async with sessionmaker() as session:
+        for name, model in models.items():
+            out[name] = len((await session.execute(select(model))).scalars().all())
+    return out
+
+
+async def test_replay_twice_idempotent_no_duplicate_rows(monkeypatch, tmp_path) -> None:
+    """spec I (1)(2)(7)：同 bundle 同 target DB 重放两次成功，行数不变，alias 不重复。"""
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        first = await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+        second = await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        # 语义等价：精确 ID + documents 完全一致。
+        assert first == second
+        assert first.company_id == COMPANY_ID
+        assert first.provider_keys == ("sse", "xinhuanet")
+
+        # 行数不变：company=1, provider=2, raw=1, source=1, alias=2（无重复）。
+        assert await _counts(sm) == {
+            "company": 1,
+            "provider": 2,
+            "raw": 1,
+            "source": 1,
+            "alias": 2,
+        }
+
+
+async def test_replay_provider_mismatch_rejected(monkeypatch, tmp_path) -> None:
+    """spec I (3)：已有 provider 同 key 但 display_name 不同 → reject，不覆盖。"""
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        async with sm() as session:
+            provider = await session.get(SourceProviderModel, "xinhuanet")
+            provider.display_name = "被篡改的新华网"
+            await session.commit()
+
+        with pytest.raises(EvalReplayIntegrityError):
+            await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        # 未被静默覆盖：display_name 仍是篡改值（replay 不写回）。
+        async with sm() as session:
+            provider = await session.get(SourceProviderModel, "xinhuanet")
+            assert provider.display_name == "被篡改的新华网"
+
+
+async def test_replay_company_mismatch_rejected(monkeypatch, tmp_path) -> None:
+    """spec I (4)：已有 company 同 ID 但 official_name 不同 → reject。"""
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        async with sm() as session:
+            company = await session.get(CompanyModel, COMPANY_ID)
+            company.official_name = "被篡改的公司全称"
+            await session.commit()
+
+        with pytest.raises(EvalReplayIntegrityError):
+            await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+
+async def test_replay_raw_artifact_mismatch_rejected(monkeypatch, tmp_path) -> None:
+    """spec I (5)：已有 raw_artifact 同 ID 但 content_sha256 不同 → reject，不覆盖。"""
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        tampered_sha = "0" * 64
+        async with sm() as session:
+            raw = await session.get(RawArtifactModel, RAW_ARTIFACT_ID)
+            raw.content_sha256 = tampered_sha
+            await session.commit()
+
+        with pytest.raises(EvalReplayIntegrityError):
+            await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        # 未被覆盖。
+        async with sm() as session:
+            raw = await session.get(RawArtifactModel, RAW_ARTIFACT_ID)
+            assert raw.content_sha256 == tampered_sha
+
+
+async def test_replay_source_record_mismatch_rejected(monkeypatch, tmp_path) -> None:
+    """spec I (6)：已有 source_record 同 ID 但 title 不同 → reject。"""
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        async with sm() as session:
+            source = await session.get(SourceRecordModel, SOURCE_RECORD_ID)
+            source.title = "被篡改的标题"
+            await session.commit()
+
+        with pytest.raises(EvalReplayIntegrityError):
+            await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+
+async def test_replay_semantic_conflict_leaves_no_partial_rows(monkeypatch, tmp_path) -> None:
+    """spec I (8) / F：raw 冲突（entity 4）→ 事务回滚，provider/company/alias 无残留。
+
+    预置一个同 artifact_id 但 content_sha256 不同的 raw_artifact，rehydrate 在
+    raw verify 处失败 → 之前已创建的 provider/company/alias 全部回滚（无 partial
+    rows），仅保留预置的那条 raw（独立事务提交）。
+    """
+    bundle_root = tmp_path / "bundle"
+    build_replay_bundle(bundle_root)
+
+    async with _isolated_target(monkeypatch, tmp_path) as (sm, store):
+        # 预置 mismatching raw（独立事务，提交后持久化）。
+        async with sm() as session:
+            session.add(
+                RawArtifactModel(
+                    artifact_id=RAW_ARTIFACT_ID,
+                    content_sha256="0" * 64,
+                    storage_key="sha256/00/" + "0" * 64,
+                    byte_size=10,
+                    media_type="text/html",
+                )
+            )
+            await session.commit()
+
+        rehydrator = EvaluationReplayRehydrator(sm, store, EvaluationBundleLoader(bundle_root))
+        with pytest.raises(EvalReplayIntegrityError):
+            await rehydrator.rehydrate_case(CASE_ID, CASE_VERSION)
+
+        counts = await _counts(sm)
+        assert counts["provider"] == 0
+        assert counts["company"] == 0
+        assert counts["alias"] == 0
+        assert counts["source"] == 0
+        assert counts["raw"] == 1  # 仅预置的那条 mismatching raw

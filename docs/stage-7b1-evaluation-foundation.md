@@ -461,6 +461,23 @@ provenance，运行期不读）、`provider_capabilities_snapshot`（SourceRecor
 master-data 时间戳与 identity-source 字段、Chroma 索引与 BGE embedding（derived /
 pipeline config，不在 bundle 内）。
 
+**authority_tier 语义审计（7B.1.4B.1 补证，Case B）**：`SourceProvider.authority_tier`
+是否影响可观测 routing？`SourceProviderRepository.list_providers` 确实按
+`authority_tier ASC, provider_key ASC` 排序，但 `router._build_entries` 在读到行后
+**立即**用 `sorted({row.provider_key for row in rows})` 把 provider 折叠成**去重排序的
+集合**（`SourceRouteEntry.provider_keys` 再经 field validator `sorted({...})` 二次
+去重排序）——`ORDER BY authority_tier` 产生的**行序在折叠点被丢弃**，不会进入
+`provider_keys` 的候选顺序、`route_payload`、`route_fingerprint`（`compute_route_fingerprint`
+是纯函数，只依赖 normalized payload + plan fingerprint + router 身份）或后续 provider
+selection（selection 只按 `provider_keys` 集合 + `SourceProvider.display_name` 等
+frozen 字段，不读 authority_tier）。定向生产测试
+`test_authority_tier_does_not_leak_into_route`（真实 `list_providers` + 真实
+`_build_entries`，**不 mock 排序代码**）证明：仅改 authority_tier 时 `list_providers`
+行序反转，但 `provider_keys` 与 `route_fingerprint` **完全不变**。→ **不冻结
+authority_tier**，`SNAPSHOT_SCHEMA_VERSION` 保持 2，`REPLAY_PROVIDER_AUTHORITY_TIER`
+replay_v1 脚手架保留（provider 行的 authority_tier 仍按 policy 写中性值，但它不参与
+路由语义）。
+
 ### 3.17 Isolated Runtime Rehydration Foundation（7B.1.4B.1）
 
 `app/eval/replay/` 把 Frozen Evaluation Bundle **复现**到一个**隔离运行时**上，
@@ -491,30 +508,47 @@ pipeline config，不在 bundle 内）。
 - **两阶段流程**：阶段一（DB session 之外）读 blob → SHA 校验 →
   content-addressed 落盘（`media_type` dispatch：PDF→`put_pdf_stream`、JSON→
   `put_json_bytes`、HTML→`put_html_bytes`）；阶段二单 DB 事务按 providers → company →
-  aliases → raw_artifacts → source_records 顺序插入 + commit。任一 blob SHA 不匹配、
-  snapshot fingerprint 与 case 引用不一致、document provider_key 不在 source_providers、
-  或 `media_type` 不支持 → fail-fast，**不打开 target session**。
+  aliases → raw_artifacts → source_records 顺序 **create-or-verify** + commit。任一 blob
+  SHA 不匹配、snapshot fingerprint 与 case 引用不一致、document provider_key 不在
+  source_providers、或 `media_type` 不支持 → fail-fast，**不打开 target session**。
+- **create-or-verify immutable replay（spec A–F）**：rehydrator **不**用
+  `SourceProviderRepository.upsert` 覆盖已有行、也**不**无条件 `create`。每个实体先按
+  frozen PK / provider_key `load`：不存在 → 插入；已存在 → 逐 semantic + `replay_v1`
+  脚手架字段比对，完全一致 → replay（返回同一 `RehydratedCase`），任何不一致 →
+  `EvalReplayIntegrityError`（不覆盖、不静默改写）。语义字段——Provider =
+  display_name / enabled / capabilities；Company = security_code / official_name /
+  short_name / exchange / board / identity_key；RawArtifact = artifact_id /
+  content_sha256 / byte_size / media_type / storage_key（storage_key 不覆盖）；
+  SourceRecord = provenance + 脚手架；Alias = exact alias → replay、同 normalized
+  identity 但 alias 语义不同 → reject（不产生重复）。单 DB 事务：任一语义冲突 → 整体
+  回滚（无 partial rows）；content-addressed 已落盘字节可残留（不做文件删除回滚）。
 - **错误分类（不复用 EvalMaterializationError）**：`EvalReplayError`
   （`eval_replay_error`，落盘/落库失败）+ `EvalReplayIntegrityError`
   （`eval_replay_integrity_error`，SHA 不匹配 / 引用不自洽 / 违反 schema 约束，
   映射 `IntegrityError`）。消息**不含** raw bytes / payload / DB URL / label / prompt /
   API key。
-- **验证**：2 个 integration（真实 `alembic upgrade head` → 0045 的隔离临时库
-  `insightforge_eval_replay_<random>`，8 断言 happy path + schema violation 负例）
-  + 6 个 unit（blob tamper / snapshot fingerprint tamper / 跨引用破坏 / unsupported
-  media_type / 结构隔离 / 错误消息不泄露 payload）。0 LLM / 0 Chroma / 0 network。
+- **验证**：8 个 integration（真实 `alembic upgrade head` → 0045 的隔离临时库
+  `insightforge_eval_replay_<random>`：8 断言 happy path + schema violation 负例 +
+  幂等重放/行数不变/alias 不重复 + provider/company/raw/source 四类 mismatch 拒绝 +
+  语义冲突回滚无 partial rows）+ 6 个 unit（blob tamper / snapshot fingerprint tamper /
+  跨引用破坏 / unsupported media_type / 结构隔离 / 错误消息不泄露 payload）。
+  0 LLM / 0 Chroma / 0 network。
 
 **宏观 / 财务 / 估值 rehydration 审计（spec R/S，本轮只审计不实现）**：
 
-- **R1（macro payload 是否含 raw bytes 供 `verify_snapshot_integrity` 重算？）→ 否**。
+- **R1（macro payload 是否含 raw bytes？）→ 否（closure gap，7B.1.4B.2 补齐）**。
   `build_macro_payload`（`materialization/projections.py`）投影的是**结构化 dict**
   （snapshot_fingerprint / series / indicator / geography / observations 的序列化标量），
   **不含** raw bytes；`MacroPersistenceService.verify_snapshot_integrity` 读的是
   **persisted DB 行**（snapshot / series / links / observations / raw_artifacts 行），
   其中归档 SHA 来自 `RawArtifact` **行**的 `content_sha256`，**不读** store 原始字节。
-  → macro rehydration 需要重建的是 persisted 结构化行（再重算 fingerprint），不需要
-  raw bytes；但 macro 行含 `MacroSnapshotArtifactLink` / `RawArtifact` 跨表引用，超出
-  本轮 document-only 复现范围。
+  **但这不等于 macro replay 不需要 raw bytes**。冻结原则（§3.16）：只要目标 DB 存在
+  `RawArtifact` 行，目标 `RawArtifactStore` **必须**同时拥有真实归档字节——行的存在
+  即意味着字节的存在义务，否则 `MacroSnapshotArtifactLink` 会引用一条「有行无字节」的
+  RawArtifact。当前 macro payload 只带结构化投影、**不带** `MacroSnapshotArtifactLink`
+  → `RawArtifact` 的真实 store bytes，→ macro isolated replay 存在 **closure gap**：
+  重放出的 link 引用 RawArtifact 行但 store 无字节。**本轮（document-only）不实现**，
+  由 **7B.1.4B.2** 扩展 bundle（`FrozenRawArtifactRef` + content-addressed 字节）补齐。
 - **R2（财务/估值 fingerprint 是否绑定 source_evidence_card_id？）→ 是**。
   `compute_metric_fingerprint`（`financial/contracts.py`）与
   `compute_valuation_observation_fingerprint`（`valuation/contracts.py`）的 fingerprint
