@@ -74,6 +74,14 @@ class LlmCallUsageRecord:
                     raise ValueError(
                         f"usage_status=reported 时 {name} 必须是非负 int，得到 {value!r}"
                     )
+            # provider standardized usage 内部不一致 = instrumentation contract
+            # corruption（拒绝构造，而非静默降级 unavailable）。
+            if self.input_tokens + self.output_tokens != self.total_tokens:
+                raise ValueError(
+                    "total_tokens 必须等于 input_tokens + output_tokens，得到 "
+                    f"input={self.input_tokens} output={self.output_tokens} "
+                    f"total={self.total_tokens}"
+                )
         else:
             if any(
                 getattr(self, name) is not None
@@ -181,6 +189,23 @@ async def _record(
         await observer.record(record)
 
 
+async def _record_suppress(
+    observer: LlmUsageObserver | None,
+    record: LlmCallUsageRecord,
+) -> None:
+    """错误路径上的 best-effort 记录：observer 失败**不得**覆盖原模型异常。
+
+    parsing_error / invocation_error 的原异常必须是 primary exception；telemetry
+    失败被静默丢弃（不造 logging framework）。
+    """
+    if observer is None:
+        return
+    try:
+        await observer.record(record)
+    except Exception:
+        return
+
+
 async def invoke_structured_with_usage(
     model: Any,
     schema: Any,
@@ -204,7 +229,7 @@ async def invoke_structured_with_usage(
     try:
         result = await structured.ainvoke(input)
     except Exception as exc:
-        await _record(
+        await _record_suppress(
             usage_observer,
             LlmCallUsageRecord(
                 component_name=component_name,
@@ -221,7 +246,7 @@ async def invoke_structured_with_usage(
     parsing_error = _first_parsing_error(result.get("parsing_error"))
     usage = _extract_usage(result["raw"])
     if parsing_error is not None:
-        await _record(
+        await _record_suppress(
             usage_observer,
             _build_record(
                 component_name=component_name,

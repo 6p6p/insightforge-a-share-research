@@ -59,11 +59,13 @@ class ResearchPlannerModel(Protocol):
     async def generate(self, request: ResearchPlannerRequest) -> ResearchPlanPayload: ...
 
 
-def create_research_planner_model(settings: Settings) -> ResearchPlannerModel:
-    """根据 Settings.llm_provider 构造 ResearchPlannerModel。"""
+def create_research_planner_model(
+    settings: Settings, usage_observer: LlmUsageObserver | None = None
+) -> ResearchPlannerModel:
+    """根据 Settings.llm_provider 构造 ResearchPlannerModel（可选注入 usage_observer）。"""
     provider = (settings.llm_provider or "").strip().lower()
     if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekResearchPlannerModel(settings)
+        return DeepSeekResearchPlannerModel(settings, usage_observer=usage_observer)
     raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")
 
 
@@ -171,7 +173,7 @@ class DeepSeekResearchPlannerModel:
                 messages,
                 component_name=COMPONENT_RESEARCH_PLANNER,
                 provider=self._settings.llm_provider,
-                model_id=self._model_id,
+                model_id=self._settings.llm_model,
                 usage_observer=self._usage_observer,
             )
         except ValidationError as exc:

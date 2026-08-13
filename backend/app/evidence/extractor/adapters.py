@@ -90,7 +90,7 @@ class DeepSeekEvidenceExtractionModel:
                 messages,
                 component_name=COMPONENT_EVIDENCE_EXTRACTION,
                 provider=self._settings.llm_provider,
-                model_id=self._model_id,
+                model_id=self._settings.llm_model,
                 usage_observer=self._usage_observer,
             )
         except OutputParserException as exc:

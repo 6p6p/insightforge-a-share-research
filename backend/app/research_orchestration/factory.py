@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import Settings
 from app.llm.factory import create_evidence_extraction_model
+from app.llm.instrumentation import LlmUsageObserver
 from app.rag.embedding.bge import BGEProvider
 from app.rag.index.service import VectorIndexService
 from app.rag.retrieval.service import RetrievalService
@@ -45,18 +46,26 @@ def create_research_orchestration_dependencies(
     settings: Settings,
     sessionmaker: async_sessionmaker,
     checkpoint_manager: LangGraphCheckpointManager,
+    usage_observer: LlmUsageObserver | None = None,
 ) -> ResearchOrchestrationDependencies:
-    """按 Settings 装配完整顶层编排依赖（0 model call / 0 network）。"""
-    fulfillment = create_research_fulfillment_service(settings, sessionmaker)
+    """按 Settings 装配完整顶层编排依赖（0 model call / 0 network）。
+
+    可选 `usage_observer` 一路向下传给全部 10 个 production LLM adapter
+    （planner / evidence extractor / 5 Stage4 / draft / audit / revision），
+    生产默认 None。
+    """
+    fulfillment = create_research_fulfillment_service(
+        settings, sessionmaker, usage_observer=usage_observer
+    )
     stage4_runner = Stage4WorkflowRunner(
         sessionmaker,
         checkpoint_manager,
-        create_stage4_dependencies(settings, sessionmaker),
+        create_stage4_dependencies(settings, sessionmaker, usage_observer=usage_observer),
     )
     stage5_runner = Stage5WorkflowRunner(
         sessionmaker,
         checkpoint_manager,
-        create_stage5_dependencies(settings, sessionmaker),
+        create_stage5_dependencies(settings, sessionmaker, usage_observer=usage_observer),
     )
     child_service = ResearchOrchestrationChildService(sessionmaker, stage4_runner, stage5_runner)
     # backflow loop（7A.2B.3）：复用真实检索链 + 确定性 index builder + 同一
@@ -80,7 +89,7 @@ def create_research_orchestration_dependencies(
     backflow_executor = ResearchBackflowExecutor(
         sessionmaker,
         retrieval,
-        create_evidence_extraction_model(settings),
+        create_evidence_extraction_model(settings, usage_observer=usage_observer),
         index_builder=index_builder,
     )
     return ResearchOrchestrationDependencies(

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import Settings
 from app.llm.factory import create_evidence_extraction_model
+from app.llm.instrumentation import LlmUsageObserver
 from app.rag.embedding.bge import BGEProvider
 from app.rag.index.service import VectorIndexService
 from app.rag.retrieval.service import RetrievalService
@@ -42,13 +43,15 @@ from app.vectorstore.client import ChromaManager
 def create_research_fulfillment_service(
     settings: Settings,
     sessionmaker: async_sessionmaker,
+    usage_observer: LlmUsageObserver | None = None,
 ) -> ResearchFulfillmentService:
     """按 Settings 装配完整生产 fulfillment（真实 DeepSeek planner/extractor、
     真实 BGE embedding、真实 Chroma 共享 collection）。
 
     构造阶段不发起任何外部调用；所有模型 adapter 惰性加载。
+    可选 `usage_observer` 一路向下传给 planner + evidence extractor。
     """
-    planner_model = create_research_planner_model(settings)
+    planner_model = create_research_planner_model(settings, usage_observer=usage_observer)
     plan_service = ResearchPlanningService(
         sessionmaker, planner_model, CompanyIdentityService(sessionmaker)
     )
@@ -73,7 +76,7 @@ def create_research_fulfillment_service(
     document_executor = DocumentNeedExecutor(
         sessionmaker,
         retrieval,
-        create_evidence_extraction_model(settings),
+        create_evidence_extraction_model(settings, usage_observer=usage_observer),
         index_builder=index_builder,
     )
     return ResearchFulfillmentService(

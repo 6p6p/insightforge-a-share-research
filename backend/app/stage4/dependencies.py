@@ -15,6 +15,7 @@ from app.analysis.macro.service import MacroAnalysisService
 from app.analysis.synthesis.service import SynthesisAnalysisService
 from app.analysis.valuation.service import ValuationAnalysisService
 from app.core.config import Settings
+from app.llm.instrumentation import LlmUsageObserver
 from app.synthesis.service import SynthesisService
 
 
@@ -34,10 +35,12 @@ class Stage4AnalysisDependencies:
 def create_stage4_dependencies(
     settings: Settings,
     sessionmaker: async_sessionmaker,
+    usage_observer: LlmUsageObserver | None = None,
 ) -> Stage4AnalysisDependencies:
     """生产 factory：Settings → 现有 model factories → Services → deps。
 
     只在 graph 之外构建一次（runner 持有）；node 内不重新初始化 model。
+    可选 `usage_observer` 一路向下传给 5 个 analysis adapter（生产默认 None）。
     """
     from app.analysis.claims.factory import create_claim_analysis_model
     from app.analysis.financial.factory import create_financial_analysis_model
@@ -48,19 +51,22 @@ def create_stage4_dependencies(
     return Stage4AnalysisDependencies(
         sessionmaker=sessionmaker,
         claim_analysis_service=ClaimAnalysisService(
-            sessionmaker, create_claim_analysis_model(settings)
+            sessionmaker, create_claim_analysis_model(settings, usage_observer=usage_observer)
         ),
         financial_analysis_service=FinancialAnalysisService(
-            sessionmaker, create_financial_analysis_model(settings)
+            sessionmaker,
+            create_financial_analysis_model(settings, usage_observer=usage_observer),
         ),
         macro_analysis_service=MacroAnalysisService(
-            sessionmaker, create_macro_analysis_model(settings)
+            sessionmaker, create_macro_analysis_model(settings, usage_observer=usage_observer)
         ),
         valuation_analysis_service=ValuationAnalysisService(
-            sessionmaker, create_valuation_analysis_model(settings)
+            sessionmaker,
+            create_valuation_analysis_model(settings, usage_observer=usage_observer),
         ),
         synthesis_service=SynthesisService(sessionmaker),
         synthesis_analysis_service=SynthesisAnalysisService(
-            sessionmaker, create_synthesis_analysis_model(settings)
+            sessionmaker,
+            create_synthesis_analysis_model(settings, usage_observer=usage_observer),
         ),
     )

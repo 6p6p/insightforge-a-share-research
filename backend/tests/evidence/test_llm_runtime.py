@@ -227,7 +227,7 @@ def test_adapter_extract_passes_thinking_disabled_and_model() -> None:
     rec = observer.records[0]
     assert rec.component_name == "evidence_extraction"
     assert rec.provider == "deepseek"
-    assert rec.model_id == "deepseek:deepseek-v4-flash"
+    assert rec.model_id == "deepseek-v4-flash"
     assert rec.outcome == "success"
     assert rec.usage_status == "reported"
     assert rec.input_tokens == 10

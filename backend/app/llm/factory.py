@@ -11,13 +11,19 @@ from app.evidence.extractor.adapters import DeepSeekEvidenceExtractionModel
 from app.evidence.extractor.contracts import EvidenceExtractionModel
 from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import MissingLLMCredentialsError, UnsupportedLLMProviderError
+from app.llm.instrumentation import LlmUsageObserver
 
 
-def create_evidence_extraction_model(settings: Settings) -> EvidenceExtractionModel:
-    """根据 Settings.llm_provider 构造 EvidenceExtractionModel。"""
+def create_evidence_extraction_model(
+    settings: Settings, usage_observer: LlmUsageObserver | None = None
+) -> EvidenceExtractionModel:
+    """根据 Settings.llm_provider 构造 EvidenceExtractionModel。
+
+    可选 `usage_observer` 注入 eval 层 collector（生产默认 None）。
+    """
     provider = (settings.llm_provider or "").strip().lower()
     if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekEvidenceExtractionModel(settings)
+        return DeepSeekEvidenceExtractionModel(settings, usage_observer=usage_observer)
     raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")
 
 

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.audit.service import ReportAuditService
 from app.core.config import Settings
 from app.draft_section.service import DraftSectionService
+from app.llm.instrumentation import LlmUsageObserver
 from app.report.check_service import ReportCheckService
 from app.report.service import ReportService
 from app.report_outline.service import ReportOutlineService
@@ -52,26 +53,32 @@ class Stage5WorkflowDependencies:
 def create_stage5_dependencies(
     settings: Settings,
     sessionmaker: async_sessionmaker,
+    usage_observer: LlmUsageObserver | None = None,
 ) -> Stage5WorkflowDependencies:
     """生产 factory：Settings → 现有 model factories → Services → deps。
 
     只在 graph 之外构建一次（runner 持有）；node 内不重新初始化 model。
+    可选 `usage_observer` 一路向下传给 draft / audit / revision 三个 adapter。
     """
     from app.audit.adapters import DeepSeekAuditModel
     from app.draft_section.factory import create_draft_section_model
     from app.revision.factory import create_revision_writer_model
 
     outline_service = ReportOutlineService(sessionmaker)
-    draft_section_service = DraftSectionService(sessionmaker, create_draft_section_model(settings))
+    draft_section_service = DraftSectionService(
+        sessionmaker, create_draft_section_model(settings, usage_observer=usage_observer)
+    )
     # report_service 先不带 revision 构造；check→audit→review→revision 链完成后
     # 再绑定（唯一断环点，见模块 docstring）。
     report_service = ReportService(sessionmaker, draft_section_service)
     check_service = ReportCheckService(sessionmaker, report_service)
-    audit_service = ReportAuditService(sessionmaker, DeepSeekAuditModel(settings), check_service)
+    audit_service = ReportAuditService(
+        sessionmaker, DeepSeekAuditModel(settings, usage_observer=usage_observer), check_service
+    )
     review_action_service = ReviewActionService(sessionmaker, audit_service)
     revision_service = RevisionService(
         sessionmaker,
-        model=create_revision_writer_model(settings),
+        model=create_revision_writer_model(settings, usage_observer=usage_observer),
         draft_section_service=draft_section_service,
         check_service=check_service,
         review_action_service=review_action_service,

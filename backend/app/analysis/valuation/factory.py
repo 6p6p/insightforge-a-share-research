@@ -11,11 +11,14 @@ from app.analysis.valuation.model import ValuationAnalysisModel
 from app.core.config import Settings
 from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import UnsupportedLLMProviderError
+from app.llm.instrumentation import LlmUsageObserver
 
 
-def create_valuation_analysis_model(settings: Settings) -> ValuationAnalysisModel:
-    """根据 Settings.llm_provider 构造 ValuationAnalysisModel。"""
+def create_valuation_analysis_model(
+    settings: Settings, usage_observer: LlmUsageObserver | None = None
+) -> ValuationAnalysisModel:
+    """根据 Settings.llm_provider 构造 ValuationAnalysisModel（可选注入 usage_observer）。"""
     provider = (settings.llm_provider or "").strip().lower()
     if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekValuationAnalysisModel(settings)
+        return DeepSeekValuationAnalysisModel(settings, usage_observer=usage_observer)
     raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")

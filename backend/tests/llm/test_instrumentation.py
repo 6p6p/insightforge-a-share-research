@@ -52,6 +52,14 @@ class _Observer:
         self.records.append(record)
 
 
+class _RaisingObserver:
+    def __init__(self, error=None):
+        self._error = error if error is not None else RuntimeError("telemetry broken")
+
+    async def record(self, record):
+        raise self._error
+
+
 def _call(model, *, observer=None, **kwargs):
     return invoke_structured_with_usage(
         model,
@@ -275,3 +283,68 @@ def test_extract_usage_incomplete_returns_none() -> None:
     # 非 int / 负数 token → None。
     assert _extract_usage(_raw(input_tokens="10", output_tokens=5, total_tokens=15)) is None
     assert _extract_usage(_raw(input_tokens=-1, output_tokens=5, total_tokens=15)) is None
+
+
+# ---------------------------------------------------------------- token sum invariant
+
+
+def test_record_reported_accepts_consistent_tokens() -> None:
+    # 100 / 50 / 150 一致 → 合法构造。
+    rec = LlmCallUsageRecord(
+        component_name="x",
+        provider="deepseek",
+        model_id="m",
+        outcome=LlmCallOutcome.SUCCESS,
+        duration_ms=0,
+        usage_status=UsageStatus.REPORTED,
+        input_tokens=100,
+        output_tokens=50,
+        total_tokens=150,
+    )
+    assert rec.input_tokens + rec.output_tokens == rec.total_tokens
+
+
+def test_record_reported_rejects_token_sum_mismatch() -> None:
+    # 100 / 50 / 120 不一致 → 拒绝构造（instrumentation contract corruption）。
+    with pytest.raises(ValueError, match="total_tokens"):
+        LlmCallUsageRecord(
+            component_name="x",
+            provider="deepseek",
+            model_id="m",
+            outcome=LlmCallOutcome.SUCCESS,
+            duration_ms=0,
+            usage_status=UsageStatus.REPORTED,
+            input_tokens=100,
+            output_tokens=50,
+            total_tokens=120,
+        )
+
+
+# ---------------------------------------------------------------- observer failure semantics
+
+
+@pytest.mark.asyncio
+async def test_observer_failure_on_success_propagates() -> None:
+    # 模型成功 + observer 失败 → instrumented eval 允许失败（telemetry 不可信）。
+    raw = _raw(input_tokens=10, output_tokens=5, total_tokens=15)
+    model = _FakeModel(_FakeStructured(result=_success_result(parsed="OK", raw=raw)))
+    with pytest.raises(RuntimeError, match="telemetry broken"):
+        await _call(model, observer=_RaisingObserver())
+
+
+@pytest.mark.asyncio
+async def test_observer_failure_does_not_override_parsing_error() -> None:
+    # 模型 parsing_error + observer 失败 → 原 parsing error 必须是 primary。
+    err = ValueError("bad parse")
+    raw = _raw(input_tokens=10, output_tokens=5, total_tokens=15)
+    model = _FakeModel(_FakeStructured(result={"raw": raw, "parsed": None, "parsing_error": err}))
+    with pytest.raises(ValueError, match="bad parse"):
+        await _call(model, observer=_RaisingObserver())
+
+
+@pytest.mark.asyncio
+async def test_observer_failure_does_not_override_invocation_error() -> None:
+    # 模型 invocation_error + observer 失败 → 原 invocation error 必须是 primary。
+    model = _FakeModel(_FakeStructured(error=RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="boom"):
+        await _call(model, observer=_RaisingObserver())
