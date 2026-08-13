@@ -86,6 +86,8 @@ class MaterializedEvalCase:
 
     - `document_blobs`：content_sha256 → raw bytes（已重新 SHA-256 校验）。
     - `macro_payloads`：snapshot_fingerprint → payload。
+    - `macro_raw_blobs`：content_sha256 → macro 原始响应 raw bytes（已重新
+      SHA-256 校验；与 document blob 共用同一 content-addressed 布局）。
     - `structured_payloads`：(artifact_type, artifact_fingerprint) → payload。
     """
 
@@ -93,4 +95,5 @@ class MaterializedEvalCase:
     snapshot: FrozenSourceSnapshot
     document_blobs: dict[str, bytes]
     macro_payloads: dict[str, dict[str, Any]]
+    macro_raw_blobs: dict[str, bytes]
     structured_payloads: dict[tuple[StructuredArtifactType, str], dict[str, Any]]

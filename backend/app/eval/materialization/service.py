@@ -20,6 +20,7 @@ source payloads，交给 7B.1.1A 的 `EvaluationBundleWriter` 落盘。
 """
 
 import hashlib
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -27,6 +28,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.claims.macro_policy import resolve_availability
 from app.core.errors import RawArtifactNotFound
 from app.db.models.company_alias import CompanyAliasModel
+from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
+from app.db.models.macro_observation import MacroObservationModel
+from app.db.models.macro_series import MacroSeriesModel
+from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
+from app.db.models.raw_artifact import RawArtifactModel
 from app.eval.bundle.writer import EvaluationBundleWriter
 from app.eval.contracts import (
     EvalCase,
@@ -34,7 +40,13 @@ from app.eval.contracts import (
     EvalDatasetManifest,
     FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
+    FrozenMacroArtifactLinkRef,
+    FrozenMacroObservationRef,
+    FrozenMacroRawArtifactRef,
+    FrozenMacroSeriesRef,
+    FrozenMacroSnapshotDetail,
     FrozenMacroSnapshotRef,
+    FrozenMacroTopicRef,
     FrozenSourceProviderRef,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
@@ -67,6 +79,7 @@ from app.repositories.financial_metric_observation_repository import (
 )
 from app.repositories.macro_observation_repository import MacroObservationRepository
 from app.repositories.macro_series_repository import MacroSeriesRepository
+from app.repositories.macro_snapshot_repository import MacroSnapshotRepository
 from app.repositories.raw_artifact_repository import RawArtifactRepository
 from app.repositories.source_provider_repository import SourceProviderRepository
 from app.repositories.source_record_repository import SourceRecordRepository
@@ -100,11 +113,14 @@ class EvaluationSnapshotMaterializer:
             company_identity = await self._materialize_company(session, spec)
             provider_refs = await self._materialize_providers(session)
             document_refs, blob_sources = await self._materialize_documents(session, spec)
-            macro_refs, macro_payloads = await self._materialize_macros(session, spec)
+            macro_refs, macro_payloads, macro_blob_sources = await self._materialize_macros(
+                session, spec
+            )
             structured_refs, structured_payloads = await self._materialize_structured(session, spec)
 
         # 阶段二：DB session 关闭后，重新 SHA-256 校验 raw bytes（防篡改）。
-        document_blobs = self._read_document_blobs(blob_sources)
+        document_blobs = self._read_blobs(blob_sources)
+        macro_raw_blobs = self._read_blobs(macro_blob_sources)
 
         # 阶段三：组装 frozen contracts（duplicate identity 显式拒绝，稳定错误）。
         self._reject_duplicates(document_refs, macro_refs, structured_refs)
@@ -130,6 +146,7 @@ class EvaluationSnapshotMaterializer:
             snapshot=snapshot,
             document_blobs=document_blobs,
             macro_payloads=macro_payloads,
+            macro_raw_blobs=macro_raw_blobs,
             structured_payloads=structured_payloads,
         )
 
@@ -227,9 +244,12 @@ class EvaluationSnapshotMaterializer:
 
     async def _materialize_macros(
         self, session: AsyncSession, spec: EvalCaseMaterializationSpec
-    ) -> tuple[list[FrozenMacroSnapshotRef], dict[str, dict]]:
+    ) -> tuple[list[FrozenMacroSnapshotRef], dict[str, dict], list[tuple[str, str]]]:
         refs: list[FrozenMacroSnapshotRef] = []
         payloads: dict[str, dict] = {}
+        macro_blob_sources: list[tuple[str, str]] = []
+        snapshot_repo = MacroSnapshotRepository(session)
+        raw_repo = RawArtifactRepository(session)
         for snapshot_id in spec.macro_snapshot_ids:
             try:
                 snapshot = await self._macro_service.verify_snapshot_integrity(session, snapshot_id)
@@ -247,6 +267,13 @@ class EvaluationSnapshotMaterializer:
             observations = await MacroObservationRepository(session).list_for_snapshot(
                 snapshot.snapshot_id
             )
+            links = await snapshot_repo.list_artifact_links(snapshot.snapshot_id)
+            raw_rows: dict[UUID, RawArtifactModel] = {}
+            for link in links:
+                artifact = await raw_repo.get_by_id(link.artifact_id)
+                if artifact is None:
+                    raise EvalMaterializationError("macro raw artifact not found")
+                raw_rows[link.artifact_id] = artifact
             payload = build_macro_payload(snapshot, series, observations)
             fingerprint = snapshot.snapshot_fingerprint
             refs.append(
@@ -256,10 +283,105 @@ class EvaluationSnapshotMaterializer:
                     snapshot_fingerprint=fingerprint,
                     payload_sha256=payload_sha256(payload),
                     fetched_at=snapshot.fetched_at,
+                    series=self._project_macro_series(series),
+                    snapshot=self._project_macro_snapshot_detail(snapshot),
+                    observations=tuple(self._project_macro_observation(o) for o in observations),
+                    artifact_links=tuple(self._project_macro_artifact_link(link) for link in links),
+                    raw_artifacts=tuple(
+                        FrozenMacroRawArtifactRef(
+                            artifact_id=raw_rows[link.artifact_id].artifact_id,
+                            content_sha256=raw_rows[link.artifact_id].content_sha256,
+                            media_type=raw_rows[link.artifact_id].media_type,
+                            byte_size=raw_rows[link.artifact_id].byte_size,
+                            role=link.role,
+                        )
+                        for link in links
+                    ),
                 )
             )
             payloads[fingerprint] = payload
-        return refs, payloads
+            for link in links:
+                artifact = raw_rows[link.artifact_id]
+                macro_blob_sources.append((artifact.content_sha256, artifact.storage_key))
+        return refs, payloads, macro_blob_sources
+
+    # ------------------------------------------------------------ macro 投影
+
+    @staticmethod
+    def _project_macro_series(series: MacroSeriesModel) -> FrozenMacroSeriesRef:
+        return FrozenMacroSeriesRef(
+            provider_key=series.provider_key,
+            source_id=series.source_id,
+            external_indicator_id=series.external_indicator_id,
+            geography_type=series.geography_type,
+            geography_code=series.geography_code,
+            frequency=series.frequency,
+        )
+
+    @staticmethod
+    def _project_macro_snapshot_detail(
+        snapshot: MacroDatasetSnapshotModel,
+    ) -> FrozenMacroSnapshotDetail:
+        return FrozenMacroSnapshotDetail(
+            requested_country_code=snapshot.requested_country_code,
+            query_start_year=snapshot.query_start_year,
+            query_end_year=snapshot.query_end_year,
+            source_id_snapshot=snapshot.source_id_snapshot,
+            indicator_name=snapshot.indicator_name,
+            indicator_unit=snapshot.indicator_unit,
+            source_name=snapshot.source_name,
+            source_note=snapshot.source_note,
+            source_organization=snapshot.source_organization,
+            topics_snapshot=tuple(
+                FrozenMacroTopicRef(topic_id=topic["topic_id"], name=topic["name"])
+                for topic in snapshot.topics_snapshot
+            ),
+            provider_country_id=snapshot.provider_country_id,
+            iso2_code=snapshot.iso2_code,
+            iso3_code=snapshot.iso3_code,
+            geography_name=snapshot.geography_name,
+            region_name=snapshot.region_name,
+            income_level_name=snapshot.income_level_name,
+            page=snapshot.page,
+            pages=snapshot.pages,
+            per_page=snapshot.per_page,
+            provider_total=snapshot.provider_total,
+            provider_last_updated=snapshot.provider_last_updated,
+            request_count=snapshot.request_count,
+            acquisition_method=snapshot.acquisition_method,
+            authority_tier_snapshot=snapshot.authority_tier_snapshot,
+            critical_claim_eligible_snapshot=snapshot.critical_claim_eligible_snapshot,
+            provider_capabilities_snapshot=tuple(snapshot.provider_capabilities_snapshot),
+        )
+
+    @staticmethod
+    def _project_macro_observation(
+        observation: MacroObservationModel,
+    ) -> FrozenMacroObservationRef:
+        return FrozenMacroObservationRef(
+            observation_id=observation.observation_id,
+            period=observation.period,
+            normalized_period_start=observation.normalized_period_start,
+            value_numeric=observation.value_numeric,
+            is_missing=observation.is_missing,
+            decimal_scale=observation.decimal_scale,
+            observation_status=observation.observation_status,
+        )
+
+    @staticmethod
+    def _project_macro_artifact_link(
+        link: MacroSnapshotArtifactModel,
+    ) -> FrozenMacroArtifactLinkRef:
+        return FrozenMacroArtifactLinkRef(
+            snapshot_artifact_id=link.snapshot_artifact_id,
+            artifact_id=link.artifact_id,
+            role=link.role,
+            page=link.page,
+            response_status=link.response_status,
+            final_hostname=link.final_hostname,
+            content_type=link.content_type,
+            fetched_at=link.fetched_at,
+        )
 
     # ------------------------------------------------------------ structured 路
 
@@ -385,18 +507,19 @@ class EvaluationSnapshotMaterializer:
 
     # ------------------------------------------------------------ 字节校验
 
-    def _read_document_blobs(self, blob_sources: list[tuple[str, str]]) -> dict[str, bytes]:
+    def _read_blobs(self, blob_sources: list[tuple[str, str]]) -> dict[str, bytes]:
+        """content_sha256 → raw bytes（content-addressed 去重；重新 SHA-256 防篡改）。"""
         blobs: dict[str, bytes] = {}
         for content_sha256, storage_key in blob_sources:
+            if content_sha256 in blobs:
+                continue
             try:
                 with self._raw_store.open(storage_key) as handle:
                     content = handle.read()
             except (RawArtifactNotFound, OSError) as exc:
-                raise EvalMaterializationError("document raw bytes unreadable") from exc
+                raise EvalMaterializationError("raw bytes unreadable") from exc
             if hashlib.sha256(content).hexdigest() != content_sha256:
-                raise EvalMaterializationError(
-                    "document raw bytes tampered (content_sha256 mismatch)"
-                )
+                raise EvalMaterializationError("raw bytes tampered (content_sha256 mismatch)")
             blobs[content_sha256] = content
         return blobs
 
@@ -438,6 +561,10 @@ class EvaluationSnapshotMaterializer:
             )
         for ref in materialized.snapshot.macro_snapshots:
             writer.write_macro_payload(ref, materialized.macro_payloads[ref.snapshot_fingerprint])
+            for raw_ref in ref.raw_artifacts:
+                writer.write_document_blob(
+                    raw_ref.content_sha256, materialized.macro_raw_blobs[raw_ref.content_sha256]
+                )
         for ref in materialized.snapshot.structured_artifacts:
             writer.write_structured_payload(
                 ref,

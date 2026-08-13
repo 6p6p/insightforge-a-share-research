@@ -80,6 +80,18 @@ def verify_bundle_integrity(root: str | Path) -> VerifiedEvaluationBundle:
             if payload.get("snapshot_fingerprint") != macro.snapshot_fingerprint:
                 raise EvalContractError("macro payload envelope snapshot_fingerprint 不匹配")
 
+        # 11b. macro raw artifact blob：bytes SHA == content_sha256 + byte_size 精确
+        #      （media_type 契约已由 FrozenMacroRawArtifactRef._v_media_type 在解析
+        #      时强制为 application/json；role 与 artifact_links 的 1:1 由
+        #      FrozenMacroSnapshotRef 跨字段 validator 保证，这里不再重复）。
+        for macro in snapshot.macro_snapshots:
+            for raw_ref in macro.raw_artifacts:
+                blob = loader.read_document_blob(raw_ref.content_sha256)
+                if hashlib.sha256(blob).hexdigest() != raw_ref.content_sha256:
+                    raise EvalContractError("macro raw artifact blob content_sha256 不匹配")
+                if len(blob) != raw_ref.byte_size:
+                    raise EvalContractError("macro raw artifact blob byte_size 不匹配")
+
         # 12. structured payload：file bytes SHA == payload_sha256 + envelope 闭合。
         for art in snapshot.structured_artifacts:
             raw = loader.read_structured_payload_bytes(art.artifact_type, art.artifact_fingerprint)

@@ -123,6 +123,16 @@ class MacroSnapshotRepository:
         await self._session.flush()
         return link
 
+    async def get_artifact_link_by_id(
+        self, snapshot_artifact_id: UUID
+    ) -> MacroSnapshotArtifactModel | None:
+        result = await self._session.execute(
+            select(MacroSnapshotArtifactModel).where(
+                MacroSnapshotArtifactModel.snapshot_artifact_id == snapshot_artifact_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_artifact_links(self, snapshot_id: UUID) -> list[MacroSnapshotArtifactModel]:
         # 稳定排序：role 升序 + page 升序（元数据 role page=NULL 用 NULLS FIRST）。
         result = await self._session.execute(
