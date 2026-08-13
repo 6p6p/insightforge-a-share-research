@@ -10,8 +10,8 @@ source payloads，交给 7B.1.1A 的 `EvaluationBundleWriter` 落盘。
 - 校验边界：
   - document：company 归属 + no-lookahead（复用 `resolve_availability`，
     绝不用 reporting_period_end）+ raw bytes 重新 SHA-256（防篡改）；
-  - macro：`MacroPersistenceService.verify_snapshot_integrity`（结构化校验，不
-    重算 fingerprint）+ no-lookahead（fetched_at <= analysis_as_of）；
+  - macro：`MacroPersistenceService.verify_snapshot_integrity`（结构不变量 +
+    fingerprint 重算防篡改）+ no-lookahead（fetched_at <= analysis_as_of）；
   - financial / valuation observation：重算 fingerprint 并比对 persisted 列
     （防篡改）+ company 归属；
   - valuation comparison：`RelativeValuationComparisonService.
@@ -88,16 +88,12 @@ class EvaluationSnapshotMaterializer:
         self._macro_service = MacroPersistenceService(sessionmaker, raw_store)
         self._comparison_service = RelativeValuationComparisonService(sessionmaker)
 
-    async def materialize_case(
-        self, spec: EvalCaseMaterializationSpec
-    ) -> MaterializedEvalCase:
+    async def materialize_case(self, spec: EvalCaseMaterializationSpec) -> MaterializedEvalCase:
         # 阶段一：单 DB session 内加载 + 校验 + 投影 payload（不碰文件）。
         async with self._sessionmaker() as session:
             document_refs, blob_sources = await self._materialize_documents(session, spec)
             macro_refs, macro_payloads = await self._materialize_macros(session, spec)
-            structured_refs, structured_payloads = await self._materialize_structured(
-                session, spec
-            )
+            structured_refs, structured_payloads = await self._materialize_structured(session, spec)
 
         # 阶段二：DB session 关闭后，重新 SHA-256 校验 raw bytes（防篡改）。
         document_blobs = self._read_document_blobs(blob_sources)
@@ -181,9 +177,7 @@ class EvaluationSnapshotMaterializer:
         payloads: dict[str, dict] = {}
         for snapshot_id in spec.macro_snapshot_ids:
             try:
-                snapshot = await self._macro_service.verify_snapshot_integrity(
-                    session, snapshot_id
-                )
+                snapshot = await self._macro_service.verify_snapshot_integrity(session, snapshot_id)
             except MacroSnapshotIntegrityError as exc:
                 raise EvalMaterializationError(
                     "macro snapshot integrity verification failed"
@@ -191,9 +185,7 @@ class EvaluationSnapshotMaterializer:
             if snapshot is None:
                 raise EvalMaterializationError("macro snapshot not found")
             if snapshot.fetched_at.date() > spec.analysis_as_of.date():
-                raise EvalMaterializationError(
-                    "macro snapshot is future evidence (no-lookahead)"
-                )
+                raise EvalMaterializationError("macro snapshot is future evidence (no-lookahead)")
             series = await MacroSeriesRepository(session).get_by_id(snapshot.series_id)
             if series is None:
                 raise EvalMaterializationError("macro series not found")
@@ -299,9 +291,7 @@ class EvaluationSnapshotMaterializer:
             metric_value=metric_value,
         )
         if fingerprint != row.valuation_observation_fingerprint:
-            raise EvalMaterializationError(
-                "valuation observation fingerprint mismatch (tampered)"
-            )
+            raise EvalMaterializationError("valuation observation fingerprint mismatch (tampered)")
         payload = build_valuation_observation_payload(row, fingerprint)
         ref = FrozenStructuredArtifactRef(
             artifact_type=StructuredArtifactType.RELATIVE_VALUATION_OBSERVATION,
@@ -371,9 +361,7 @@ class EvaluationSnapshotMaterializer:
         seen_macro: set[str] = set()
         for ref in macro_refs:
             if ref.snapshot_fingerprint in seen_macro:
-                raise EvalMaterializationError(
-                    "duplicate macro snapshot_fingerprint in selection"
-                )
+                raise EvalMaterializationError("duplicate macro snapshot_fingerprint in selection")
             seen_macro.add(ref.snapshot_fingerprint)
         seen_art: set[tuple[StructuredArtifactType, str]] = set()
         for ref in structured_refs:

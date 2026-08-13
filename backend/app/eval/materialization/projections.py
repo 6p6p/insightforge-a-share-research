@@ -47,8 +47,9 @@ def build_macro_payload(
 ) -> dict[str, Any]:
     """投影 frozen macro payload（envelope 含 `snapshot_fingerprint`）。
 
-    不重算 snapshot fingerprint（其算法依赖未持久化字段），只冻结已持久化的
-    结构化事实；`snapshot_fingerprint` 作为 content identity 由 persisted 行提供。
+    本模块只做 payload 投影，不重算 snapshot fingerprint（重算由
+    `MacroPersistenceService.verify_snapshot_integrity` 完成）；`snapshot_fingerprint`
+    作为 content identity 由 persisted 行提供。
     """
     return {
         "schema_version": PAYLOAD_SCHEMA_VERSION,

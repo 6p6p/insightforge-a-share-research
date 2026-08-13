@@ -561,3 +561,58 @@ async def test_replay_integrity_error_on_deleted_artifact_link(env, monkeypatch)
     with pytest.raises(MacroSnapshotIntegrityError) as exc:
         await service.persist_captured_fetch(captured)
     assert exc.value.code == "macro_snapshot_integrity_error"
+
+
+# ------------------------------------------- verify_snapshot_integrity 重算（7B.1.1B Part D）
+
+
+async def test_verify_snapshot_integrity_recomputes_fingerprint(env, monkeypatch) -> None:
+    """合法快照：verify_snapshot_integrity 重算 fingerprint 一致，返回 snapshot。"""
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+    result = await service.persist_captured_fetch(captured)
+
+    async with env["sessionmaker"]() as session:
+        snapshot = await service.verify_snapshot_integrity(session, result.snapshot_id)
+
+    assert snapshot is not None
+    assert snapshot.snapshot_id == result.snapshot_id
+
+
+async def test_verify_snapshot_integrity_rejects_tampered_observation_value(
+    env, monkeypatch
+) -> None:
+    """篡改观测值（保留旧 fingerprint）→ 重算 fingerprint 不一致 → 拒绝。"""
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+    result = await service.persist_captured_fetch(captured)
+
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text("UPDATE macro_observations SET value_numeric = 999 WHERE period = '2024'")
+        )
+        await session.commit()
+
+    async with env["sessionmaker"]() as session:
+        with pytest.raises(MacroSnapshotIntegrityError, match="fingerprint mismatch"):
+            await service.verify_snapshot_integrity(session, result.snapshot_id)
+
+
+async def test_verify_snapshot_integrity_rejects_tampered_fingerprint(env, monkeypatch) -> None:
+    """只篡改 snapshot_fingerprint（内容不变）→ 重算值 != persisted → 拒绝。"""
+    captured = await _fetch_captured(env, monkeypatch)
+    service = _service(env)
+    result = await service.persist_captured_fetch(captured)
+
+    async with env["sessionmaker"]() as session:
+        await session.execute(
+            text(
+                "UPDATE macro_dataset_snapshots SET snapshot_fingerprint = :fp "
+                "WHERE snapshot_id = :sid"
+            ).bindparams(fp="0" * 64, sid=result.snapshot_id)
+        )
+        await session.commit()
+
+    async with env["sessionmaker"]() as session:
+        with pytest.raises(MacroSnapshotIntegrityError, match="fingerprint mismatch"):
+            await service.verify_snapshot_integrity(session, result.snapshot_id)

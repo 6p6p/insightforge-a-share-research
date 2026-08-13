@@ -404,8 +404,9 @@ async def test_future_macro_rejected(env, monkeypatch) -> None:
     macro = await _seed_macro_chain(env, monkeypatch)
     async with env["sessionmaker"]() as session:
         await session.execute(
-            text("UPDATE macro_dataset_snapshots SET fetched_at = :at WHERE snapshot_id = :sid")
-            .bindparams(at=datetime(2026, 8, 11, 9, 30, tzinfo=UTC), sid=macro["snapshot_id"])
+            text(
+                "UPDATE macro_dataset_snapshots SET fetched_at = :at WHERE snapshot_id = :sid"
+            ).bindparams(at=datetime(2026, 8, 11, 9, 30, tzinfo=UTC), sid=macro["snapshot_id"])
         )
         await session.commit()
     spec = _spec(env, macro_snapshot_ids=(macro["snapshot_id"],))
@@ -435,9 +436,7 @@ async def test_duplicate_content_hash_rejected(env) -> None:
 async def test_unknown_structured_artifact_rejected(env) -> None:
     spec = _spec(
         env,
-        structured_artifacts=(
-            _sel(StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION, uuid4()),
-        ),
+        structured_artifacts=(_sel(StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION, uuid4()),),
     )
     with pytest.raises(EvalMaterializationError, match="not found"):
         await _materializer(env).materialize_case(spec)

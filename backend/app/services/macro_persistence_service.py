@@ -57,6 +57,7 @@ from app.macro.fingerprint import (
     FingerprintArtifact,
     build_macro_snapshot_fingerprint,
 )
+from app.macro.snapshot_rebuild import rebuild_macro_snapshot_fingerprint
 from app.macro.world_bank.provider import WorldBankProvider
 from app.repositories.macro_observation_repository import MacroObservationRepository
 from app.repositories.macro_series_repository import MacroSeriesRepository
@@ -236,17 +237,14 @@ class MacroPersistenceService:
     async def verify_snapshot_integrity(
         self, session: AsyncSession, snapshot_id: UUID
     ) -> MacroDatasetSnapshotModel | None:
-        """公开的结构化完整性校验（不重算 fingerprint，供 Eval materializer 等复用）。
+        """公开的完整性校验（结构不变量 + fingerprint 重算，供 Eval materializer 复用）。
 
-        只校验 persisted 结构不变量：snapshot 存在 / status=available /
+        先校验 persisted 结构不变量：snapshot 存在 / status=available /
         fingerprint_version / normalization_version / series 存在 / 至少 1 条
-        artifact link / 至少 1 条 observation。发现损坏只抛
+        artifact link / 至少 1 条 observation。再从 persisted 行重建 domain
+        结果 + 归档 artifact 描述符，重算 snapshot fingerprint 并与 persisted
+        `snapshot_fingerprint` 比对（防篡改）。发现损坏只抛
         MacroSnapshotIntegrityError，不自动修复；snapshot 不存在返回 None。
-
-        不重算 snapshot fingerprint：其算法依赖归档 artifact 内容 SHA + 领域
-        结果，其中部分字段（source_id / geography 等）未持久化到 snapshot 行，
-        无法从 DB 重建。frozen materializer 只做结构校验，并信任 persisted
-        `snapshot_fingerprint` 作为 content identity。
         """
         snapshot_repo = MacroSnapshotRepository(session)
         snapshot = await snapshot_repo.get_by_id(snapshot_id)
@@ -258,12 +256,35 @@ class MacroPersistenceService:
             raise MacroSnapshotIntegrityError("snapshot fingerprint version mismatch")
         if snapshot.normalization_version != WORLD_BANK_NORMALIZATION_VERSION:
             raise MacroSnapshotIntegrityError("snapshot normalization version mismatch")
-        if await MacroSeriesRepository(session).get_by_id(snapshot.series_id) is None:
+        series = await MacroSeriesRepository(session).get_by_id(snapshot.series_id)
+        if series is None:
             raise MacroSnapshotIntegrityError("snapshot series missing")
-        if await snapshot_repo.count_artifact_links(snapshot.snapshot_id) < 1:
+        links = await snapshot_repo.list_artifact_links(snapshot.snapshot_id)
+        if not links:
             raise MacroSnapshotIntegrityError("snapshot artifact link count < 1")
-        if await MacroObservationRepository(session).count_for_snapshot(snapshot.snapshot_id) < 1:
+        observations = await MacroObservationRepository(session).list_for_snapshot(
+            snapshot.snapshot_id
+        )
+        if not observations:
             raise MacroSnapshotIntegrityError("snapshot observation count < 1")
+        # 归档 artifact 内容 SHA：raw_responses[].sha256 来自 RawArtifact 行。
+        raw_repo = RawArtifactRepository(session)
+        raw_artifacts: dict[UUID, RawArtifactModel] = {}
+        for link in links:
+            artifact = await raw_repo.get_by_id(link.artifact_id)
+            if artifact is None:
+                raise MacroSnapshotIntegrityError("snapshot artifact row missing")
+            raw_artifacts[link.artifact_id] = artifact
+        try:
+            recomputed = rebuild_macro_snapshot_fingerprint(
+                snapshot, series, observations, links, raw_artifacts
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise MacroSnapshotIntegrityError(
+                "snapshot fingerprint not rebuildable (corrupt)"
+            ) from exc
+        if recomputed != snapshot.snapshot_fingerprint:
+            raise MacroSnapshotIntegrityError("snapshot fingerprint mismatch (tampered)")
         return snapshot
 
     # ------------------------------------------------------------------ 内部
