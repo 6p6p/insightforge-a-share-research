@@ -30,6 +30,16 @@ class EvalVariantError(EvalError):
     code = "eval_variant_error"
 
 
+class EvalSingleRagInputError(EvalVariantError):
+    """single_rag variant 收到不支持的输入。
+
+    v1 只支持 document-only（>=1 document source；macro_snapshots 与
+    structured_artifacts 必须为空）。macro/structured 非空 → 稳定 fail-fast。
+    """
+
+    code = "single_rag_input_not_supported"
+
+
 class EvalMaterializationError(EvalError):
     """Snapshot materialization 失败（缺失 / 跨公司 / 未来证据 / 字节篡改 /
     领域 verifier 校验失败等）。"""

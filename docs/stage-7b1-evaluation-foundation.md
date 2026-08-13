@@ -6,7 +6,8 @@
 > **7B.1.2C Execution Runtime = FINAL**；**7B.1.3A Evaluation Execution Persistence
 > = FINAL**；**7B.1.4A Frozen Runtime Replayability Gate = FINAL**；
 > **7B.1.4B.1 Isolated Runtime Rehydration Foundation = FINAL**；
-> **7B.1.4B.2 Macro Isolated Rehydration = FINAL**。
+> **7B.1.4B.2 Macro Isolated Rehydration = FINAL**；
+> **7B.1.4C.1 Single RAG Variant Runner = FINAL**。
 > 实现按 slice 逐块交付，每块小而完整。
 > 范围：三路系统评估（single_rag / multi_stage_no_audit / insightforge_full）的
 > 数据集契约、frozen snapshot、typed human label、variant 契约、确定性指标、
@@ -647,6 +648,12 @@ replay_v1 脚手架保留（provider 行的 authority_tier 仍按 policy 写中�
   保留 frozen UUID、不重抓 WorldBank，同事务 `verify_snapshot_integrity` 重算 domain
   fingerprint == frozen；3 macro integration tests；财务/估值结构化 replay 仍 deferred
   （source_evidence_card_id 是运行期派生 identity，见 §3.17 R2））。
+- **7B.1.4C.1 ✅ FINAL**：Single RAG Variant Runner（`app/eval/variants/single_rag/`；
+  document-only baseline：一次语义检索 + 一次 LLM 生成 → `EvalVariantOutput`；
+  macro/structured 输入 → 稳定 fail-fast（`single_rag_input_not_supported`）；
+  per-(config, case) Chroma collection；production adapter 经
+  `invoke_structured_with_usage` 上报 usage（component = `eval_single_rag_answer`，
+  **不**在 10-component production registry）；11 unit + 1 integration E2E tests）。
 - **7B.1.3B**：MetricValue / ScoringSpec / HumanLabel / Judge 持久化（本轮**未**开始）。
 - **7B.1.4**：真实/dev runner（dev/test Noop runner 用独立 identity，**不加**
   `EvalVariantId.NOOP`）+ 三路 real variant runner。

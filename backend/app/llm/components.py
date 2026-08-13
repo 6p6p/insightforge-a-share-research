@@ -24,6 +24,13 @@ COMPONENT_AUDIT = "audit"
 COMPONENT_REVISION_WRITER = "revision_writer"
 COMPONENT_RESEARCH_PLANNER = "research_planner"
 
+# eval-only component：single_rag variant 的一次 RAG 回答生成。**不**加入
+# `INSTRUMENTED_LLM_COMPONENTS`（那是 10-component production pipeline registry，
+# 被 `tests/llm/test_component_inventory.py` 冻结校验）。eval 侧经
+# `invoke_structured_with_usage` 上报 usage 时用它作为 component_name，使
+# usage 可归因，但**不计入** production adapter 审计集合。
+COMPONENT_EVAL_SINGLE_RAG_ANSWER = "eval_single_rag_answer"
+
 # 顺序稳定：与 audit 的顺序一致（evidence → claim → ... → planner）。
 INSTRUMENTED_LLM_COMPONENTS: tuple[str, ...] = (
     COMPONENT_EVIDENCE_EXTRACTION,
