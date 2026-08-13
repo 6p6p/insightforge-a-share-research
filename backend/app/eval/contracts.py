@@ -56,6 +56,8 @@ _MAX_SLUG_LENGTH = 128
 _MAX_QUESTION_LENGTH = 4000
 _MAX_SECURITY_CODE_LENGTH = 32
 _MAX_TAG_LENGTH = 64
+_MAX_COMPONENT_NAME_LENGTH = 128
+_MAX_COMPONENT_VERSION_LENGTH = 64
 
 
 def _is_sha256_hex(value: str) -> bool:
@@ -172,22 +174,25 @@ class FrozenSourceSnapshot(BaseModel):
 
     @model_validator(mode="after")
     def _reject_duplicate_identity(self) -> "FrozenSourceSnapshot":
+        # duplicate semantic identity：UUID 只做 provenance pointer，不决定
+        # 「是否同一 frozen input」。document 用 content_sha256，macro 用
+        # snapshot_fingerprint，structured 用 (artifact_type, artifact_fingerprint)。
         seen_doc: set[str] = set()
         for ref in self.document_sources:
             if ref.content_sha256 in seen_doc:
                 raise ValueError("duplicate document source identity (content_sha256)")
             seen_doc.add(ref.content_sha256)
-        seen_macro: set[UUID] = set()
+        seen_macro: set[str] = set()
         for ref in self.macro_snapshots:
-            if ref.snapshot_id in seen_macro:
-                raise ValueError("duplicate macro snapshot identity (snapshot_id)")
-            seen_macro.add(ref.snapshot_id)
-        seen_art: set[tuple[StructuredArtifactType, UUID]] = set()
+            if ref.snapshot_fingerprint in seen_macro:
+                raise ValueError("duplicate macro snapshot identity (snapshot_fingerprint)")
+            seen_macro.add(ref.snapshot_fingerprint)
+        seen_art: set[tuple[StructuredArtifactType, str]] = set()
         for ref in self.structured_artifacts:
-            key = (ref.artifact_type, ref.artifact_id)
+            key = (ref.artifact_type, ref.artifact_fingerprint)
             if key in seen_art:
                 raise ValueError(
-                    "duplicate structured artifact identity (artifact_type, artifact_id)"
+                    "duplicate structured artifact identity (artifact_type, artifact_fingerprint)"
                 )
             seen_art.add(key)
         return self
@@ -453,8 +458,32 @@ class FrozenModelConfig(BaseModel):
         return v
 
 
+class EvalComponentVersion(BaseModel):
+    """单个 pipeline component 的冻结版本（`component_name` → `component_version`）。
+
+    用于精确冻结 Full pipeline 多个 component 的真实版本（如 evidence_extractor:v2、
+    audit:v1），弥补仅有 variant_version/prompt_version/retrieval_version/
+    pipeline_version 的粒度不足。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    component_name: str
+    component_version: str
+
+    @field_validator("component_name")
+    @classmethod
+    def _v_name(cls, v: str) -> str:
+        return _strip(v, field="component_name", max_len=_MAX_COMPONENT_NAME_LENGTH)
+
+    @field_validator("component_version")
+    @classmethod
+    def _v_version(cls, v: str) -> str:
+        return _strip(v, field="component_version", max_len=_MAX_COMPONENT_VERSION_LENGTH)
+
+
 class EvalExecutionConfig(BaseModel):
-    """variant 执行配置（bounded deterministic settings + frozen model）。"""
+    """variant 执行配置（bounded deterministic settings + frozen model + component versions）。"""
 
     model_config = ConfigDict(frozen=True)
 
@@ -466,6 +495,7 @@ class EvalExecutionConfig(BaseModel):
     retrieval_version: str
     pipeline_version: str
     retrieval_top_k: int | None = None
+    component_versions: tuple[EvalComponentVersion, ...] = ()
 
     @field_validator("variant_version", "prompt_version", "retrieval_version", "pipeline_version")
     @classmethod
@@ -478,6 +508,20 @@ class EvalExecutionConfig(BaseModel):
         if v is not None and v < 1:
             raise ValueError("retrieval_top_k 必须 >= 1")
         return v
+
+    @field_validator("component_versions")
+    @classmethod
+    def _v_component_versions(
+        cls, v: tuple[EvalComponentVersion, ...]
+    ) -> tuple[EvalComponentVersion, ...]:
+        # component_name 唯一 + canonical 排序为 sorted tuple（让 tuple 输入顺序
+        # 不影响指纹；fingerprint 层仍再 canonical sort 一次以防御）。
+        seen: set[str] = set()
+        for cv in v:
+            if cv.component_name in seen:
+                raise ValueError(f"duplicate component_name: {cv.component_name}")
+            seen.add(cv.component_name)
+        return tuple(sorted(v, key=lambda c: c.component_name))
 
 
 # ---------------------------------------------------------------- execution / scoring spec

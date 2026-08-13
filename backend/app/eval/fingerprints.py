@@ -17,10 +17,10 @@
 """
 
 import hashlib
-import json
 from datetime import date, datetime
 from decimal import Decimal
 
+from app.eval.canonical import canonical_json_str
 from app.eval.contracts import (
     EvalCase,
     EvalDatasetManifest,
@@ -31,10 +31,6 @@ from app.eval.contracts import (
     FrozenSourceSnapshot,
     HumanLabel,
 )
-
-
-def _canonical_dumps(payload: object) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _sha256_hex(canonical: str) -> str:
@@ -64,7 +60,7 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
             }
             for ref in snapshot.document_sources
         ],
-        key=_canonical_dumps,
+        key=canonical_json_str,
     )
     macro_snapshots = sorted(
         [
@@ -74,7 +70,7 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
             }
             for ref in snapshot.macro_snapshots
         ],
-        key=_canonical_dumps,
+        key=canonical_json_str,
     )
     structured_artifacts = sorted(
         [
@@ -84,7 +80,7 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
             }
             for ref in snapshot.structured_artifacts
         ],
-        key=_canonical_dumps,
+        key=canonical_json_str,
     )
     payload = {
         "snapshot_schema_version": snapshot.snapshot_schema_version,
@@ -92,7 +88,7 @@ def compute_source_snapshot_fingerprint(snapshot: FrozenSourceSnapshot) -> str:
         "macro_snapshots": macro_snapshots,
         "structured_artifacts": structured_artifacts,
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_eval_case_fingerprint(case: EvalCase) -> str:
@@ -108,7 +104,7 @@ def compute_eval_case_fingerprint(case: EvalCase) -> str:
         "tags": sorted(case.tags),
         "source_snapshot_fingerprint": case.source_snapshot_fingerprint,
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_dataset_fingerprint(manifest: EvalDatasetManifest) -> str:
@@ -130,7 +126,7 @@ def compute_dataset_fingerprint(manifest: EvalDatasetManifest) -> str:
         "dataset_version": manifest.dataset_version,
         "cases": cases,
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_human_label_fingerprint(label: HumanLabel) -> str:
@@ -153,7 +149,7 @@ def compute_human_label_fingerprint(label: HumanLabel) -> str:
                 }
                 for f in label.financial_facts
             ],
-            key=_canonical_dumps,
+            key=canonical_json_str,
         ),
         "risk_topics": sorted(
             [
@@ -164,7 +160,7 @@ def compute_human_label_fingerprint(label: HumanLabel) -> str:
                 }
                 for r in label.risk_topics
             ],
-            key=_canonical_dumps,
+            key=canonical_json_str,
         ),
         "claim_support_labels": sorted(
             [
@@ -175,7 +171,7 @@ def compute_human_label_fingerprint(label: HumanLabel) -> str:
                 }
                 for c in label.claim_support_labels
             ],
-            key=_canonical_dumps,
+            key=canonical_json_str,
         ),
         "macro_causal_labels": sorted(
             [
@@ -186,10 +182,10 @@ def compute_human_label_fingerprint(label: HumanLabel) -> str:
                 }
                 for m in label.macro_causal_labels
             ],
-            key=_canonical_dumps,
+            key=canonical_json_str,
         ),
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_execution_config_fingerprint(config: EvalExecutionConfig) -> str:
@@ -209,8 +205,18 @@ def compute_execution_config_fingerprint(config: EvalExecutionConfig) -> str:
         "retrieval_version": config.retrieval_version,
         "pipeline_version": config.pipeline_version,
         "retrieval_top_k": config.retrieval_top_k,
+        "component_versions": sorted(
+            [
+                {
+                    "component_name": c.component_name,
+                    "component_version": c.component_version,
+                }
+                for c in config.component_versions
+            ],
+            key=lambda d: d["component_name"],
+        ),
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_execution_spec_fingerprint(spec: EvalExecutionSpec) -> str:
@@ -221,7 +227,7 @@ def compute_execution_spec_fingerprint(spec: EvalExecutionSpec) -> str:
         "execution_config_fingerprint": spec.execution_config_fingerprint,
         "variant_id": spec.variant_id.value,
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_scoring_spec_fingerprint(spec: EvalScoringSpec) -> str:
@@ -232,7 +238,7 @@ def compute_scoring_spec_fingerprint(spec: EvalScoringSpec) -> str:
         "metric_registry_version": spec.metric_registry_version,
         "judge_config_fingerprint": spec.judge_config_fingerprint,
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))
 
 
 def compute_variant_output_fingerprint(output: EvalVariantOutput) -> str:
@@ -246,7 +252,7 @@ def compute_variant_output_fingerprint(output: EvalVariantOutput) -> str:
             }
             for c in output.claims
         ],
-        key=_canonical_dumps,
+        key=canonical_json_str,
     )
     citations = sorted(
         [
@@ -258,7 +264,7 @@ def compute_variant_output_fingerprint(output: EvalVariantOutput) -> str:
             }
             for c in output.citations
         ],
-        key=_canonical_dumps,
+        key=canonical_json_str,
     )
     payload = {
         "schema_version": output.schema_version,
@@ -270,4 +276,4 @@ def compute_variant_output_fingerprint(output: EvalVariantOutput) -> str:
         "citations": citations,
         "report_artifact_ref": output.report_artifact_ref,
     }
-    return _sha256_hex(_canonical_dumps(payload))
+    return _sha256_hex(canonical_json_str(payload))

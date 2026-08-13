@@ -4,8 +4,10 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
+from app.eval.canonical import canonical_json_str
 from app.eval.contracts import (
     EvalCase,
+    EvalComponentVersion,
     EvalDatasetCaseRef,
     EvalDatasetManifest,
     EvalExecutionConfig,
@@ -19,7 +21,6 @@ from app.eval.contracts import (
     HumanLabel,
 )
 from app.eval.fingerprints import (
-    _canonical_dumps,
     compute_dataset_fingerprint,
     compute_eval_case_fingerprint,
     compute_execution_config_fingerprint,
@@ -78,7 +79,7 @@ def _execution_config() -> EvalExecutionConfig:
 
 
 def test_dict_key_order_independent() -> None:
-    assert _canonical_dumps({"a": 1, "b": 2}) == _canonical_dumps({"b": 2, "a": 1})
+    assert canonical_json_str({"a": 1, "b": 2}) == canonical_json_str({"b": 2, "a": 1})
 
 
 def test_dataset_fingerprint_deterministic() -> None:
@@ -226,3 +227,43 @@ def test_variant_output_fingerprint_sensitive() -> None:
     )
     assert compute_variant_output_fingerprint(o1) == compute_variant_output_fingerprint(o1)
     assert compute_variant_output_fingerprint(o1) != compute_variant_output_fingerprint(o2)
+
+
+def _config_with_components(*components: EvalComponentVersion) -> EvalExecutionConfig:
+    return EvalExecutionConfig(
+        variant_id=EvalVariantId.INSIGHTFORGE_FULL,
+        model=FrozenModelConfig(
+            provider="deepseek",
+            model_id="deepseek-v4-flash",
+            thinking_enabled=False,
+            temperature=Decimal("0"),
+            structured_output=True,
+        ),
+        variant_version="1",
+        prompt_version="1",
+        retrieval_version="1",
+        pipeline_version="1",
+        component_versions=components,
+    )
+
+
+def test_execution_config_fingerprint_includes_component_version() -> None:
+    c1 = _config_with_components(
+        EvalComponentVersion(component_name="audit", component_version="v1")
+    )
+    c2 = _config_with_components(
+        EvalComponentVersion(component_name="audit", component_version="v2")
+    )
+    assert compute_execution_config_fingerprint(c1) != compute_execution_config_fingerprint(c2)
+
+
+def test_execution_config_fingerprint_component_order_independent() -> None:
+    c1 = _config_with_components(
+        EvalComponentVersion(component_name="audit", component_version="v1"),
+        EvalComponentVersion(component_name="evidence_extractor", component_version="v2"),
+    )
+    c2 = _config_with_components(
+        EvalComponentVersion(component_name="evidence_extractor", component_version="v2"),
+        EvalComponentVersion(component_name="audit", component_version="v1"),
+    )
+    assert compute_execution_config_fingerprint(c1) == compute_execution_config_fingerprint(c2)

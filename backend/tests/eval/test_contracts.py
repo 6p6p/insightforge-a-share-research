@@ -11,12 +11,15 @@ from app.eval.contracts import (
     ClaimSupportLabel,
     ClaimSupportStatus,
     EvalCase,
+    EvalComponentVersion,
     EvalDatasetCaseRef,
     EvalDatasetManifest,
+    EvalExecutionConfig,
     EvalExecutionSpec,
     FinancialFactLabel,
     FrozenDocumentSourceRef,
     FrozenMacroSnapshotRef,
+    FrozenModelConfig,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
     HumanLabel,
@@ -24,6 +27,7 @@ from app.eval.contracts import (
     RiskTopicLabel,
     StructuredArtifactType,
 )
+from app.eval.errors import EvalContractError, EvalError, EvalFingerprintError, EvalVariantError
 from app.eval.variants import EvalVariantId
 
 
@@ -266,3 +270,113 @@ def test_execution_spec_excludes_label_fields() -> None:
     assert "metric_registry_version" not in fields
     assert "judge_config_fingerprint" not in fields
     assert spec.variant_id == EvalVariantId.INSIGHTFORGE_FULL
+
+
+def _macro_ref(fp: str) -> FrozenMacroSnapshotRef:
+    return FrozenMacroSnapshotRef(
+        snapshot_id=uuid4(),
+        series_id=uuid4(),
+        snapshot_fingerprint=fp,
+        fetched_at=datetime(2026, 8, 1, 12, 0, 0),
+    )
+
+
+def test_macro_duplicate_fingerprint_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FrozenSourceSnapshot(macro_snapshots=(_macro_ref(_sha("a")), _macro_ref(_sha("a"))))
+
+
+def test_structured_duplicate_fingerprint_rejected() -> None:
+    fp = _sha("b")
+    ref1 = FrozenStructuredArtifactRef(
+        artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
+        artifact_id=uuid4(),
+        artifact_fingerprint=fp,
+    )
+    ref2 = FrozenStructuredArtifactRef(
+        artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
+        artifact_id=uuid4(),
+        artifact_fingerprint=fp,
+    )
+    with pytest.raises(ValidationError):
+        FrozenSourceSnapshot(structured_artifacts=(ref1, ref2))
+
+
+def test_document_duplicate_hash_different_uuid_provider_rejected() -> None:
+    sha = _sha("d")
+    ref1 = FrozenDocumentSourceRef(
+        source_record_id=uuid4(),
+        raw_artifact_id=uuid4(),
+        content_sha256=sha,
+        provider_key="cninfo",
+        document_type="annual_report",
+        media_type="application/pdf",
+    )
+    ref2 = FrozenDocumentSourceRef(
+        source_record_id=uuid4(),
+        raw_artifact_id=uuid4(),
+        content_sha256=sha,
+        provider_key="sse",
+        document_type="annual_report",
+        media_type="application/pdf",
+    )
+    with pytest.raises(ValidationError):
+        FrozenSourceSnapshot(document_sources=(ref1, ref2))
+
+
+def test_distinct_semantic_identity_allowed() -> None:
+    snapshot = FrozenSourceSnapshot(
+        document_sources=(_doc_ref("a"), _doc_ref("b")),
+        macro_snapshots=(_macro_ref(_sha("c")), _macro_ref(_sha("d"))),
+    )
+    assert len(snapshot.document_sources) == 2
+    assert len(snapshot.macro_snapshots) == 2
+
+
+def _execution_config(**overrides) -> EvalExecutionConfig:
+    kwargs = dict(
+        variant_id=EvalVariantId.INSIGHTFORGE_FULL,
+        model=FrozenModelConfig(
+            provider="deepseek",
+            model_id="deepseek-v4-flash",
+            thinking_enabled=False,
+            temperature=Decimal("0"),
+            structured_output=True,
+        ),
+        variant_version="1",
+        prompt_version="1",
+        retrieval_version="1",
+        pipeline_version="1",
+    )
+    kwargs.update(overrides)
+    return EvalExecutionConfig(**kwargs)
+
+
+def test_component_version_duplicate_name_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _execution_config(
+            component_versions=(
+                EvalComponentVersion(component_name="audit", component_version="v1"),
+                EvalComponentVersion(component_name="audit", component_version="v2"),
+            )
+        )
+
+
+def test_component_version_canonical_sort() -> None:
+    config = _execution_config(
+        component_versions=(
+            EvalComponentVersion(component_name="evidence_extractor", component_version="v2"),
+            EvalComponentVersion(component_name="audit", component_version="v1"),
+        )
+    )
+    assert [c.component_name for c in config.component_versions] == [
+        "audit",
+        "evidence_extractor",
+    ]
+
+
+def test_error_codes_stable() -> None:
+    assert EvalError.code == "eval_error"
+    assert EvalContractError.code == "eval_contract_error"
+    assert EvalFingerprintError.code == "eval_fingerprint_error"
+    assert EvalVariantError.code == "eval_variant_error"
