@@ -89,17 +89,27 @@ def _validate_slug(value: str) -> str:
     return _reject_uuid_slug(_strip(value, field="slug", max_len=_MAX_SLUG_LENGTH))
 
 
+class StrictFrozenEvalModel(BaseModel):
+    """bundle-facing frozen 契约的基类：`frozen=True` + `extra="forbid"`。
+
+    `extra="forbid"` 让 unknown field 在解析时抛 `ValidationError`，而不是被
+    Pydantic 静默忽略——防止 schema evolution（字段改名/删除）后旧字段被悄悄
+    吞掉，导致 frozen bundle 与当前契约悄悄漂移。所有真正 frozen 的 public
+    契约都继承本类。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 # ---------------------------------------------------------------- source snapshot
 
 
-class FrozenDocumentSourceRef(BaseModel):
+class FrozenDocumentSourceRef(StrictFrozenEvalModel):
     """一条 document source 的字节寻址引用（不含 raw bytes）。
 
     UUID（source_record_id / raw_artifact_id）用于执行期加载；`content_sha256` 是
     semantic content identity（进入 fingerprint，UUID 不进入）。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     source_record_id: UUID
     raw_artifact_id: UUID
@@ -134,15 +144,13 @@ class FrozenDocumentSourceRef(BaseModel):
         return v
 
 
-class FrozenMacroSnapshotRef(BaseModel):
+class FrozenMacroSnapshotRef(StrictFrozenEvalModel):
     """一条 macro snapshot 的字节寻址引用（`snapshot_fingerprint` 是 semantic identity）。
 
     `payload_sha256` 是 Evaluation Bundle 冻结的 canonical payload bytes identity——
     独立证明 payload bytes 未被篡改，但**不**参与 duplicate identity（仍按
     `snapshot_fingerprint` 去重）。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     snapshot_id: UUID
     series_id: UUID
@@ -167,15 +175,13 @@ class StructuredArtifactType(StrEnum):
     RELATIVE_VALUATION_COMPARISON = "relative_valuation_comparison"
 
 
-class FrozenStructuredArtifactRef(BaseModel):
+class FrozenStructuredArtifactRef(StrictFrozenEvalModel):
     """一条 structured artifact 的字节寻址引用（`artifact_fingerprint` 是 semantic identity）。
 
     `payload_sha256` 是 Evaluation Bundle 冻结的 canonical payload bytes identity——
     独立证明 payload bytes 未被篡改，但**不**参与 duplicate identity（仍按
     `(artifact_type, artifact_fingerprint)` 去重）。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     artifact_type: StructuredArtifactType
     artifact_id: UUID
@@ -193,7 +199,7 @@ class FrozenStructuredArtifactRef(BaseModel):
         return _validate_sha256(v, field="payload_sha256")
 
 
-class FrozenSourceProviderRef(BaseModel):
+class FrozenSourceProviderRef(StrictFrozenEvalModel):
     """source provider registry 的一条冻结行（router / provenance 运行期读取的字段）。
 
     只冻结 routing 与 citation label 真正依赖的 semantic 字段：provider_key /
@@ -201,8 +207,6 @@ class FrozenSourceProviderRef(BaseModel):
     丢弃）、homepage_url / allowed_domains / acquisition_methods / exchange_scope
     / requires_api_key / critical_claim_eligible（运行期不读取）。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     provider_key: str
     display_name: str
@@ -217,16 +221,16 @@ class FrozenSourceProviderRef(BaseModel):
     @field_validator("capabilities")
     @classmethod
     def _v_capabilities(cls, v: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(sorted(_strip(c, field="capability") for c in v))
+        # set-like 语义：strip + dedup + canonical sort（重复 capability 不影响
+        # semantic identity；空白 capability 由 `_strip` 拒绝）。
+        return tuple(sorted({_strip(c, field="capability") for c in v}))
 
 
-class FrozenSourceSnapshot(BaseModel):
+class FrozenSourceSnapshot(StrictFrozenEvalModel):
     """三路评估的 frozen source snapshot manifest（document / macro / structured / provider）。
 
     collection 语义 unordered，duplicate identity 构造时拒绝；不含 raw bytes。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     snapshot_schema_version: int = SNAPSHOT_SCHEMA_VERSION
     document_sources: tuple[FrozenDocumentSourceRef, ...] = ()
@@ -269,7 +273,7 @@ class FrozenSourceSnapshot(BaseModel):
 # ---------------------------------------------------------------- eval case
 
 
-class FrozenCompanyIdentity(BaseModel):
+class FrozenCompanyIdentity(StrictFrozenEvalModel):
     """planner 运行期读取的 company 语义身份（不含内部 UUID / master-data 时间戳）。
 
     = `ResearchPlannerInputSnapshot` 的 company 子集：security_code / official_name /
@@ -279,8 +283,6 @@ class FrozenCompanyIdentity(BaseModel):
     listing_status / listing_date / identity_source_* / source_updated_at（运行期
     不读取）。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     security_code: str
     official_name: str
@@ -314,10 +316,8 @@ class FrozenCompanyIdentity(BaseModel):
         return tuple(sorted({_strip(a, field="alias") for a in v}))
 
 
-class EvalCase(BaseModel):
+class EvalCase(StrictFrozenEvalModel):
     """单个研究 case 的语义定义（不含 execution status / runtime id）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     schema_version: int = EVAL_CASE_SCHEMA_VERSION
     case_id: str
@@ -361,10 +361,8 @@ class EvalCase(BaseModel):
 # ---------------------------------------------------------------- dataset manifest
 
 
-class EvalDatasetCaseRef(BaseModel):
+class EvalDatasetCaseRef(StrictFrozenEvalModel):
     """dataset 里对某个 case 版本的引用。"""
-
-    model_config = ConfigDict(frozen=True)
 
     case_id: str
     case_version: int = Field(ge=1)
@@ -381,10 +379,8 @@ class EvalDatasetCaseRef(BaseModel):
         return _validate_sha256(v, field="case_fingerprint")
 
 
-class EvalDatasetManifest(BaseModel):
+class EvalDatasetManifest(StrictFrozenEvalModel):
     """frozen eval dataset 的 manifest（dataset 语义身份 + 有序 canonical case refs）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     schema_version: int = EVAL_DATASET_SCHEMA_VERSION
     dataset_id: str
@@ -417,10 +413,8 @@ class ClaimSupportStatus(StrEnum):
     CONFLICTED = "conflicted"
 
 
-class FinancialFactLabel(BaseModel):
+class FinancialFactLabel(StrictFrozenEvalModel):
     """financial_number_accuracy 的人工 ground-truth（typed，非 free-text）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     label_type: Literal["financial_fact"] = "financial_fact"
     metric_code: str
@@ -452,10 +446,8 @@ class FinancialFactLabel(BaseModel):
         return v
 
 
-class RiskTopicLabel(BaseModel):
+class RiskTopicLabel(StrictFrozenEvalModel):
     """risk_topic_recall 的人工 ground-truth。"""
-
-    model_config = ConfigDict(frozen=True)
 
     label_type: Literal["risk_topic"] = "risk_topic"
     risk_code: str
@@ -473,10 +465,8 @@ class RiskTopicLabel(BaseModel):
         return tuple(_strip(a, field="alias") for a in v)
 
 
-class ClaimSupportLabel(BaseModel):
+class ClaimSupportLabel(StrictFrozenEvalModel):
     """claim_support 的人工 ground-truth。"""
-
-    model_config = ConfigDict(frozen=True)
 
     label_type: Literal["claim_support"] = "claim_support"
     claim_label_id: str
@@ -494,10 +484,8 @@ class ClaimSupportLabel(BaseModel):
         return tuple(_validate_sha256(fp, field="related_source_fingerprints") for fp in v)
 
 
-class MacroCausalLabel(BaseModel):
+class MacroCausalLabel(StrictFrozenEvalModel):
     """macro_causal_error 的人工 ground-truth。"""
-
-    model_config = ConfigDict(frozen=True)
 
     label_type: Literal["macro_causal"] = "macro_causal"
     driver_code: str
@@ -510,10 +498,8 @@ class MacroCausalLabel(BaseModel):
         return _strip(v, field="driver_code")
 
 
-class HumanLabel(BaseModel):
+class HumanLabel(StrictFrozenEvalModel):
     """一个 case 的结构化人工标注（typed；annotation 不参与 machine ground-truth）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     schema_version: int = HUMAN_LABEL_SCHEMA_VERSION
     case_id: str
@@ -534,10 +520,8 @@ class HumanLabel(BaseModel):
 # ---------------------------------------------------------------- execution config
 
 
-class FrozenModelConfig(BaseModel):
+class FrozenModelConfig(StrictFrozenEvalModel):
     """逐 variant 冻结的模型 / 参数（不含 API key）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     provider: str
     model_id: str
@@ -566,15 +550,13 @@ class FrozenModelConfig(BaseModel):
         return v
 
 
-class EvalComponentVersion(BaseModel):
+class EvalComponentVersion(StrictFrozenEvalModel):
     """单个 pipeline component 的冻结版本（`component_name` → `component_version`）。
 
     用于精确冻结 Full pipeline 多个 component 的真实版本（如 evidence_extractor:v2、
     audit:v1），弥补仅有 variant_version/prompt_version/retrieval_version/
     pipeline_version 的粒度不足。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     component_name: str
     component_version: str
@@ -590,10 +572,8 @@ class EvalComponentVersion(BaseModel):
         return _strip(v, field="component_version", max_len=_MAX_COMPONENT_VERSION_LENGTH)
 
 
-class EvalExecutionConfig(BaseModel):
+class EvalExecutionConfig(StrictFrozenEvalModel):
     """variant 执行配置（bounded deterministic settings + frozen model + component versions）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     config_schema_version: int = EVAL_EXECUTION_CONFIG_SCHEMA_VERSION
     variant_id: EvalVariantId
@@ -635,10 +615,8 @@ class EvalExecutionConfig(BaseModel):
 # ---------------------------------------------------------------- execution / scoring spec
 
 
-class EvalExecutionSpec(BaseModel):
+class EvalExecutionSpec(StrictFrozenEvalModel):
     """「系统实际看到什么 + 以什么配置运行」（不含 label / metric registry / judge）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     schema_version: int = EVAL_EXECUTION_SPEC_SCHEMA_VERSION
     case_fingerprint: str
@@ -654,7 +632,7 @@ class EvalExecutionSpec(BaseModel):
         return _validate_sha256(v, field="spec fingerprint")
 
 
-class EvalScoringSpec(BaseModel):
+class EvalScoringSpec(StrictFrozenEvalModel):
     """评分侧：绑定 variant 产出 + human label + metric registry + judge config。
 
     `variant_output_fingerprint` 是评分真正绑定的目标：normalized `EvalVariantOutput`
@@ -664,8 +642,6 @@ class EvalScoringSpec(BaseModel):
     citation_coverage）无需 label 或 judge；label 缺失不改变 spec 有效性，None 在
     fingerprint 中规范为 `null`。
     """
-
-    model_config = ConfigDict(frozen=True)
 
     schema_version: int = EVAL_SCORING_SPEC_SCHEMA_VERSION
     variant_output_fingerprint: str
@@ -696,10 +672,8 @@ class EvalScoringSpec(BaseModel):
 # ---------------------------------------------------------------- normalized output
 
 
-class EvalCitation(BaseModel):
+class EvalCitation(StrictFrozenEvalModel):
     """normalized output 的一条 citation。"""
-
-    model_config = ConfigDict(frozen=True)
 
     citation_id: str
     source_fingerprint: str
@@ -722,10 +696,8 @@ class EvalCitation(BaseModel):
         return tuple(_strip(c, field="claim_id") for c in v)
 
 
-class EvalClaim(BaseModel):
+class EvalClaim(StrictFrozenEvalModel):
     """normalized output 的一条 claim。"""
-
-    model_config = ConfigDict(frozen=True)
 
     claim_id: str
     statement: str
@@ -748,10 +720,8 @@ class EvalClaim(BaseModel):
         return tuple(_strip(c, field="citation_id") for c in v)
 
 
-class EvalVariantOutput(BaseModel):
+class EvalVariantOutput(StrictFrozenEvalModel):
     """三种 variant 最终都必须产出的 normalized structure（无 CoT / reasoning / key）。"""
-
-    model_config = ConfigDict(frozen=True)
 
     schema_version: int = EVAL_VARIANT_OUTPUT_SCHEMA_VERSION
     variant_id: EvalVariantId

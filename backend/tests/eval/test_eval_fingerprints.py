@@ -207,6 +207,27 @@ def test_snapshot_fingerprint_sensitive_to_provider_registry() -> None:
     )
 
 
+def test_provider_duplicate_capability_does_not_change_fp() -> None:
+    """capabilities 是 set-like：重复 capability 去重后不改变 snapshot fingerprint。"""
+
+    def make(caps: tuple[str, ...]) -> FrozenSourceSnapshot:
+        return FrozenSourceSnapshot(
+            source_providers=(
+                FrozenSourceProviderRef(
+                    provider_key="cninfo",
+                    display_name="巨潮资讯",
+                    enabled=True,
+                    capabilities=caps,
+                ),
+            ),
+        )
+
+    base = make(("annual_report",))
+    dup = make(("annual_report", "annual_report"))
+    assert dup.source_providers[0].capabilities == ("annual_report",)
+    assert compute_source_snapshot_fingerprint(base) == compute_source_snapshot_fingerprint(dup)
+
+
 def test_case_fingerprint_sensitive_to_company_identity() -> None:
     """company identity（运行期被 planner 读取）变化 → case fp 变化。"""
     base = _case()

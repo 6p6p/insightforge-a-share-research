@@ -21,6 +21,7 @@ from app.eval.contracts import (
     FrozenDocumentSourceRef,
     FrozenMacroSnapshotRef,
     FrozenModelConfig,
+    FrozenSourceProviderRef,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
     HumanLabel,
@@ -83,6 +84,39 @@ def test_contracts_frozen() -> None:
     case = _case()
     with pytest.raises(ValidationError):
         case.case_id = "mutated"
+
+
+def test_eval_case_rejects_legacy_security_code() -> None:
+    """schema evolution 防线：旧 `security_code` scalar 被 `company` 取代后，再传
+    legacy 字段必须被 `extra="forbid"` 拒绝，而不是被静默吞掉。"""
+    with pytest.raises(ValidationError):
+        _case(security_code="600519")
+
+
+def test_document_ref_rejects_unknown_field() -> None:
+    """DocumentRef 字段 typo → extra="forbid" 拒绝，防止 silent drift。"""
+    with pytest.raises(ValidationError):
+        _doc_ref("a", source_urll="https://example.com/typo")
+
+
+def test_provider_capabilities_dedup_sorted() -> None:
+    ref = FrozenSourceProviderRef(
+        provider_key="cninfo",
+        display_name="巨潮资讯",
+        enabled=True,
+        capabilities=("b", "a", "b", " a"),
+    )
+    assert ref.capabilities == ("a", "b")
+
+
+def test_provider_blank_capability_rejected() -> None:
+    with pytest.raises(ValidationError):
+        FrozenSourceProviderRef(
+            provider_key="cninfo",
+            display_name="巨潮资讯",
+            enabled=True,
+            capabilities=(" ",),
+        )
 
 
 def test_invalid_hex_char_rejected() -> None:

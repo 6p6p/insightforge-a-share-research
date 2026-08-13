@@ -378,6 +378,59 @@ async def test_materialize_full_chain_writes_verified_bundle(env, monkeypatch, t
     assert len(verified.cases) == 1
 
 
+async def test_materialize_projects_company_provider_document_fields(env) -> None:
+    """Part C：证明真实 PG → Bundle 的字段级 projection 完全正确。
+
+    不能仅靠 `verify_bundle_integrity()` 通过就认定 projection 正确——它只闭合
+    引用完整性，不校验语义字段是否与真实 PG 行一致。这里对三路 frozen 值做
+    concentrated assertions：
+    - Company：official_name/short_name/exchange/board/aliases；
+    - Provider：provider_key/display_name/enabled/capabilities；
+    - Document：title/source_url/acquired_at/authority_tier_snapshot/
+      critical_claim_eligible_snapshot。
+    """
+    doc = await _seed_document(env, company_id=env["company_id"])
+    spec = _spec(env, document_source_ids=(doc["source_id"],))
+    materialized = await _materializer(env).materialize_case(spec)
+
+    # --- Company（与 _seed_company 的真实 PG 行完全一致）---
+    company = materialized.case.company
+    assert company.security_code == "600519"
+    assert company.official_name == "公司600519"
+    assert company.short_name == "600519"
+    assert company.exchange == "SSE"
+    assert company.board == "sse_main"
+    assert company.aliases == ()
+
+    # --- Provider（与 DEFAULT_PROVIDERS 的真实 PG 行完全一致）---
+    providers = {p.provider_key: p for p in materialized.snapshot.source_providers}
+    xinhuanet = providers["xinhuanet"]
+    assert xinhuanet.display_name == "新华网"
+    assert xinhuanet.enabled is True
+    assert xinhuanet.capabilities == ("news_article",)
+    sse = providers["sse"]
+    assert sse.display_name == "上海证券交易所"
+    assert sse.enabled is True
+    assert sse.capabilities == ("company_announcement", "document_download")
+
+    # --- Document（与 _seed_document 的真实 PG 行完全一致）---
+    doc_ref = materialized.snapshot.document_sources[0]
+    assert doc_ref.title == _SOURCE_TITLE
+    assert doc_ref.source_url.startswith(_URL + "?uid=")
+    assert doc_ref.provider_key == "xinhuanet"
+    assert doc_ref.document_type == "news_article"
+    assert doc_ref.media_type == "text/html"
+    assert doc_ref.authority_tier_snapshot == 3
+    assert doc_ref.critical_claim_eligible_snapshot is False
+    assert doc_ref.content_sha256 == doc["content_sha256"]
+
+    # acquired_at 必须与真实 PG 行逐字段一致（非 None、非重生成）。
+    async with env["sessionmaker"]() as session:
+        source = await SourceRecordRepository(session).get_by_id(doc["source_id"])
+    assert source is not None
+    assert doc_ref.acquired_at == source.acquired_at
+
+
 # ---------------------------------------------------------------- negative（spec Q）
 
 
