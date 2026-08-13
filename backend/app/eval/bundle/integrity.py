@@ -55,6 +55,23 @@ def verify_bundle_integrity(root: str | Path) -> VerifiedEvaluationBundle:
         if compute_source_snapshot_fingerprint(snapshot) != case.source_snapshot_fingerprint:
             raise EvalContractError(f"snapshot 与 case:{case.case_id} 引用不匹配")
 
+        # 6b. no-lookahead 时间闭包：bundle 自洽（fingerprint 闭合）之外，必须证明
+        #     所有 source 的 availability 都不晚于 analysis_as_of。Materializer 只从
+        #     PG 投影历史行，无法阻止「未来 bundle 输入」——因此在此独立强制：
+        #     - document availability = published_at（若非 None）否则 acquired_at；
+        #     - macro fetched_at。
+        for doc in snapshot.document_sources:
+            availability = doc.published_at if doc.published_at is not None else doc.acquired_at
+            if availability > case.analysis_as_of:
+                raise EvalContractError(
+                    f"document:{doc.content_sha256} availability 晚于 analysis_as_of"
+                )
+        for macro in snapshot.macro_snapshots:
+            if macro.fetched_at > case.analysis_as_of:
+                raise EvalContractError(
+                    f"macro:{macro.snapshot_fingerprint} fetched_at 晚于 analysis_as_of"
+                )
+
         # 7-9. label（若非 None）→ 唯一 label + case_id/version 匹配 + fingerprint 匹配。
         if case.human_label_fingerprint is not None:
             label = loader.load_label_by_fingerprint(

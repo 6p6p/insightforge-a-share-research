@@ -9,7 +9,7 @@
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -25,7 +25,13 @@ from app.eval.contracts import (
     FinancialFactLabel,
     FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
+    FrozenMacroArtifactLinkRef,
+    FrozenMacroObservationRef,
+    FrozenMacroRawArtifactRef,
+    FrozenMacroSeriesRef,
+    FrozenMacroSnapshotDetail,
     FrozenMacroSnapshotRef,
+    FrozenMacroTopicRef,
     FrozenSourceProviderRef,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
@@ -52,8 +58,15 @@ RAW_ARTIFACT_ID = UUID("00000000-0000-0000-0000-000000000003")
 MACRO_SNAPSHOT_ID = UUID("00000000-0000-0000-0000-000000000004")
 MACRO_SERIES_ID = UUID("00000000-0000-0000-0000-000000000005")
 STRUCTURED_ARTIFACT_ID = UUID("00000000-0000-0000-0000-000000000006")
+MACRO_RAW_ARTIFACT_ID = UUID("00000000-0000-0000-0000-000000000007")
+MACRO_LINK_ID = UUID("00000000-0000-0000-0000-000000000008")
+MACRO_OBSERVATION_ID = UUID("00000000-0000-0000-0000-000000000009")
 CASE_ID = "test-maotai-fundamentals"
 DATASET_ID = "insightforge_eval_test"
+
+# macro closure 的 raw artifact 字节（content-addressed，与 document blob 共用布局）。
+MACRO_RAW_CONTENT = b'{"indicator": "SP.POP.TOTL", "rows": [{"2024": 1410000000}]}'
+MACRO_RAW_SHA256 = hashlib.sha256(MACRO_RAW_CONTENT).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -76,7 +89,16 @@ class BundleSpec:
     dataset_fingerprint: str
 
 
-def _build_spec() -> BundleSpec:
+def _build_spec(
+    *,
+    doc_published_at: datetime | None = None,
+    macro_fetched_at: datetime | None = None,
+) -> BundleSpec:
+    """构造 synthetic bundle（可参数化 source 时间以构造 no-lookahead 负例）。"""
+    if doc_published_at is None:
+        doc_published_at = datetime(2026, 4, 1, 12, 0, 0)
+    if macro_fetched_at is None:
+        macro_fetched_at = datetime(2026, 8, 1, 12, 0, 0)
     macro_payload = {"snapshot_fingerprint": MACRO_FP, "series": "gdp_growth", "value": 5.2}
     structured_payload = {
         "artifact_type": StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION.value,
@@ -99,7 +121,7 @@ def _build_spec() -> BundleSpec:
         acquired_at=datetime(2026, 8, 1, 12, 0, 0),
         authority_tier_snapshot=1,
         critical_claim_eligible_snapshot=True,
-        published_at=datetime(2026, 4, 1, 12, 0, 0),
+        published_at=doc_published_at,
     )
     provider = FrozenSourceProviderRef(
         provider_key="cninfo",
@@ -112,7 +134,81 @@ def _build_spec() -> BundleSpec:
         series_id=MACRO_SERIES_ID,
         snapshot_fingerprint=MACRO_FP,
         payload_sha256=macro_payload_sha,
-        fetched_at=datetime(2026, 8, 1, 12, 0, 0),
+        fetched_at=macro_fetched_at,
+        series=FrozenMacroSeriesRef(
+            provider_key="world_bank",
+            source_id="2",
+            external_indicator_id="SP.POP.TOTL",
+            geography_type="country",
+            geography_code="CHN",
+            frequency="annual",
+        ),
+        snapshot=FrozenMacroSnapshotDetail(
+            requested_country_code="CHN",
+            query_start_year=2020,
+            query_end_year=2024,
+            source_id_snapshot="2",
+            indicator_name="Population, total",
+            indicator_unit="",
+            source_name="World Development Indicators",
+            source_note="Total population is based on the de facto definition.",
+            source_organization="World Bank",
+            topics_snapshot=(
+                FrozenMacroTopicRef(topic_id="19", name="Population: Structure, growth & density"),
+            ),
+            provider_country_id="CHN",
+            iso2_code="CN",
+            iso3_code="CHN",
+            geography_name="China",
+            region_name="East Asia & Pacific",
+            income_level_name="Upper middle income",
+            page=1,
+            pages=1,
+            per_page=50,
+            provider_total=5,
+            provider_last_updated="2026-01-01",
+            request_count=3,
+            acquisition_method="official_api",
+            authority_tier_snapshot=1,
+            critical_claim_eligible_snapshot=True,
+            provider_capabilities_snapshot=("macro_data", "document_download"),
+            fingerprint_version=1,
+            normalization_version="world_bank_v1",
+            status="available",
+        ),
+        observations=(
+            FrozenMacroObservationRef(
+                observation_id=MACRO_OBSERVATION_ID,
+                period="2024",
+                normalized_period_start=date(2024, 1, 1),
+                value_numeric=Decimal("1410000000"),
+                is_missing=False,
+                decimal_scale=0,
+                observation_status="",
+                period_semantics="provider_year_label",
+                frequency="annual",
+            ),
+        ),
+        artifact_links=(
+            FrozenMacroArtifactLinkRef(
+                snapshot_artifact_id=MACRO_LINK_ID,
+                artifact_id=MACRO_RAW_ARTIFACT_ID,
+                role="observations_page",
+                page=1,
+                response_status=200,
+                final_hostname="api.worldbank.org",
+                content_type="application/json",
+                fetched_at=macro_fetched_at,
+            ),
+        ),
+        raw_artifacts=(
+            FrozenMacroRawArtifactRef(
+                artifact_id=MACRO_RAW_ARTIFACT_ID,
+                content_sha256=MACRO_RAW_SHA256,
+                media_type="application/json",
+                byte_size=len(MACRO_RAW_CONTENT),
+            ),
+        ),
     )
     structured_ref = FrozenStructuredArtifactRef(
         artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
@@ -190,11 +286,24 @@ def _build_spec() -> BundleSpec:
     )
 
 
-def build_bundle(root: str | Path) -> BundleSpec:
-    """把完整 synthetic bundle 写入 root（幂等，可重复调用）。"""
-    spec = _build_spec()
+def build_bundle(
+    root: str | Path,
+    *,
+    doc_published_at: datetime | None = None,
+    macro_fetched_at: datetime | None = None,
+) -> BundleSpec:
+    """把完整 synthetic bundle 写入 root（幂等，可重复调用）。
+
+    `doc_published_at` / `macro_fetched_at` 可参数化：默认是合法过去时间；传未来
+    时间可构造自洽但违反 no-lookahead 的负例 bundle。
+    """
+    spec = _build_spec(
+        doc_published_at=doc_published_at,
+        macro_fetched_at=macro_fetched_at,
+    )
     writer = EvaluationBundleWriter(root)
     writer.write_document_blob(spec.document_sha256, spec.document_content)
+    writer.write_document_blob(MACRO_RAW_SHA256, MACRO_RAW_CONTENT)
     writer.write_macro_payload(spec.macro_ref, spec.macro_payload)
     writer.write_structured_payload(spec.structured_ref, spec.structured_payload)
     writer.write_snapshot(spec.snapshot)

@@ -17,7 +17,6 @@ from app.eval.contracts import (
     FinancialFactLabel,
     FrozenCompanyIdentity,
     FrozenDocumentSourceRef,
-    FrozenMacroSnapshotRef,
     FrozenModelConfig,
     FrozenSourceProviderRef,
     FrozenSourceSnapshot,
@@ -34,6 +33,7 @@ from app.eval.fingerprints import (
     compute_variant_output_fingerprint,
 )
 from app.eval.variants import EvalVariantId
+from tests.eval.macro_factory import make_macro_ref
 
 
 def _sha(tag: str = "a") -> str:
@@ -146,13 +146,7 @@ def test_snapshot_fingerprint_includes_macro_payload_sha() -> None:
     def make(payload_sha: str) -> FrozenSourceSnapshot:
         return FrozenSourceSnapshot(
             macro_snapshots=(
-                FrozenMacroSnapshotRef(
-                    snapshot_id=uuid4(),
-                    series_id=uuid4(),
-                    snapshot_fingerprint=_sha("c"),
-                    payload_sha256=payload_sha,
-                    fetched_at=datetime(2026, 8, 1, 12, 0, 0),
-                ),
+                make_macro_ref(snapshot_fingerprint=_sha("c"), payload_sha256=payload_sha),
             ),
         )
 

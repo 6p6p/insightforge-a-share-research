@@ -37,7 +37,6 @@ from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_provider import SourceProviderModel
 from app.db.models.source_record import SourceRecordModel
-from app.domain.macro_persistence import MacroSnapshotStatus
 from app.eval.bundle.loader import EvaluationBundleLoader
 from app.eval.contracts import (
     FrozenCompanyIdentity,
@@ -69,12 +68,7 @@ from app.eval.replay.contracts import (
     RehydratedCase,
     RehydratedDocument,
 )
-from app.macro.contracts import MacroFrequency, MacroPeriodSemantics
 from app.macro.errors import MacroSnapshotIntegrityError
-from app.macro.fingerprint import (
-    MACRO_SNAPSHOT_FINGERPRINT_VERSION,
-    WORLD_BANK_NORMALIZATION_VERSION,
-)
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.macro_observation_repository import MacroObservationRepository
 from app.repositories.macro_series_repository import MacroSeriesRepository
@@ -400,7 +394,8 @@ class EvaluationReplayRehydrator:
 
     @staticmethod
     def _require_macro_closure(macro: FrozenMacroSnapshotRef) -> None:
-        """rehydrator 强制要求 macro closure（series + snapshot 行）；缺失 → reject。"""
+        """防御性检查：contract 已强制 closure 必填（series/snapshot/observations/
+        artifact_links/raw_artifacts），此处仅兜底 hand-built 对象绕过契约的场景。"""
         if macro.series is None or macro.snapshot is None:
             raise EvalReplayIntegrityError(
                 f"macro snapshot 缺少 rehydration closure（{macro.snapshot_id}）"
@@ -438,8 +433,8 @@ class EvaluationReplayRehydrator:
             snapshot_id=macro.snapshot_id,
             series_id=macro.series_id,
             snapshot_fingerprint=macro.snapshot_fingerprint,
-            fingerprint_version=MACRO_SNAPSHOT_FINGERPRINT_VERSION,
-            normalization_version=WORLD_BANK_NORMALIZATION_VERSION,
+            fingerprint_version=detail.fingerprint_version,
+            normalization_version=detail.normalization_version,
             requested_country_code=detail.requested_country_code,
             query_start_year=detail.query_start_year,
             query_end_year=detail.query_end_year,
@@ -469,7 +464,7 @@ class EvaluationReplayRehydrator:
             authority_tier_snapshot=detail.authority_tier_snapshot,
             critical_claim_eligible_snapshot=detail.critical_claim_eligible_snapshot,
             provider_capabilities_snapshot=list(detail.provider_capabilities_snapshot),
-            status=MacroSnapshotStatus.AVAILABLE.value,
+            status=detail.status,
         )
 
     @staticmethod
@@ -481,8 +476,8 @@ class EvaluationReplayRehydrator:
             snapshot_id=snapshot_id,
             period=obs.period,
             normalized_period_start=obs.normalized_period_start,
-            period_semantics=MacroPeriodSemantics.PROVIDER_YEAR_LABEL.value,
-            frequency=MacroFrequency.ANNUAL.value,
+            period_semantics=obs.period_semantics,
+            frequency=obs.frequency,
             value_numeric=obs.value_numeric,
             is_missing=obs.is_missing,
             observation_status=obs.observation_status,

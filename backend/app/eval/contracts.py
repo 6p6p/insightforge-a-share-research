@@ -31,13 +31,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.domain.macro_persistence import MacroSnapshotArtifactRole
+from app.domain.macro_persistence import MacroSnapshotArtifactRole, MacroSnapshotStatus
 from app.eval.metrics import METRIC_REGISTRY_VERSION
 from app.eval.variants import EvalVariantId
 
 # ---------------------------------------------------------------- schema 版本
 
-SNAPSHOT_SCHEMA_VERSION = 2
+SNAPSHOT_SCHEMA_VERSION = 3
 EVAL_CASE_SCHEMA_VERSION = 2
 EVAL_DATASET_SCHEMA_VERSION = 1
 HUMAN_LABEL_SCHEMA_VERSION = 1
@@ -97,6 +97,7 @@ _MACRO_METADATA_ROLES = frozenset(
         MacroSnapshotArtifactRole.COUNTRY_METADATA.value,
     }
 )
+_MACRO_SNAPSHOT_STATUSES = frozenset(status.value for status in MacroSnapshotStatus)
 
 
 class StrictFrozenEvalModel(BaseModel):
@@ -196,9 +197,10 @@ class FrozenMacroTopicRef(StrictFrozenEvalModel):
 class FrozenMacroObservationRef(StrictFrozenEvalModel):
     """一条 `MacroObservation` 的冻结行（`observation_id` 精确复现）。
 
-    `snapshot_id` 由父级持有；`period_semantics` / `frequency` 是确定性常量
-    （`provider_year_label` / `annual`），由 replay policy 补全，不冻结。
-    `value_numeric` 用 Decimal 保存（JSON 序列化为 str，round-trip 保留 scale）。
+    `snapshot_id` 由父级持有；`period_semantics` / `frequency` 是 frozen-exact
+    （materializer 从真实 PG 行投影，replayer 用冻结值精确复现，不覆盖为当前
+    模块常量）。`value_numeric` 用 Decimal 保存（JSON 序列化为 str，round-trip
+    保留 scale）。
     """
 
     observation_id: UUID
@@ -208,6 +210,8 @@ class FrozenMacroObservationRef(StrictFrozenEvalModel):
     is_missing: bool
     decimal_scale: int | None = None
     observation_status: str | None = None
+    period_semantics: str
+    frequency: str
 
     @field_validator("period")
     @classmethod
@@ -215,6 +219,11 @@ class FrozenMacroObservationRef(StrictFrozenEvalModel):
         if not re.fullmatch(r"^\d{4}$", v):
             raise ValueError("period 必须为四位年份")
         return v
+
+    @field_validator("period_semantics", "frequency")
+    @classmethod
+    def _v_nonempty(cls, v: str) -> str:
+        return _strip(v, field="macro observation 字段")
 
     @model_validator(mode="after")
     def _v_value_consistency(self) -> "FrozenMacroObservationRef":
@@ -236,15 +245,15 @@ class FrozenMacroRawArtifactRef(StrictFrozenEvalModel):
     `blobs/sha256/<first2>/<fullsha>`，与 document blob 共用同一 content-addressed
     布局——SHA 相同则复用同一 blob）。
 
-    `role` 来自真实 `MacroSnapshotArtifactLink` 语义（indicator_metadata /
-    country_metadata / observations_page）。不把 raw bytes base64 进 macro JSON。
+    `role` / `page` **只**属于 `FrozenMacroArtifactLinkRef`（link 语义），不在此
+    重复；raw artifact 是纯字节对象，与 link 是多对一关系（同一 raw 可被多个
+    link 引用）。不把 raw bytes base64 进 macro JSON。
     """
 
     artifact_id: UUID
     content_sha256: str
     media_type: str
     byte_size: int
-    role: str
 
     @field_validator("content_sha256")
     @classmethod
@@ -263,13 +272,6 @@ class FrozenMacroRawArtifactRef(StrictFrozenEvalModel):
     def _v_byte_size(cls, v: int) -> int:
         if v < 1:
             raise ValueError("byte_size 必须 >= 1")
-        return v
-
-    @field_validator("role")
-    @classmethod
-    def _v_role(cls, v: str) -> str:
-        if v not in _MACRO_ARTIFACT_ROLES:
-            raise ValueError(f"role 必须为 {sorted(_MACRO_ARTIFACT_ROLES)}")
         return v
 
 
@@ -313,8 +315,12 @@ class FrozenMacroArtifactLinkRef(StrictFrozenEvalModel):
 
 class FrozenMacroSnapshotDetail(StrictFrozenEvalModel):
     """`MacroDatasetSnapshot` 行级语义字段（不含 snapshot_id / series_id /
-    snapshot_fingerprint / fetched_at——由父级持有；不含 fingerprint_version /
-    normalization_version / status——由 replay 常量补全）。
+    snapshot_fingerprint / fetched_at——由父级持有）。
+
+    `fingerprint_version` / `normalization_version` / `status` 是 frozen-exact：
+    materializer 从真实 PG 行投影，replayer 用冻结值精确复现（不覆盖为当前
+    模块常量 `MACRO_SNAPSHOT_FINGERPRINT_VERSION` / `WORLD_BANK_NORMALIZATION_VERSION`
+    / `MacroSnapshotStatus.AVAILABLE`）。
 
     materializer 从真实 PG 行投影；rehydrator 用它精确重建 snapshot 行。
     """
@@ -345,6 +351,9 @@ class FrozenMacroSnapshotDetail(StrictFrozenEvalModel):
     authority_tier_snapshot: int
     critical_claim_eligible_snapshot: bool
     provider_capabilities_snapshot: tuple[str, ...] = ()
+    fingerprint_version: int
+    normalization_version: str
+    status: str
 
     @field_validator(
         "requested_country_code",
@@ -402,6 +411,26 @@ class FrozenMacroSnapshotDetail(StrictFrozenEvalModel):
     def _v_capabilities(cls, v: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(sorted({_strip(c, field="capability") for c in v}))
 
+    @field_validator("normalization_version")
+    @classmethod
+    def _v_normalization_version(cls, v: str) -> str:
+        return _strip(v, field="normalization_version")
+
+    @field_validator("fingerprint_version")
+    @classmethod
+    def _v_fingerprint_version(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("fingerprint_version 必须 >= 1")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def _v_status(cls, v: str) -> str:
+        v = _strip(v, field="status")
+        if v not in _MACRO_SNAPSHOT_STATUSES:
+            raise ValueError(f"status 必须为 {sorted(_MACRO_SNAPSHOT_STATUSES)}")
+        return v
+
     @model_validator(mode="after")
     def _v_year_range(self) -> "FrozenMacroSnapshotDetail":
         if self.query_start_year > self.query_end_year:
@@ -428,11 +457,11 @@ class FrozenMacroSnapshotRef(StrictFrozenEvalModel):
     snapshot_fingerprint: str
     payload_sha256: str
     fetched_at: datetime
-    series: FrozenMacroSeriesRef | None = None
-    snapshot: FrozenMacroSnapshotDetail | None = None
-    observations: tuple[FrozenMacroObservationRef, ...] = ()
-    artifact_links: tuple[FrozenMacroArtifactLinkRef, ...] = ()
-    raw_artifacts: tuple[FrozenMacroRawArtifactRef, ...] = ()
+    series: FrozenMacroSeriesRef
+    snapshot: FrozenMacroSnapshotDetail
+    observations: tuple[FrozenMacroObservationRef, ...] = Field(min_length=1)
+    artifact_links: tuple[FrozenMacroArtifactLinkRef, ...] = Field(min_length=1)
+    raw_artifacts: tuple[FrozenMacroRawArtifactRef, ...] = Field(min_length=1)
 
     @field_validator("snapshot_fingerprint")
     @classmethod
@@ -446,15 +475,21 @@ class FrozenMacroSnapshotRef(StrictFrozenEvalModel):
 
     @model_validator(mode="after")
     def _reject_duplicate_closure(self) -> "FrozenMacroSnapshotRef":
-        # raw_artifacts 与 artifact_links 必须 1:1 对应（按 artifact_id），role 一致。
-        raw_by_id = {ra.artifact_id: ra.role for ra in self.raw_artifacts}
-        link_by_id = {link.artifact_id: link.role for link in self.artifact_links}
-        if raw_by_id != link_by_id:
-            raise ValueError("raw_artifacts 与 artifact_links 的 artifact 闭包不一致")
-        if len(raw_by_id) != len(self.raw_artifacts):
+        # 跨字段闭包：raw artifact_id 唯一；link snapshot_artifact_id 唯一；
+        # 每个 link.artifact_id 必须存在于 raw_artifacts；每个 raw artifact 被 >=1 个
+        # link 引用。允许多个 link → 同一 raw（role/page 只属于 link，不参与此处）。
+        raw_ids = [ra.artifact_id for ra in self.raw_artifacts]
+        if len(set(raw_ids)) != len(raw_ids):
             raise ValueError("raw_artifacts 存在重复 artifact_id")
-        if len(link_by_id) != len(self.artifact_links):
-            raise ValueError("artifact_links 存在重复 artifact_id")
+        link_ids = [link.snapshot_artifact_id for link in self.artifact_links]
+        if len(set(link_ids)) != len(link_ids):
+            raise ValueError("artifact_links 存在重复 snapshot_artifact_id")
+        raw_set = set(raw_ids)
+        linked = {link.artifact_id for link in self.artifact_links}
+        if not linked <= raw_set:
+            raise ValueError("artifact_links 引用了不在 raw_artifacts 中的 artifact_id")
+        if raw_set != linked:
+            raise ValueError("raw_artifacts 存在未被任何 link 引用的 artifact_id")
         return self
 
 

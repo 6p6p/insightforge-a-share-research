@@ -19,20 +19,25 @@ World Bank）/ 零 Alembic / 零 token capture / 零 variant runner。覆盖：
   7. tampered domain verifier fail（financial metric_fingerprint 被篡改）。
 """
 
+import hashlib
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
+from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
+from app.db.models.macro_observation import MacroObservationModel
+from app.db.models.macro_series import MacroSeriesModel
+from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_record import SourceRecordModel
 from app.db.session import DatabaseManager
 from app.eval.bundle import EvaluationBundleWriter, verify_bundle_integrity
-from app.eval.contracts import StructuredArtifactType
+from app.eval.contracts import FrozenMacroTopicRef, StructuredArtifactType
 from app.eval.errors import EvalMaterializationError
 from app.eval.fingerprints import compute_source_snapshot_fingerprint
 from app.eval.materialization import (
@@ -429,6 +434,136 @@ async def test_materialize_projects_company_provider_document_fields(env) -> Non
         source = await SourceRecordRepository(session).get_by_id(doc["source_id"])
     assert source is not None
     assert doc_ref.acquired_at == source.acquired_at
+
+
+async def test_materialize_projects_macro_fields_deep(env, monkeypatch) -> None:
+    """Part F：PG MacroSeries / MacroDatasetSnapshot / Observation / Link /
+    RawArtifact → 五路 Frozen 逐字段投影（含 fingerprint_version /
+    normalization_version / status / period_semantics / frequency + raw bytes SHA）。"""
+    macro = await _seed_macro_chain(env, monkeypatch)
+    spec = _spec(env, macro_snapshot_ids=(macro["snapshot_id"],))
+    materialized = await _materializer(env).materialize_case(spec)
+
+    macro_ref = materialized.snapshot.macro_snapshots[0]
+    assert macro_ref.snapshot_id == macro["snapshot_id"]
+    assert macro_ref.series_id == macro["series_id"]
+
+    async with env["sessionmaker"]() as session:
+        series = await session.get(MacroSeriesModel, macro["series_id"])
+        snapshot = await session.get(MacroDatasetSnapshotModel, macro["snapshot_id"])
+        observations = (
+            (
+                await session.execute(
+                    select(MacroObservationModel)
+                    .where(MacroObservationModel.snapshot_id == macro["snapshot_id"])
+                    .order_by(MacroObservationModel.period)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        links = (
+            (
+                await session.execute(
+                    select(MacroSnapshotArtifactModel).where(
+                        MacroSnapshotArtifactModel.snapshot_id == macro["snapshot_id"]
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        raws = {
+            link.artifact_id: await session.get(RawArtifactModel, link.artifact_id)
+            for link in links
+        }
+
+        # --- Series：六字段逐字段一致 ---
+        assert macro_ref.series.provider_key == series.provider_key
+        assert macro_ref.series.source_id == series.source_id
+        assert macro_ref.series.external_indicator_id == series.external_indicator_id
+        assert macro_ref.series.geography_type == series.geography_type
+        assert macro_ref.series.geography_code == series.geography_code
+        assert macro_ref.series.frequency == series.frequency
+
+        # --- Snapshot detail：逐字段一致（含 frozen-exact 版本/状态）---
+        detail = macro_ref.snapshot
+        assert detail.requested_country_code == snapshot.requested_country_code
+        assert detail.query_start_year == snapshot.query_start_year
+        assert detail.query_end_year == snapshot.query_end_year
+        assert detail.source_id_snapshot == snapshot.source_id_snapshot
+        assert detail.indicator_name == snapshot.indicator_name
+        assert detail.indicator_unit == snapshot.indicator_unit
+        assert detail.source_name == snapshot.source_name
+        assert detail.source_note == snapshot.source_note
+        assert detail.source_organization == snapshot.source_organization
+        assert detail.topics_snapshot == tuple(
+            FrozenMacroTopicRef(topic_id=t["topic_id"], name=t["name"])
+            for t in snapshot.topics_snapshot
+        )
+        assert detail.provider_country_id == snapshot.provider_country_id
+        assert detail.iso2_code == snapshot.iso2_code
+        assert detail.iso3_code == snapshot.iso3_code
+        assert detail.geography_name == snapshot.geography_name
+        assert detail.region_name == snapshot.region_name
+        assert detail.income_level_name == snapshot.income_level_name
+        assert detail.page == snapshot.page
+        assert detail.pages == snapshot.pages
+        assert detail.per_page == snapshot.per_page
+        assert detail.provider_total == snapshot.provider_total
+        assert detail.provider_last_updated == snapshot.provider_last_updated
+        assert detail.request_count == snapshot.request_count
+        assert detail.acquisition_method == snapshot.acquisition_method
+        assert detail.authority_tier_snapshot == snapshot.authority_tier_snapshot
+        assert detail.critical_claim_eligible_snapshot == snapshot.critical_claim_eligible_snapshot
+        # capabilities 在契约层 sorted+dedup；比较 set 语义一致即可。
+        assert set(detail.provider_capabilities_snapshot) == set(
+            snapshot.provider_capabilities_snapshot
+        )
+        # frozen-exact：从真实 PG 行投影，不重读当前代码常量。
+        assert detail.fingerprint_version == snapshot.fingerprint_version == 1
+        assert detail.normalization_version == snapshot.normalization_version == "world_bank_v1"
+        assert detail.status == snapshot.status == "available"
+
+        # --- Observations：逐字段一致（含 period_semantics / frequency）---
+        assert len(macro_ref.observations) == len(observations)
+        for ref, row in zip(macro_ref.observations, observations, strict=True):
+            assert ref.observation_id == row.observation_id
+            assert ref.period == row.period
+            assert ref.normalized_period_start == row.normalized_period_start
+            assert ref.value_numeric == row.value_numeric
+            assert ref.is_missing == row.is_missing
+            assert ref.decimal_scale == row.decimal_scale
+            assert ref.observation_status == row.observation_status
+            assert ref.period_semantics == row.period_semantics == "provider_year_label"
+            assert ref.frequency == row.frequency == "annual"
+
+        # --- Artifact links：逐字段一致；每个 link.artifact_id 落在 raw_artifacts ---
+        raw_by_id = {r.artifact_id: r for r in macro_ref.raw_artifacts}
+        assert len(macro_ref.artifact_links) == len(links)
+        assert len(macro_ref.raw_artifacts) == len(raws)
+        for ref in macro_ref.artifact_links:
+            row = next(
+                link for link in links if link.snapshot_artifact_id == ref.snapshot_artifact_id
+            )
+            assert ref.artifact_id == row.artifact_id
+            assert ref.role == row.role
+            assert ref.page == row.page
+            assert ref.response_status == row.response_status
+            assert ref.final_hostname == row.final_hostname
+            assert ref.content_type == row.content_type
+            assert ref.fetched_at == row.fetched_at
+            assert ref.artifact_id in raw_by_id
+
+        # --- Raw artifacts：artifact_id/content_sha256/media_type/byte_size + 字节 SHA ---
+        for ref in macro_ref.raw_artifacts:
+            row = raws[ref.artifact_id]
+            assert ref.content_sha256 == row.content_sha256
+            assert ref.media_type == row.media_type
+            assert ref.byte_size == row.byte_size
+            blob = materialized.macro_raw_blobs[ref.content_sha256]
+            assert hashlib.sha256(blob).hexdigest() == ref.content_sha256
+            assert len(blob) == ref.byte_size
 
 
 # ---------------------------------------------------------------- negative（spec Q）

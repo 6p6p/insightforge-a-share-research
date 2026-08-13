@@ -15,7 +15,6 @@ from app.eval.contracts import (
     EvalClaim,
     EvalVariantOutput,
     FrozenDocumentSourceRef,
-    FrozenMacroSnapshotRef,
     FrozenSourceSnapshot,
     FrozenStructuredArtifactRef,
     StructuredArtifactType,
@@ -31,6 +30,7 @@ from app.eval.scoring import (
     verify_variant_output_identity,
 )
 from app.eval.variants import EvalVariantId
+from tests.eval.macro_factory import make_macro_ref
 
 _DOC_SHA = "a" * 64
 _MACRO_FP = "b" * 64
@@ -57,9 +57,7 @@ def _snapshot() -> FrozenSourceSnapshot:
             ),
         ),
         macro_snapshots=(
-            FrozenMacroSnapshotRef(
-                snapshot_id=uuid4(),
-                series_id=uuid4(),
+            make_macro_ref(
                 snapshot_fingerprint=_MACRO_FP,
                 payload_sha256="e" * 64,
                 fetched_at=datetime(2026, 8, 9, tzinfo=UTC),

@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
-from app.domain.macro_persistence import MacroSnapshotArtifactRole
+from app.domain.macro_persistence import MacroSnapshotArtifactRole, MacroSnapshotStatus
 from app.domain.sources import AcquisitionMethod, SourceAuthorityTier, SourceCapability
 from app.eval.bundle.writer import EvaluationBundleWriter
 from app.eval.canonical import canonical_json_bytes
@@ -53,7 +53,12 @@ from app.macro.contracts import (
     MacroQuery,
     MacroTopic,
 )
-from app.macro.fingerprint import FingerprintArtifact, build_macro_snapshot_fingerprint
+from app.macro.fingerprint import (
+    MACRO_SNAPSHOT_FINGERPRINT_VERSION,
+    WORLD_BANK_NORMALIZATION_VERSION,
+    FingerprintArtifact,
+    build_macro_snapshot_fingerprint,
+)
 
 COMPANY_ID = UUID("11111111-1111-1111-1111-111111111111")
 SOURCE_RECORD_ID = UUID("22222222-2222-2222-2222-222222222222")
@@ -194,7 +199,7 @@ MACRO_OBSERVATION_IDS = (
     UUID("99999999-9999-9999-9999-999999999915"),
 )
 
-_MACRO_FETCHED_AT = datetime(2026, 8, 1, 13, 0, 0, tzinfo=UTC)
+_MACRO_FETCHED_AT = datetime(2026, 8, 1, 11, 0, 0, tzinfo=UTC)
 _MACRO_HOSTNAME = "api.worldbank.org"
 _MACRO_CONTENT_TYPE = "application/json"
 _MACRO_INDICATOR = "SP.POP.TOTL"
@@ -238,7 +243,7 @@ _MACRO_ROLE_ROWS = (
 )
 
 
-def _macro_fetch_result() -> MacroFetchResult:
+def _macro_fetch_result(fetched_at: datetime = _MACRO_FETCHED_AT) -> MacroFetchResult:
     query = MacroQuery(
         provider_key="world_bank",
         indicator_code=_MACRO_INDICATOR,
@@ -295,7 +300,7 @@ def _macro_fetch_result() -> MacroFetchResult:
             total=len(observations),
             last_updated="2026-01-01",
         ),
-        fetched_at=_MACRO_FETCHED_AT,
+        fetched_at=fetched_at,
         request_count=3,
         acquisition_method=AcquisitionMethod.OFFICIAL_API,
         authority_tier=SourceAuthorityTier.TIER_1,
@@ -304,15 +309,20 @@ def _macro_fetch_result() -> MacroFetchResult:
     )
 
 
-def build_macro_replay_bundle(root: str | Path) -> ReplayBundleSpec:
+def build_macro_replay_bundle(
+    root: str | Path, *, macro_fetched_at: datetime = _MACRO_FETCHED_AT
+) -> ReplayBundleSpec:
     """写入一个含 macro closure 的 replay bundle（document + world_bank macro）。
 
     与 `build_replay_bundle` 的区别：source_providers 额外含 `world_bank`，snapshot
     携带一个自洽的 macro closure（series / snapshot 行 / observations / artifact_links
     / raw_artifacts）。`snapshot_fingerprint` 用 domain `build_macro_snapshot_fingerprint`
     重算（不复制算法），rehydrate 后由 `verify_snapshot_integrity` 证明一致。
+
+    `macro_fetched_at` 可参数化：默认是合法过去时间（<= analysis_as_of）；传未来
+    时间可构造「future macro」负例（bundle 自洽但违反 no-lookahead）。
     """
-    result = _macro_fetch_result()
+    result = _macro_fetch_result(macro_fetched_at)
 
     fingerprint_artifacts = tuple(
         FingerprintArtifact(
@@ -364,6 +374,9 @@ def build_macro_replay_bundle(root: str | Path) -> ReplayBundleSpec:
         authority_tier_snapshot=int(result.authority_tier),
         critical_claim_eligible_snapshot=result.critical_claim_eligible,
         provider_capabilities_snapshot=tuple(c.value for c in result.provider_capabilities),
+        fingerprint_version=MACRO_SNAPSHOT_FINGERPRINT_VERSION,
+        normalization_version=WORLD_BANK_NORMALIZATION_VERSION,
+        status=MacroSnapshotStatus.AVAILABLE.value,
     )
     observation_refs = tuple(
         FrozenMacroObservationRef(
@@ -374,6 +387,8 @@ def build_macro_replay_bundle(root: str | Path) -> ReplayBundleSpec:
             is_missing=o.is_missing,
             decimal_scale=o.decimal_scale,
             observation_status=o.observation_status,
+            period_semantics=o.period_semantics.value,
+            frequency=o.frequency.value,
         )
         for i, o in enumerate(result.observations)
     )
@@ -386,7 +401,7 @@ def build_macro_replay_bundle(root: str | Path) -> ReplayBundleSpec:
             response_status=200,
             final_hostname=_MACRO_HOSTNAME,
             content_type=_MACRO_CONTENT_TYPE,
-            fetched_at=_MACRO_FETCHED_AT,
+            fetched_at=macro_fetched_at,
         )
         for role, artifact_id, link_id, page, _blob in _MACRO_ROLE_ROWS
     )
@@ -396,9 +411,8 @@ def build_macro_replay_bundle(root: str | Path) -> ReplayBundleSpec:
             content_sha256=hashlib.sha256(blob).hexdigest(),
             media_type=_MACRO_CONTENT_TYPE,
             byte_size=len(blob),
-            role=role.value,
         )
-        for role, artifact_id, _link_id, _page, blob in _MACRO_ROLE_ROWS
+        for _role, artifact_id, _link_id, _page, blob in _MACRO_ROLE_ROWS
     )
     payload = {
         "schema_version": 1,

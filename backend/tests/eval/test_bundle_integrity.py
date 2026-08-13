@@ -2,6 +2,7 @@
 
 import json
 import shutil
+from datetime import datetime
 
 import pytest
 
@@ -10,6 +11,7 @@ from app.eval.bundle.integrity import verify_bundle_integrity
 from app.eval.canonical import canonical_json_bytes
 from app.eval.contracts import StructuredArtifactType
 from app.eval.errors import EvalContractError
+from tests.eval.conftest import build_bundle
 
 
 def test_verify_bundle_integrity_ok(built_bundle) -> None:
@@ -142,3 +144,19 @@ def test_dataset_fingerprint_stable_across_root_change(built_bundle) -> None:
     verified2 = verify_bundle_integrity(root2)
     assert verified1.dataset_fingerprint == verified2.dataset_fingerprint
     assert verified1.dataset_fingerprint == spec.dataset_fingerprint
+
+
+def test_future_document_bundle_rejected(tmp_path) -> None:
+    """no-lookahead：document published_at 晚于 analysis_as_of → 即使 bundle 自洽也拒绝。"""
+    root = tmp_path / "bundle_future_doc"
+    build_bundle(root, doc_published_at=datetime(2026, 8, 2, 12, 0, 0))
+    with pytest.raises(EvalContractError):
+        verify_bundle_integrity(root)
+
+
+def test_future_macro_bundle_rejected(tmp_path) -> None:
+    """no-lookahead：macro fetched_at 晚于 analysis_as_of → 即使 bundle 自洽也拒绝。"""
+    root = tmp_path / "bundle_future_macro"
+    build_bundle(root, macro_fetched_at=datetime(2026, 8, 2, 12, 0, 0))
+    with pytest.raises(EvalContractError):
+        verify_bundle_integrity(root)

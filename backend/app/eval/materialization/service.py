@@ -289,19 +289,17 @@ class EvaluationSnapshotMaterializer:
                     artifact_links=tuple(self._project_macro_artifact_link(link) for link in links),
                     raw_artifacts=tuple(
                         FrozenMacroRawArtifactRef(
-                            artifact_id=raw_rows[link.artifact_id].artifact_id,
-                            content_sha256=raw_rows[link.artifact_id].content_sha256,
-                            media_type=raw_rows[link.artifact_id].media_type,
-                            byte_size=raw_rows[link.artifact_id].byte_size,
-                            role=link.role,
+                            artifact_id=artifact.artifact_id,
+                            content_sha256=artifact.content_sha256,
+                            media_type=artifact.media_type,
+                            byte_size=artifact.byte_size,
                         )
-                        for link in links
+                        for artifact in raw_rows.values()
                     ),
                 )
             )
             payloads[fingerprint] = payload
-            for link in links:
-                artifact = raw_rows[link.artifact_id]
+            for artifact in raw_rows.values():
                 macro_blob_sources.append((artifact.content_sha256, artifact.storage_key))
         return refs, payloads, macro_blob_sources
 
@@ -352,6 +350,9 @@ class EvaluationSnapshotMaterializer:
             authority_tier_snapshot=snapshot.authority_tier_snapshot,
             critical_claim_eligible_snapshot=snapshot.critical_claim_eligible_snapshot,
             provider_capabilities_snapshot=tuple(snapshot.provider_capabilities_snapshot),
+            fingerprint_version=snapshot.fingerprint_version,
+            normalization_version=snapshot.normalization_version,
+            status=snapshot.status,
         )
 
     @staticmethod
@@ -366,6 +367,8 @@ class EvaluationSnapshotMaterializer:
             is_missing=observation.is_missing,
             decimal_scale=observation.decimal_scale,
             observation_status=observation.observation_status,
+            period_semantics=observation.period_semantics,
+            frequency=observation.frequency,
         )
 
     @staticmethod

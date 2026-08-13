@@ -31,6 +31,7 @@ from app.eval.contracts import (
 )
 from app.eval.errors import EvalContractError, EvalError, EvalFingerprintError, EvalVariantError
 from app.eval.variants import EvalVariantId
+from tests.eval.macro_factory import make_macro_ref
 
 
 def _sha(tag: str = "a") -> str:
@@ -161,15 +162,7 @@ def test_case_excludes_runtime_fields() -> None:
 def test_snapshot_covers_three_categories() -> None:
     snapshot = FrozenSourceSnapshot(
         document_sources=(_doc_ref("a"),),
-        macro_snapshots=(
-            FrozenMacroSnapshotRef(
-                snapshot_id=uuid4(),
-                series_id=uuid4(),
-                snapshot_fingerprint=_sha("c"),
-                payload_sha256=_sha("e"),
-                fetched_at=datetime(2026, 8, 1, 12, 0, 0),
-            ),
-        ),
+        macro_snapshots=(make_macro_ref(snapshot_fingerprint=_sha("c"), payload_sha256=_sha("e")),),
         structured_artifacts=(
             FrozenStructuredArtifactRef(
                 artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
@@ -300,13 +293,7 @@ def test_execution_spec_excludes_label_fields() -> None:
 
 
 def _macro_ref(fp: str) -> FrozenMacroSnapshotRef:
-    return FrozenMacroSnapshotRef(
-        snapshot_id=uuid4(),
-        series_id=uuid4(),
-        snapshot_fingerprint=fp,
-        payload_sha256=_sha("e"),
-        fetched_at=datetime(2026, 8, 1, 12, 0, 0),
-    )
+    return make_macro_ref(snapshot_fingerprint=fp, payload_sha256=_sha("e"))
 
 
 def test_macro_duplicate_fingerprint_rejected() -> None:
