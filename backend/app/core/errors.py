@@ -185,7 +185,7 @@ class MissingResearchQuestion(DomainError):
 
     code = "missing_research_question"
     http_status = 422
-    message = "任务未提供研究问题（questions 为空），无法启动真实研究"
+    message = "任务未提供核心研究问题，无法启动研究"
 
 
 class ResearchExecutionRequiresSingleQuestion(DomainError):
@@ -197,7 +197,7 @@ class ResearchExecutionRequiresSingleQuestion(DomainError):
 
     code = "research_execution_requires_single_question"
     http_status = 422
-    message = "任务当前不支持多个研究问题，请收敛为单个问题后再启动真实研究"
+    message = "一次研究任务需要且仅支持一个核心研究问题"
 
 
 class WorkflowActionInvalid(DomainError):
