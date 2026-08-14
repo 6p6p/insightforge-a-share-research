@@ -1,4 +1,4 @@
-# --- 本地环境文件（保留 .env.example） ---
+﻿# --- 本地环境文件（保留 .env.example） ---
 .env
 .env.*
 !.env.example
@@ -59,3 +59,8 @@ Desktop.ini
 
 # --- Claude Code 本地设置（保留 .claude 目录下其他可提交内容） ---
 .claude/settings.local.json
+
+# --- benchmark 运行时产物（dataset / run 输出，可重建） ---
+/benchmark/
+
+
