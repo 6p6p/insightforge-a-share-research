@@ -15,10 +15,15 @@ COPY backend/alembic ./alembic
 # 避免 `pip install .` 从默认 PyPI 拉取 CUDA torch / nvidia-* 运行时包。
 # PEP 440 下 torch==2.13.0 匹配 2.13.0+cpu（public version 忽略 local version），
 # 因此后续 `pip install .` 会复用此 CPU torch，不会重装 CUDA build。
-RUN python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch==2.13.0+cpu"
+# `--index-url` 指向 PyTorch CPU 源（+cpu 版本只在此发布）；torch 的普通依赖
+# （sympy / filelock 等）需 `--extra-index-url` 从 PyPI 解析（单源会解析失败）。
+RUN python -m pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    "torch==2.13.0+cpu"
 
-# 安装 backend 运行依赖（不含 dev 组）
-RUN pip install --no-cache-dir .
+# 安装 backend 运行依赖（不含 dev 组）；显式超时/重试抵御 CDN 抖动。
+RUN pip install --no-cache-dir --timeout 120 --retries 5 .
 
 # 清理镜像内的全部 __pycache__ / .pyc：当前 Windows/Docker 构建环境中观察到间歇性
 # pyc corruption（ValueError: bad marshal data），源码 .py 均正常、移除 pyc 后运行

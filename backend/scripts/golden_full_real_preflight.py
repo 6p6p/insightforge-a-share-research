@@ -637,8 +637,35 @@ async def _verify_final_chain(
 
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
-    if settings.deepseek_api_key is None or not settings.deepseek_api_key.get_secret_value():
-        print(json.dumps({"ok": False, "blocker": "DEEPSEEK_API_KEY 未配置"}, ensure_ascii=False))
+
+    def _needs_real_llm() -> bool:
+        """real-planner 或任一组件模型为 real 时需要真实 key。"""
+        if args.mode == "real-planner":
+            return True
+        return (
+            any(
+                getattr(args, name, "fake") == "real"
+                for name in (
+                    "financial_model",
+                    "draft_model",
+                    "claim_model",
+                    "extractor_model",
+                    "macro_model",
+                    "synthesis_model",
+                )
+            )
+            or args.audit_model == "real"
+        )
+
+    if _needs_real_llm() and (
+        settings.deepseek_api_key is None or not settings.deepseek_api_key.get_secret_value()
+    ):
+        print(
+            json.dumps(
+                {"ok": False, "blocker": "DEEPSEEK_API_KEY 未配置（全受控模式可离线运行）"},
+                ensure_ascii=False,
+            )
+        )
         return 3
 
     manager = DatabaseManager(

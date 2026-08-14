@@ -136,6 +136,14 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     )
     application.state.resources = resources
     logger.info("application_startup", environment=settings.app_env)
+    # LangGraph checkpoint vendor 表（checkpoints / checkpoint_writes /
+    # checkpoint_blobs）由 AsyncPostgresSaver.setup() 创建（**不**属于 alembic
+    # 业务迁移）；应用启动时幂等确保存在（fresh volume / 空库首次启动必需，
+    # 否则 /ready 的 checkpoint 探针报 UndefinedTable）。
+    try:
+        await langgraph.setup()
+    except Exception as exc:  # noqa: BLE001 — PostgreSQL 不可用不阻止启动
+        logger.warning("checkpoint_setup_failed", error_type=type(exc).__name__)
     # best-effort reconcile：在接受新 WorkflowRun 前完成；PostgreSQL 不可用不阻止启动
     try:
         recovery = WorkflowRecoveryService(sessionmaker)
