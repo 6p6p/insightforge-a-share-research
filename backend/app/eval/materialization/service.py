@@ -28,11 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.claims.macro_policy import resolve_availability
 from app.core.errors import RawArtifactNotFound
 from app.db.models.company_alias import CompanyAliasModel
+from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
 from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
 from app.db.models.raw_artifact import RawArtifactModel
+from app.db.models.source_record import SourceRecordModel
 from app.eval.bundle.writer import EvaluationBundleWriter
 from app.eval.contracts import (
     EvalCase,
@@ -69,11 +71,18 @@ from app.eval.materialization.projections import (
     build_valuation_observation_payload,
     payload_sha256,
 )
+from app.eval.materialization.provenance import (
+    build_evidence_match,
+    build_observation_provenance,
+    build_observation_source_provenance,
+    build_replay_evidence,
+)
 from app.evidence.contracts import EvidenceOrigin
 from app.financial.contracts import compute_metric_fingerprint
 from app.financial.number_parser import normalize_value_cny, parse_financial_number
 from app.macro.errors import MacroSnapshotIntegrityError
 from app.repositories.company_repository import CompanyRepository
+from app.repositories.evidence_card_repository import EvidenceCardRepository
 from app.repositories.financial_metric_observation_repository import (
     FinancialMetricObservationRepository,
 )
@@ -88,7 +97,10 @@ from app.repositories.valuation_metric_observation_repository import (
 )
 from app.services.macro_persistence_service import MacroPersistenceService
 from app.storage.raw_store import LocalRawArtifactStore
-from app.valuation.comparison_service import RelativeValuationComparisonService
+from app.valuation.comparison_service import (
+    RelativeValuationComparisonService,
+    VerifiedComparison,
+)
 from app.valuation.contracts import compute_valuation_observation_fingerprint
 from app.valuation.errors import ValuationIntegrityError
 from app.valuation.number_parser import parse_valuation_number
@@ -438,7 +450,12 @@ class EvaluationSnapshotMaterializer:
             raise EvalMaterializationError(
                 "financial metric observation fingerprint mismatch (tampered)"
             )
-        payload = build_financial_metric_payload(row, fingerprint)
+        provenance = build_observation_source_provenance(
+            build_evidence_match(
+                *await self._load_evidence_context(session, row.source_evidence_card_id)
+            )
+        )
+        payload = build_financial_metric_payload(row, fingerprint, provenance)
         ref = FrozenStructuredArtifactRef(
             artifact_type=StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION,
             artifact_id=row.metric_observation_id,
@@ -472,7 +489,12 @@ class EvaluationSnapshotMaterializer:
         )
         if fingerprint != row.valuation_observation_fingerprint:
             raise EvalMaterializationError("valuation observation fingerprint mismatch (tampered)")
-        payload = build_valuation_observation_payload(row, fingerprint)
+        provenance = build_observation_source_provenance(
+            build_evidence_match(
+                *await self._load_evidence_context(session, row.source_evidence_card_id)
+            )
+        )
+        payload = build_valuation_observation_payload(row, fingerprint, provenance)
         ref = FrozenStructuredArtifactRef(
             artifact_type=StructuredArtifactType.RELATIVE_VALUATION_OBSERVATION,
             artifact_id=row.valuation_observation_id,
@@ -499,7 +521,8 @@ class EvaluationSnapshotMaterializer:
             raise EvalMaterializationError("valuation comparison not found")
         if verified.target_company_id != spec.company_id:
             raise EvalMaterializationError("valuation comparison company mismatch")
-        payload = build_comparison_payload(verified)
+        provenance = await self._comparison_provenance(session, verified)
+        payload = build_comparison_payload(verified, provenance)
         ref = FrozenStructuredArtifactRef(
             artifact_type=StructuredArtifactType.RELATIVE_VALUATION_COMPARISON,
             artifact_id=verified.comparison_id,
@@ -507,6 +530,91 @@ class EvaluationSnapshotMaterializer:
             payload_sha256=payload_sha256(payload),
         )
         return ref, payload
+
+    # ------------------------------------------------------------ structured provenance
+
+    async def _load_evidence_context(
+        self, session: AsyncSession, evidence_card_id: UUID
+    ) -> tuple[EvidenceCardModel, SourceRecordModel, RawArtifactModel]:
+        """加载 EvidenceCard + SourceRecord + RawArtifact（structured provenance 用）。
+
+        structured observation 的 source evidence 必须是 document-origin（创建时
+        锁定）；缺失 / 非 document → `EvalMaterializationError`（不能构建语义
+        provenance，fail-fast 而非冻结不完整引用）。
+        """
+        card = await EvidenceCardRepository(session).get_by_id(evidence_card_id)
+        if card is None or card.source_id is None:
+            raise EvalMaterializationError(
+                "structured artifact source evidence card missing or not document-origin"
+            )
+        source = await SourceRecordRepository(session).get_by_id(card.source_id)
+        if source is None:
+            raise EvalMaterializationError("structured artifact source record missing")
+        artifact = await RawArtifactRepository(session).get_by_id(source.artifact_id)
+        if artifact is None:
+            raise EvalMaterializationError("structured artifact source raw artifact missing")
+        return card, source, artifact
+
+    async def _comparison_provenance(
+        self, session: AsyncSession, verified: VerifiedComparison
+    ) -> dict:
+        """comparison provenance：target observation（match）+ peer observations
+        （replay，含 peer 公司身份）+ peer 公司语义身份。"""
+        obs_repo = ValuationMetricObservationRepository(session)
+        target_obs = await obs_repo.get_by_id(verified.target_observation_id)
+        if target_obs is None:
+            raise EvalMaterializationError("comparison target observation not found")
+        target_evidence = build_evidence_match(
+            *await self._load_evidence_context(session, target_obs.source_evidence_card_id)
+        )
+        target_provenance = build_observation_provenance(
+            metric_code=target_obs.metric_code,
+            metric_as_of=target_obs.metric_as_of.isoformat(),
+            source_value_text=target_obs.source_value_text,
+            metric_value=str(target_obs.metric_value),
+            evidence=target_evidence,
+        )
+        peer_provenances: list[dict] = []
+        peer_company_refs: list[dict] = []
+        for obs_id in verified.peer_observation_ids:
+            peer_obs = await obs_repo.get_by_id(obs_id)
+            if peer_obs is None:
+                raise EvalMaterializationError("comparison peer observation not found")
+            card, source, artifact = await self._load_evidence_context(
+                session, peer_obs.source_evidence_card_id
+            )
+            company = await CompanyRepository(session).get_by_id(peer_obs.company_id)
+            if company is None:
+                raise EvalMaterializationError("comparison peer company not found")
+            replay = build_replay_evidence(card, source, artifact, company)
+            peer_provenances.append(
+                build_observation_provenance(
+                    metric_code=peer_obs.metric_code,
+                    metric_as_of=peer_obs.metric_as_of.isoformat(),
+                    source_value_text=peer_obs.source_value_text,
+                    metric_value=str(peer_obs.metric_value),
+                    evidence=replay,
+                )
+            )
+            peer_company_refs.append(
+                {
+                    "exchange": company.exchange,
+                    "security_code": company.security_code,
+                    "official_name": company.official_name,
+                    "short_name": company.short_name,
+                    "board": company.board,
+                }
+            )
+        return {
+            "schema_version": 1,
+            "target_observation": target_provenance,
+            "peer_observations": tuple(
+                sorted(peer_provenances, key=lambda item: item["source_value_text"])
+            ),
+            "peer_companies": tuple(
+                sorted(peer_company_refs, key=lambda item: item["security_code"])
+            ),
+        }
 
     # ------------------------------------------------------------ 字节校验
 

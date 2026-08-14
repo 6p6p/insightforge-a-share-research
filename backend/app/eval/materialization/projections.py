@@ -24,7 +24,7 @@ from app.eval.canonical import canonical_json_bytes
 from app.eval.contracts import StructuredArtifactType
 from app.valuation.comparison_service import VerifiedComparison
 
-PAYLOAD_SCHEMA_VERSION = 1
+PAYLOAD_SCHEMA_VERSION = 2  # v2: structured payload 携带 stable semantic provenance
 
 
 def payload_sha256(payload: dict[str, Any]) -> str:
@@ -94,10 +94,16 @@ def build_macro_payload(
 
 
 def build_financial_metric_payload(
-    row: FinancialMetricObservationModel, artifact_fingerprint: str
+    row: FinancialMetricObservationModel,
+    artifact_fingerprint: str,
+    provenance: dict | None = None,
 ) -> dict[str, Any]:
-    """投影 frozen financial metric observation payload（envelope 含 identity）。"""
-    return {
+    """投影 frozen financial metric observation payload（envelope 含 identity）。
+
+    `provenance`（v2）：stable semantic evidence 匹配键（content_sha256 +
+    statement + quote），供 rehydration 后把观测重新绑定到 attempt 新 EvidenceCard。
+    """
+    payload: dict[str, Any] = {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "artifact_type": StructuredArtifactType.FINANCIAL_METRIC_OBSERVATION.value,
         "artifact_fingerprint": artifact_fingerprint,
@@ -115,13 +121,18 @@ def build_financial_metric_payload(
         "normalized_value_cny": _dec(row.normalized_value_cny),
         "metric_schema_version": row.metric_schema_version,
     }
+    if provenance is not None:
+        payload["provenance"] = provenance
+    return payload
 
 
 def build_valuation_observation_payload(
-    row: ValuationMetricObservationModel, artifact_fingerprint: str
+    row: ValuationMetricObservationModel,
+    artifact_fingerprint: str,
+    provenance: dict | None = None,
 ) -> dict[str, Any]:
     """投影 frozen valuation observation payload（envelope 含 identity）。"""
-    return {
+    payload: dict[str, Any] = {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "artifact_type": StructuredArtifactType.RELATIVE_VALUATION_OBSERVATION.value,
         "artifact_fingerprint": artifact_fingerprint,
@@ -134,15 +145,21 @@ def build_valuation_observation_payload(
         "metric_value": _dec(row.metric_value),
         "valuation_observation_schema_version": row.valuation_observation_schema_version,
     }
+    if provenance is not None:
+        payload["provenance"] = provenance
+    return payload
 
 
-def build_comparison_payload(verified: VerifiedComparison) -> dict[str, Any]:
+def build_comparison_payload(
+    verified: VerifiedComparison,
+    provenance: dict | None = None,
+) -> dict[str, Any]:
     """投影 frozen relative valuation comparison payload（envelope 含 identity）。
 
     注意：`VerifiedComparison` 不暴露 `comparison_schema_version`（只暴露
     `formula_version`）；schema version 已编码进 `comparison_fingerprint`，不重复。
     """
-    return {
+    payload: dict[str, Any] = {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "artifact_type": StructuredArtifactType.RELATIVE_VALUATION_COMPARISON.value,
         "artifact_fingerprint": verified.comparison_fingerprint,
@@ -162,3 +179,6 @@ def build_comparison_payload(verified: VerifiedComparison) -> dict[str, Any]:
         "peer_companies": [str(c) for c in verified.peer_companies],
         "peer_observation_ids": [str(o) for o in verified.peer_observation_ids],
     }
+    if provenance is not None:
+        payload["provenance"] = provenance
+    return payload

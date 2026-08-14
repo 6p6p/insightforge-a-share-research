@@ -126,3 +126,15 @@ class EvalReplayIntegrityError(EvalReplayError):
     bundle 不自洽等）。"""
 
     code = "eval_replay_integrity_error"
+
+
+class EvalRemapError(EvalError):
+    """Structured evidence remap 失败（provenance 缺失 / evidence 匹配失败 /
+    歧义 / 重建校验失败等）。
+
+    独立于 `EvalReplayError`（那是 document / macro rehydration）；本错误发生在
+    structured artifact 重新绑定 attempt EvidenceCard 阶段。错误消息**不**包含
+    raw bytes / payload / 完整 fingerprint / API key。
+    """
+
+    code = "eval_remap_error"
