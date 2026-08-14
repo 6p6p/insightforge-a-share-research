@@ -67,7 +67,9 @@ docker compose up -d postgres chroma
 ### 3. 安装 backend 并迁移
 
 ```bash
-python -m pip install -e "./backend[dev]"
+# CPU-only torch 契约：torch==2.13.0+cpu 只发布在 PyTorch CPU index
+# （PyPI 的 Linux torch wheel 是 CUDA build）；所有安装入口统一带该 index。
+python -m pip install -e "./backend[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
 cd backend
 python -m alembic upgrade head        # 空库 → 0047 head
 ```

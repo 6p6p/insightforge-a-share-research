@@ -30,7 +30,14 @@ dependencies = [
     "sqlalchemy>=2.0,<2.2",
     "structlog>=24.1,<26.0",
     "tokenizers==0.22.2",
-    "torch==2.13.0",
+    # CPU-only PyTorch 是冻结运行时契约（BGE/sentence-transformers 不需要
+    # CUDA；`torch.version.cuda is None` 由 runtime contract test 强制）。
+    # 用 PEP 440 local version `2.13.0+cpu` 精确表达：PyPI 的 Linux torch
+    # wheel 是 CUDA build（cuda="13.0"），+cpu wheel 只发布在 PyTorch CPU
+    # index（download.pytorch.org/whl/cpu）——所有安装入口（CI / 本地 /
+    # Docker）必须带该 index（见 .github/workflows 与 README），保证
+    # Docker/CI/local 解析到同一 CPU build。
+    "torch==2.13.0+cpu",
     "transformers==4.57.6",
     "uvicorn[standard]>=0.30,<1.0",
 ]

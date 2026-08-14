@@ -18,7 +18,14 @@ def test_win32_sets_selector_policy(monkeypatch) -> None:
     class FakePolicy:
         pass
 
-    monkeypatch.setattr(asyncio, "WindowsSelectorEventLoopPolicy", lambda: FakePolicy())
+    # Linux 上 asyncio 无 WindowsSelectorEventLoopPolicy 属性：raising=False
+    # 让 monkeypatch 在任意平台创建 mock 属性（Windows 上则覆盖真实类）。
+    monkeypatch.setattr(
+        asyncio,
+        "WindowsSelectorEventLoopPolicy",
+        lambda: FakePolicy(),
+        raising=False,
+    )
     monkeypatch.setattr(asyncio, "set_event_loop_policy", lambda policy: calls.append(policy))
 
     configure_asyncio_runtime()

@@ -471,6 +471,13 @@ def test_store_rejects_empty_and_path_traversal(tmp_path) -> None:
         "a//b",
         "a/./b",
         "..\\..\\etc\\passwd",
+        # 跨平台契约（regression）：反斜杠在 Linux 是普通字符、Windows 是分隔符，
+        # storage key 必须 OS-independent —— 含 `\` 的 key 一律确定性拒绝，
+        # 不得依赖 host Path 语义（Windows 曾靠 is_relative_to 兜底而 Linux 放行）。
+        "a\\..\\b",
+        "dir\\sub",
+        "a/b\\..\\c",
+        "..\\evil",
     ):
         with pytest.raises(InvalidStorageKey):
             store._resolve(bad)

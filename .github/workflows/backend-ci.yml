@@ -19,7 +19,11 @@ jobs:
         run: python -m pip install --upgrade pip
 
       - name: Install backend
-        run: python -m pip install -e "./backend[dev]"
+        # CPU-only torch 契约：torch==2.13.0+cpu 只发布在 PyTorch CPU index
+        # （PyPI 的 Linux torch wheel 是 CUDA build）——editable install 必须
+        # 带 --extra-index-url；与 backend.Dockerfile（预装 +cpu wheel）和本地
+        # 安装（README 同命令）解析到同一 CPU build。
+        run: python -m pip install -e "./backend[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Ruff check
         run: ruff check backend

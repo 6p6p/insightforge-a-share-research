@@ -145,6 +145,13 @@ class ExportArtifactStore:
     def _resolve(self, storage_key: str) -> Path:
         if not storage_key or storage_key.startswith(("/", "\\")):
             raise InvalidStorageKey()
+        # 反斜杠一律拒绝：storage key 契约必须 OS-independent，不能依赖 host
+        # Path 对分隔符的解释——Windows 上 `a\..\b` 会被 pathlib 当路径分隔
+        # （靠下方 is_relative_to 兜底），而 Linux 上 `\` 是普通字符、同一 key
+        # 会被当作单段文件名**接受**（行为不一致）。确定性拒绝 `\` 使两平台
+        # 对 traversal / 绝对路径 / 空段等危险形式语义完全一致。
+        if "\\" in storage_key:
+            raise InvalidStorageKey()
         segments = storage_key.split("/")
         if any(segment in ("", ".", "..") for segment in segments):
             raise InvalidStorageKey()
