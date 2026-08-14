@@ -732,3 +732,48 @@ conda run -n insightforge python -m pytest -c backend/pyproject.toml backend/tes
 ## 阶段 0 验收
 
 阶段 0 的工程基座验收记录见 [docs/stage-0-acceptance.md](docs/stage-0-acceptance.md)。
+
+## 三路 Variant 评估 Benchmark（阶段 7B）
+
+Stage 7B 提供**可复现的模型评估体系**：frozen bundle（curated 真实公开 A 股
+信息）→ 每 attempt 全新隔离 PG + per-attempt Chroma collection →
+`ExecutionSpec → Trial → Attempt → Output → Scoring` 全链路 immutable
+持久化（fingerprint replay）→ 确定性 + runtime 指标。
+
+- **Dataset**（`backend/app/eval/benchmark/dataset.py`）：临时 seed PG → 3 个
+  case（`moutai-business` / `moutai-financial` document-only、
+  `moutai-full` 含 macro + financial + valuation），as_of=2025-08-01 冻结；
+- **三路 variant**（`app/eval/variants/`）：`single_rag`（单次检索 + 单次生成）、
+  `multi_stage_no_audit`（plan → route → fulfill → Stage4 → Stage5 first draft，
+  无 audit）、`insightforge_full`（生产顶层 LangGraph 编排 + Audit + Revision +
+  Backflow，人类交互点自动 approve）；全部共享同 case / config / snapshot
+  （公平比较）；
+- **诚实契约**：single_rag / multi_stage_no_audit 遇 macro / structured 输入
+  fail-fast（稳定 error code），不绕过、不误报；
+- **离线确定性 fake 集**（`app/eval/benchmark/fakes.py`，0 真实 DeepSeek /
+  0 网络）用于 CI；`--real` 走生产 DeepSeek adapter（frozen 模型 policy
+  `deepseek:deepseek-v4-flash`，建议 bounded case 子集）；
+- **CLI**（`backend/app/eval/cli.py`）：
+
+```bash
+# backend 目录，insightforge conda env
+python -m app.eval.cli dataset --root ../benchmark/dataset      # 构建 dataset
+python -m app.eval.cli run --dataset ../benchmark/dataset \
+    --workdir ../benchmark/run_fake                            # 离线三路实验（默认）
+python -m app.eval.cli run --real --dataset ../benchmark/dataset \
+    --cases moutai-business --workdir ../benchmark/run_real    # bounded 真实模型探针
+python -m app.eval.cli score --workdir ../benchmark/run_fake   # 评分一致性校验
+python -m app.eval.cli report --workdir ../benchmark/run_fake  # 重渲染 summary.md/csv
+```
+
+  产物：`results.json`（machine-readable）+ `summary.md` / `summary.csv`；
+  评分经 `EvaluationExecutionPersistenceService` /
+  `EvaluationScoringPersistenceService` 落库并 verify（immutable +
+  fingerprint replay；错误只报稳定 error code，不泄漏 prompt / key）；
+- **Web 对比视图（§25）**：`GET /api/v1/eval/benchmark/summary?run=fake|real`
+  只读暴露 workspace 结果；前端 `/eval` 页（Ant Design 表格 + 统计卡片，
+  fake/real 切换）。workspace 根可用 `EVAL_BENCHMARK_WORKSPACE` 覆盖。
+
+测试：`tests/eval/`（189 项单元）+ `tests/integration/test_eval_benchmark_experiment.py`
+（3 项集成：成功持久化/清理、故障注入 finally 清理、fail-fast 诚实契约）+ 全量
+gate（2302 单元 + 集成套件）。
