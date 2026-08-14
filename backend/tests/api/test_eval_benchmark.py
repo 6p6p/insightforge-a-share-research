@@ -9,6 +9,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import Settings
 from app.main import create_app
 
 
@@ -59,7 +60,16 @@ def client(tmp_path, monkeypatch) -> TestClient:
     }
     (run_dir / "results.json").write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setenv("EVAL_BENCHMARK_WORKSPACE", str(tmp_path))
-    app = create_app()
+    # clean environment（CI 无本地 .env）：显式注入 test Settings，不依赖
+    # 环境/文件配置（conftest test_settings 同形状）。
+    app = create_app(
+        Settings(
+            _env_file=None,
+            app_env="test",
+            log_level="DEBUG",
+            database_url="postgresql+psycopg://user:pass@127.0.0.1:5433/insightforge",
+        )
+    )
     with TestClient(app) as test_client:
         yield test_client
 

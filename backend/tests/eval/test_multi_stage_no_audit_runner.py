@@ -23,6 +23,7 @@
 """
 
 import ast
+import importlib.util
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -834,9 +835,17 @@ async def test_correct_identity_all_factories_same_observer(monkeypatch) -> None
     assert observers == {collector}
 
 
+def _runner_source_path(runner_cls) -> Path:
+    """runner 源文件绝对路径（importlib spec，**不依赖 CWD**——CI 从 repo root
+    运行 pytest，相对路径 `app/eval/...` 会 FileNotFoundError）。"""
+    spec = importlib.util.find_spec(runner_cls.__module__)
+    assert spec is not None and spec.origin is not None
+    return Path(spec.origin)
+
+
 def test_runner_imports_no_production_adapter_modules() -> None:
     """AST 断言：runner 不 import 任何生产 adapter 模块（fake factories 必须被实际使用）。"""
-    runner_file = Path(MultiStageNoAuditVariantRunner.__module__.replace(".", "/") + ".py")
+    runner_file = _runner_source_path(MultiStageNoAuditVariantRunner)
     tree = ast.parse(runner_file.read_text(encoding="utf-8"), runner_file.name)
     forbidden = (
         "app.research_planning.planner",
@@ -1081,7 +1090,7 @@ def test_no_audit_review_revision_backflow_imports() -> None:
     不能按子串判断）：audit / review / revision / research_backflow + Stage5 的
     check 节点（report.checks / check_service）。
     """
-    runner_file = Path(MultiStageNoAuditVariantRunner.__module__.replace(".", "/") + ".py")
+    runner_file = _runner_source_path(MultiStageNoAuditVariantRunner)
     tree = ast.parse(runner_file.read_text(encoding="utf-8"), runner_file.name)
     forbidden_modules = (
         "app.audit",

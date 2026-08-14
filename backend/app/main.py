@@ -42,4 +42,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return application
 
 
-app = create_app()
+_app: FastAPI | None = None
+
+
+def get_app() -> FastAPI:
+    """惰性创建模块级应用（uvicorn 引用 `app.main:app` 时首次触发）。
+
+    **import app.main 不产生配置 side effect**：测试在 clean environment
+    （无 .env / 无 DATABASE_URL）中 import `create_app` 注入 test Settings
+    不再被生产配置解析阻塞（此前 module-level `app = create_app()` 在 import
+    时即调用 get_settings()，CI 无本地 .env → ValidationError）。
+
+    正式启动路径（`python -m app` / `uvicorn app.main:app`）首次访问 `app`
+    属性时才解析生产 Settings——必需配置缺失仍 fail-fast（不改默认值、不
+    弱化生产校验）。
+    """
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app
+
+
+def __getattr__(name: str) -> object:
+    """PEP 562：模块属性惰性解析（仅 `app`；其余 AttributeError 原样）。"""
+    if name == "app":
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

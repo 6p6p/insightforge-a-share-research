@@ -18,6 +18,19 @@ import asyncio
 import sys
 
 from app.cli import run_backend
+from app.core.config import Settings
+
+
+def _test_settings() -> Settings:
+    """clean environment（CI 无本地 .env）：显式 test Settings（fake loopback DB）。"""
+    return Settings(
+        _env_file=None,
+        app_env="test",
+        app_host="127.0.0.1",
+        app_port=8001,
+        log_level="INFO",
+        database_url="postgresql+psycopg://user:pass@127.0.0.1:5433/insightforge",
+    )
 
 
 def test_launcher_import_configures_asyncio_runtime() -> None:
@@ -30,6 +43,7 @@ def test_main_calls_configure_before_uvicorn_run(monkeypatch) -> None:
     """main() 内 configure_asyncio_runtime 必须排在 uvicorn.run 之前。"""
     order: list[str] = []
     monkeypatch.setattr(run_backend, "configure_asyncio_runtime", lambda: order.append("configure"))
+    monkeypatch.setattr(run_backend, "get_settings", _test_settings)
     captured: dict = {}
 
     def fake_run(*args, **kwargs):
