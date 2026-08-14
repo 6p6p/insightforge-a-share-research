@@ -1,6 +1,6 @@
 # InsightForge
 
-面向 A 股上市公司的**证据驱动基本面研究与事实审核系统**（V1.0 release candidate）。
+面向 A 股上市公司的**证据驱动基本面研究与事实审核系统**（V1.1 Product Completion）。
 
 InsightForge 把「公司基本面研究」构建为一条可追溯、可重算、可审计的证据链：
 
@@ -17,6 +17,10 @@ Source → Evidence → Claim → Report → Audit
 
 一切结论必须可追溯到证据，一切财务数字可由原始观测确定性重算。
 
+> **V1.1 产品语义**：一次研究任务围绕**一个核心研究问题**执行（研究问题 → 自动
+> 规划 → 资料准备 → 证据提取 → 分析 → 报告 → 审核）。资料不足时进入人工环节
+> （上传 PDF / 导入官方披露链接后自动处理资料并继续研究）。
+>
 > **重要**：真实 LLM（DeepSeek）在严格结构化政策下的合规性问题与人工确认机制
 > 详见 [已知限制](#已知限制-known-limitations)。当前不承诺「真实模型全自动无人值守」。
 
@@ -28,6 +32,7 @@ Source → Evidence → Claim → Report → Audit
 | 编排 | **LangGraph**（唯一顶层编排器）+ PG Checkpointer（断点恢复） |
 | 数据库 | PostgreSQL（业务事实 + checkpoint 源） |
 | 向量 | ChromaDB（**派生、可重建**索引；BGE-small-zh embedding） |
+| 公司主数据 | versioned snapshot（SSE/SZSE 官方 + BSE 记录降级，随仓库提交） |
 | LLM | DeepSeek（`deepseek-v4-flash`，frozen policy，thinking disabled） |
 | 前端 | React 18 · TypeScript · Vite · Ant Design · TanStack Query |
 | 质量 | pytest（2300+ 单元 / 1000+ 集成）· ruff · alembic · GitHub Actions |
@@ -36,6 +41,8 @@ Source → Evidence → Claim → Report → Audit
 
 ```
 backend/            FastAPI 后端（app / alembic / tests / scripts）
+  app/companies/master/   A 股公司主数据 versioned snapshot（company_master_v1.json）
+  scripts/build_company_master.py   从权威来源重建 snapshot 的工具
 frontend/           React + TypeScript 前端
 docs/               ADR（架构决策记录）与设计文档
 docker/             backend 镜像构建
@@ -71,15 +78,26 @@ docker compose up -d postgres chroma
 # （PyPI 的 Linux torch wheel 是 CUDA build）；所有安装入口统一带该 index。
 python -m pip install -e "./backend[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
 cd backend
-python -m alembic upgrade head        # 空库 → 0047 head
+python -m alembic upgrade head        # 空库 → 0048 head
 ```
 
-### 4. 启动 backend
+### 4. 启动 backend（首次启动自动完成生产 bootstrap）
 
 ```bash
 cd backend
 python -m app        # 跨平台入口（Windows 需 SelectorEventLoop，见 app/__main__.py）
 ```
+
+首次启动时应用自动（幂等、离线、可观测）完成：
+
+1. **Source Registry bootstrap**：写入内置默认来源机构（sse / szse / bse /
+   cninfo / csrc / nbs / fred / world_bank / xinhuanet / cnstock / cs_com_cn）；
+2. **Company Master bootstrap**：companies 表为空时导入 bundled A 股公司主数据
+   snapshot（**5500+ 家上市公司**，SSE/SZSE 官方来源 + BSE 记录降级，含全称 /
+   简称 / 曾用名别名），无需任何手动 seed。
+
+此后「贵州茅台」「600519」「600519.SH」「SSE:600519」「宁德时代」
+「300750」「300750.SZ」「SZSE:300750」均可直接识别。
 
 - 存活：http://127.0.0.1:8001/api/v1/health/live → `{"status":"ok"}`
 - 就绪（database / chroma / checkpoint / raw / export 全依赖）：http://127.0.0.1:8001/api/v1/health/ready
@@ -111,6 +129,11 @@ npm run test
 npm run typecheck
 npm run build
 ```
+
+> Fresh Product Acceptance（`backend/tests/integration/test_fresh_product_acceptance.py`）：
+> 在临时 fresh DB 上验证「migration → bootstrap → 贵州茅台/宁德时代识别 → 任务 →
+> 自动研究 → 资料不足 → 上传 PDF → 自动资料处理 → 继续研究 → 证据 → 分析 →
+> 报告 → 引用链」，全程不预置公司 / 不手工调用内部管线。
 
 ## 环境变量
 
