@@ -12,6 +12,7 @@ from app.research_orchestration.service import ResearchOrchestrationService
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.source_ingestion_service import SourceIngestionService
+from app.services.source_preparation_service import SourcePreparationService
 from app.services.source_registry_service import SourceRegistryService
 from app.services.task_artifact_service import TaskArtifactService
 from app.services.task_citation_service import TaskCitationService
@@ -194,3 +195,13 @@ def get_source_ingestion_service(request: Request) -> SourceIngestionService:
         raw_store=resources.raw_storage,
         max_bytes=settings.source_max_file_size_bytes,
     )
+
+
+def get_source_preparation_service(request: Request) -> SourcePreparationService | None:
+    """V1.1 P0-2：共享 SourcePreparationService（lifespan 装配；后台任务生命周期
+    由服务实例管理，不随请求结束）。资源未绑定（测试 app / 异常配置）→ None，
+    调用方跳过后台预准备（上传/导入主路径不受影响）。"""
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.source_preparation is None:
+        return None
+    return resources.source_preparation

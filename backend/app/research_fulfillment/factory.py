@@ -68,10 +68,20 @@ def create_research_fulfillment_service(
     retrieval = RetrievalService(
         sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma
     )
+    from app.services.source_parsing_service import SourceParsingService
+    from app.storage.raw_store import LocalRawArtifactStore
+
+    raw_store = LocalRawArtifactStore(
+        root=settings.raw_storage_root,
+        max_bytes=settings.source_max_file_size_bytes,
+        max_json_bytes=settings.macro_max_json_response_bytes,
+    )
+    parsing_service = SourceParsingService(sessionmaker, raw_store)
     index_builder = SourceIndexBuilder(
         sessionmaker,
         ChunkingService(sessionmaker),
         VectorIndexService(sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma),
+        parsing_service=parsing_service,
     )
     document_executor = DocumentNeedExecutor(
         sessionmaker,

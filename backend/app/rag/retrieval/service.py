@@ -24,6 +24,7 @@
 BM25 / LLM judge**。top_k 不足时返回实际命中数。
 """
 
+import asyncio
 import math
 from uuid import UUID
 
@@ -100,7 +101,8 @@ class RetrievalService:
             )
 
         # 2. query embedding（加 instruction；禁止 silent truncation）。
-        query_vector = self._provider.embed_query(query.query_text)
+        # 真实 BGE 推理同步 CPU 密集 → 移出事件循环（V1.1 P0-2）。
+        query_vector = await asyncio.to_thread(self._provider.embed_query, query.query_text)
 
         # 3. Chroma filtered query。
         where = build_chroma_where(chunk_set_ids=eligible, query=query)

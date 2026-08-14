@@ -200,6 +200,7 @@ class ResearchOrchestrationService:
         stage5_runner: Stage5WorkflowRunner | None = None,
         orchestration_runner: ResearchOrchestrationRunner | None = None,
         execution_manager: ResearchOrchestrationExecutionManager | None = None,
+        source_preparation: object | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._plan_service = plan_service
@@ -211,6 +212,9 @@ class ResearchOrchestrationService:
         # 后台调度（Gate B/C/E）：prepare_orchestration_start / retry_and_schedule /
         # cancel_orchestration 共用同一 manager；未绑定 → 不调度（unit 测试）。
         self._execution_manager = execution_manager
+        # V1.1 P0-2：resume 前预准备公司 source（parse→chunk→index，best-effort
+        # 后台）；未绑定（unit 测试）→ 跳过，编排图内 fulfill 仍可自愈。
+        self._source_preparation = source_preparation
 
     @property
     def orchestration_runner(self) -> ResearchOrchestrationRunner | None:
@@ -730,8 +734,33 @@ class ResearchOrchestrationService:
                 "orchestration is not waiting for source acquisition resume"
             )
 
+        # V1.1 P0-2：resume 前预准备该公司全部未 parse 的 source（后台
+        # best-effort）。即使预准备未完成/失败，编排图内 fulfill 的 index
+        # builder 仍会自愈补建——这里只是让「继续研究」尽快进入就绪。
+        if self._source_preparation is not None:
+            try:
+                company_id = await self._company_id_for_orchestration(orchestration)
+                if company_id is not None:
+                    self._source_preparation.schedule_prepare_company(company_id)
+            except Exception as exc:  # noqa: BLE001 - 预准备失败不阻止 resume
+                logger.warning(
+                    "orchestration_resume_prepare_skipped",
+                    orchestration_id=str(orchestration_id),
+                    error_type=type(exc).__name__,
+                )
+
         self._execution_manager.schedule_resume(orchestration_id, kind)
         return await self.get_orchestration(orchestration_id)
+
+    async def _company_id_for_orchestration(self, orchestration) -> UUID | None:
+        """orchestration → research_plan_id → plan.company_id（预准备用）。"""
+        if orchestration.research_plan_id is None:
+            return None
+        from app.db.models.research_plan import ResearchPlanModel
+
+        async with self._sessionmaker() as session:
+            plan = await session.get(ResearchPlanModel, orchestration.research_plan_id)
+            return plan.company_id if plan is not None else None
 
     # ------------------------------------------------------------------ internal
 

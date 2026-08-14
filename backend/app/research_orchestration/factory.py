@@ -81,10 +81,21 @@ def create_research_orchestration_dependencies(
     retrieval = RetrievalService(
         sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma
     )
+    # V1.1 P0-2：index builder 注入 parsing service（未 parse 的 source 在
+    # fulfill/backflow 检索时自愈补全 parse → chunk → index）。
+    from app.services.source_parsing_service import SourceParsingService
+    from app.storage.raw_store import LocalRawArtifactStore
+
+    raw_store = LocalRawArtifactStore(
+        root=settings.raw_storage_root,
+        max_bytes=settings.source_max_file_size_bytes,
+        max_json_bytes=settings.macro_max_json_response_bytes,
+    )
     index_builder = SourceIndexBuilder(
         sessionmaker,
         ChunkingService(sessionmaker),
         VectorIndexService(sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma),
+        parsing_service=SourceParsingService(sessionmaker, raw_store),
     )
     backflow_executor = ResearchBackflowExecutor(
         sessionmaker,

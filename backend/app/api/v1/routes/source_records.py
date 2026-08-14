@@ -8,7 +8,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.api.dependencies import get_source_ingestion_service
+from app.api.dependencies import (
+    get_source_ingestion_service,
+    get_source_preparation_service,
+)
 from app.core.errors import SourceContentUnsupportedMediaType
 from app.domain.source_records import RawArtifactMediaType, SourceDocumentType
 from app.schemas.source_record import (
@@ -17,6 +20,7 @@ from app.schemas.source_record import (
     SourceUrlImportRequest,
 )
 from app.services.source_ingestion_service import SourceIngestionService
+from app.services.source_preparation_service import SourcePreparationService
 
 router = APIRouter(tags=["source-records"])
 
@@ -40,6 +44,9 @@ def _iter_stream(stream) -> AsyncIterator[bytes]:
 async def upload_source(
     response: Response,
     service: Annotated[SourceIngestionService, Depends(get_source_ingestion_service)],
+    preparation: Annotated[
+        SourcePreparationService | None, Depends(get_source_preparation_service)
+    ],
     company_id: Annotated[UUID, Form()],
     provider_key: Annotated[str, Form()],
     document_type: Annotated[SourceDocumentType, Form()],
@@ -50,7 +57,12 @@ async def upload_source(
     reporting_period_end: Annotated[date | None, Form()] = None,
     external_document_id: Annotated[str | None, Form()] = None,
 ) -> SourceRecordResponse:
-    """Stream a user-uploaded PDF into the raw artifact store."""
+    """Stream a user-uploaded PDF into the raw artifact store.
+
+    V1.1 P0-2：入库成功后自动后台执行 source preparation
+    （parse → chunk → index），用户在 waiting_manual 补资料后点「继续研究」
+    时不再因 INDEX_NOT_READY 卡死。
+    """
     result = await service.ingest_upload(
         company_id=company_id,
         provider_key=provider_key,
@@ -65,6 +77,9 @@ async def upload_source(
     response.headers["Source-Replayed"] = "true" if result.replayed else "false"
     if result.replayed:
         response.status_code = 200
+    else:
+        if preparation is not None:
+            preparation.schedule_prepare(result.record.source_id)
     return result.record
 
 
@@ -77,8 +92,14 @@ async def import_url_source(
     response: Response,
     payload: SourceUrlImportRequest,
     service: Annotated[SourceIngestionService, Depends(get_source_ingestion_service)],
+    preparation: Annotated[
+        SourcePreparationService | None, Depends(get_source_preparation_service)
+    ],
 ) -> SourceRecordResponse:
-    """Import an official PDF from a source-registry-approved URL."""
+    """Import an official PDF from a source-registry-approved URL.
+
+    V1.1 P0-2：入库成功后自动后台执行 source preparation（同 upload）。
+    """
     result = await service.ingest_url(
         company_id=payload.company_id,
         provider_key=payload.provider_key,
@@ -92,6 +113,9 @@ async def import_url_source(
     response.headers["Source-Replayed"] = "true" if result.replayed else "false"
     if result.replayed:
         response.status_code = 200
+    else:
+        if preparation is not None:
+            preparation.schedule_prepare(result.record.source_id)
     return result.record
 
 

@@ -82,10 +82,14 @@ class IndexBuilder(Protocol):
 
 
 class SourceIndexBuilder:
-    """生产实现：ParsedSource → ChunkingService → VectorIndexService（确定性，0 LLM）。
+    """生产实现：Source →（parse，缺省时）→ ChunkingService → VectorIndexService。
 
-    只对**已 archived + parsed** 的 source 补建 index；source 没有 parsed
-    source（未解析）→ 返回 False（不 live download / parse）。
+    V1.1 P0-2：可选注入 `parsing_service`（SourceParsingService）——注入后
+    `ensure_indexed` 对未 parse 的 source 自动补全 **parse → chunk → index**
+    全链（Web upload/import 后用户直接「继续研究」不再卡 INDEX_NOT_READY）；
+    未注入（legacy / eval 路径——eval runner 已自行 parse）保持原语义：只对
+    已 archived + parsed 的 source 补建 index，未解析 → False（不 live
+    download / parse）。
     """
 
     def __init__(
@@ -93,16 +97,27 @@ class SourceIndexBuilder:
         sessionmaker: async_sessionmaker,
         chunking: ChunkingService,
         indexing,
+        parsing_service=None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._chunking = chunking
         self._indexing = indexing
+        self._parsing_service = parsing_service
 
     async def ensure_indexed(self, source_id: UUID) -> bool:
         async with self._sessionmaker() as session:
             parsed = await ParsedSourceRepository(session).get_by_source_id(source_id)
         if parsed is None:
-            return False
+            if self._parsing_service is None:
+                return False
+            try:
+                await self._parsing_service.parse_source(source_id)
+            except Exception:  # noqa: BLE001 - 解析失败 → 不指数
+                return False
+            async with self._sessionmaker() as session:
+                parsed = await ParsedSourceRepository(session).get_by_source_id(source_id)
+            if parsed is None:
+                return False
         chunk_result = await self._chunking.chunk_parsed_source(parsed.parsed_source_id)
         result = await self._indexing.index_chunk_set(chunk_result.chunk_set_id)
         return result.status == "ready"

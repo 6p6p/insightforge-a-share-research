@@ -11,7 +11,9 @@ Source of Truth，Chroma = derived index（允许 partial rows / 可整体重建
 流程与不变量：
 1. 短 DB session 读 ChunkSet + ordered chunks + provenance metadata → 关闭；
    校验 ChunkSet integrity（chunk_count 一致、ordinal 连续、上游链条完整）。
-2. Embedding 与 Chroma 网络操作期间**不持有 PG transaction**。
+2. Embedding 与 Chroma 网络操作期间**不持有 PG transaction**；真实 BGE 推理
+   经 `asyncio.to_thread` 移出事件循环（V1.1 P0-2：后台 preparation 不得阻塞
+   API）。
 3. manifest create-or-get（自然身份）→ status=building；retry failed/building；
    ready replay 先验证 expected records，缺失/错误抛 VectorIndexIntegrityError，
    **不在 retrieval read path 自动修复**（不得重新 embedding）。
@@ -24,6 +26,7 @@ Source of Truth，Chroma = derived index（允许 partial rows / 可整体重建
    status=ready（允许重复 embedding/upsert，但不生成第二个 manifest，无进程锁）。
 """
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from uuid import UUID
@@ -307,7 +310,11 @@ class VectorIndexService:
     async def _upsert_chunks(self, collection, chunks, provenance: ChunkProvenance) -> None:
         for batch in _batched(chunks, CHROMA_UPSERT_BATCH_SIZE):
             ids = [str(chunk.chunk_id) for chunk in batch]
-            embeddings = self._provider.embed_documents([chunk.text for chunk in batch])
+            # 真实 BGE 推理是同步 CPU 密集操作：移到线程池，避免阻塞事件循环
+            # （V1.1 P0-2：Web 上传后台 preparation 期间 API 必须保持响应）。
+            embeddings = await asyncio.to_thread(
+                self._provider.embed_documents, [chunk.text for chunk in batch]
+            )
             metadatas = [
                 build_chunk_metadata(
                     chunk_id=chunk.chunk_id,
