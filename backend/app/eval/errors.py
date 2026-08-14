@@ -40,6 +40,28 @@ class EvalSingleRagInputError(EvalVariantError):
     code = "single_rag_input_not_supported"
 
 
+class EvalMultiStageNoAuditInputError(EvalVariantError):
+    """multi_stage_no_audit variant 收到不支持的输入。
+
+    v1 只支持 document-only（>=1 document source；macro_snapshots 与
+    structured_artifacts 必须为空）。macro/structured 非空 → 稳定 fail-fast。
+    """
+
+    code = "multi_stage_no_audit_input_not_supported"
+
+
+class EvalMultiStageNoAuditPlanError(EvalVariantError):
+    """multi_stage_no_audit variant 收到不支持的 planner 计划。
+
+    v1 只支持 document-only 计划（financial / macro / valuation need 必须为空，
+    它们需要 live acquisition，frozen 快照无法满足）。event need 由生产
+    DocumentNeedExecutor 从文档满足，不构成 fail-fast。planner 产出任何需要
+    live acquisition 的 need → 稳定 fail-fast。
+    """
+
+    code = "multi_stage_no_audit_plan_not_supported"
+
+
 class EvalMaterializationError(EvalError):
     """Snapshot materialization 失败（缺失 / 跨公司 / 未来证据 / 字节篡改 /
     领域 verifier 校验失败等）。"""
