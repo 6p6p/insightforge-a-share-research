@@ -472,9 +472,7 @@ def _runtime_metrics(record: AttemptRecord, result) -> None:
         elif name.value == "total_tokens":
             record.total_tokens = int(metric.value) if metric.value is not None else None
         elif name.value == "estimated_cost":
-            record.estimated_cost_usd = (
-                str(metric.value) if metric.value is not None else None
-            )
+            record.estimated_cost_usd = str(metric.value) if metric.value is not None else None
 
 
 # ------------------------------------------------------------------ attempt
@@ -492,9 +490,7 @@ async def _run_single_attempt(
     """一次 (case, variant, attempt)：隔离 PG + per-attempt Chroma + 持久化 + 评分。"""
     config = make_config(variant_id)
     plan_payload = plan_payload_for(variant_id, case_id)
-    expected_fail_fast = (
-        case_id == _FULL_INPUT_CASE and variant_id.value in _EXPECTED_FAIL_FAST
-    )
+    expected_fail_fast = case_id == _FULL_INPUT_CASE and variant_id.value in _EXPECTED_FAIL_FAST
     record = AttemptRecord(
         dataset_id=BENCHMARK_DATASET_ID,
         dataset_version=BENCHMARK_DATASET_VERSION,
@@ -515,9 +511,7 @@ async def _run_single_attempt(
     execution_case = loader.load_execution_case(case_id, 1)
     execution_spec = EvalExecutionSpec(
         case_fingerprint=execution_case.case_fingerprint,
-        source_snapshot_fingerprint=compute_source_snapshot_fingerprint(
-            execution_case.snapshot
-        ),
+        source_snapshot_fingerprint=compute_source_snapshot_fingerprint(execution_case.snapshot),
         execution_config_fingerprint=compute_execution_config_fingerprint(config),
         variant_id=variant_id,
     )
@@ -556,9 +550,7 @@ async def _run_single_attempt(
             temp_url=temp_url,
             mode=mode,
         )
-        collection_name = (
-            f"eval_{variant_id.value}_{attempt.execution_id.hex}"
-        )
+        collection_name = f"eval_{variant_id.value}_{attempt.execution_id.hex}"
         client = await chroma.get_client()
         result = None
         try:
@@ -576,19 +568,15 @@ async def _run_single_attempt(
         record.status = result.status.value
         record.error_code = result.error_code
         record.wall_latency_ms = result.wall_latency_ms
-        record.usage_components = sorted(
-            {r.component_name for r in result.usage_records}
-        )
+        record.usage_components = sorted({r.component_name for r in result.usage_records})
         if result.variant_output is not None:
-            record.variant_output_fingerprint = (
-                compute_variant_output_fingerprint(result.variant_output)
+            record.variant_output_fingerprint = compute_variant_output_fingerprint(
+                result.variant_output
             )
 
         # 1) 执行持久化（spec → trial → attempt → usage；immutable replay）。
         exec_persistence = EvaluationExecutionPersistenceService(sessionmaker)
-        spec_id, _ = await exec_persistence.create_or_get_execution_spec(
-            execution_spec, config
-        )
+        spec_id, _ = await exec_persistence.create_or_get_execution_spec(execution_spec, config)
         _, _ = await exec_persistence.create_or_get_trial(spec_id, trial_spec)
         await exec_persistence.persist_attempt_result(result)
 
@@ -616,9 +604,7 @@ async def _run_single_attempt(
                 metric_registry_version=1,
                 judge_config_fingerprint=None,
             )
-            score_run_id, _ = await scoring.create_or_get_score_run(
-                result.execution_id, spec
-            )
+            score_run_id, _ = await scoring.create_or_get_score_run(result.execution_id, spec)
             values = [
                 CitationValidityCalculator().calculate(scoring_context),
                 CitationCoverageCalculator().calculate(scoring_context),
@@ -711,9 +697,7 @@ def _write_outputs(workdir: Path, payload: dict) -> None:
     (workdir / "results.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (workdir / "summary.md").write_text(
-        _render_markdown(payload), encoding="utf-8"
-    )
+    (workdir / "summary.md").write_text(_render_markdown(payload), encoding="utf-8")
     (workdir / "summary.csv").write_text(_render_csv(payload), encoding="utf-8")
 
 

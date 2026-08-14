@@ -146,9 +146,7 @@ async def _seed_company(sessionmaker, security_code: str = "600519") -> dict:
                 identity_key=f"SSE:{security_code}",
                 board="sse_main",
                 official_name=(
-                    "贵州茅台酒股份有限公司"
-                    if security_code == "600519"
-                    else "白酒同业公司"
+                    "贵州茅台酒股份有限公司" if security_code == "600519" else "白酒同业公司"
                 ),
                 short_name="贵州茅台" if security_code == "600519" else "同业公司",
                 listing_status="listed",
@@ -613,9 +611,7 @@ async def _seed_and_materialize(sessionmaker, root: Path) -> None:
         company_id,
         document_type="news_article",
         title="贵州茅台2022年财务数据公开信息",
-        body_text=(
-            "2022年公司实现营业收入1275.54亿元，归母净利润627.16亿元，经营现金流保持健康。"
-        ),
+        body_text=("2022年公司实现营业收入1275.54亿元，归母净利润627.16亿元，经营现金流保持健康。"),
         source_url="https://www.xinhuanet.com/2025/0602/0001.htm",
         published_at=datetime(2025, 6, 2, tzinfo=UTC),
     )

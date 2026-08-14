@@ -523,9 +523,7 @@ def _e2e_draft_decision_for(pack: SectionInputPack) -> WriterDecision:
     """确定性 draft decision：按 claim.statement 排序（跨 attempt 稳定），段落 <=10。"""
     paragraphs = []
     for claim in sorted(pack.claims, key=lambda item: item.statement)[:10]:
-        evidence = next(
-            (item for item in pack.evidence if claim.alias in item.claim_aliases), None
-        )
+        evidence = next((item for item in pack.evidence if claim.alias in item.claim_aliases), None)
         if evidence is None:
             continue
         paragraphs.append(

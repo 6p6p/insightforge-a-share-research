@@ -62,9 +62,7 @@ async def _run_attempt(dataset_root: Path, case_id: str, variant_id: EvalVariant
 
 async def test_success_path_persists_and_cleans_up(dataset_root, tmp_path) -> None:
     before = await _collection_names()
-    record = await _run_attempt(
-        dataset_root, "moutai-business", EvalVariantId.SINGLE_RAG, tmp_path
-    )
+    record = await _run_attempt(dataset_root, "moutai-business", EvalVariantId.SINGLE_RAG, tmp_path)
     assert record.status == "success", record.error_code
     assert record.persisted is True
     assert record.citation_validity is not None and record.citation_coverage is not None
@@ -94,9 +92,7 @@ async def test_fault_injection_runner_raise_cleans_up(dataset_root, tmp_path, mo
         return model
 
     monkeypatch.setattr(exp_mod, "create_single_rag_fake_answer", _broken_fake)
-    record = await _run_attempt(
-        dataset_root, "moutai-business", EvalVariantId.SINGLE_RAG, tmp_path
-    )
+    record = await _run_attempt(dataset_root, "moutai-business", EvalVariantId.SINGLE_RAG, tmp_path)
 
     assert record.status == "failed"
     assert record.error_code == "eval_variant_execution_error"  # 稳定 fallback code

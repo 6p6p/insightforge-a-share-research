@@ -426,13 +426,9 @@ async def test_remap_binds_attempt_evidence_and_replays_comparison(
 
             # (3) target valuation observation：绑定 attempt 新卡（frozen target）。
             val_remap = next(
-                item
-                for item in result.valuation_observations
-                if "15.3" in item.semantic_key
+                item for item in result.valuation_observations if "15.3" in item.semantic_key
             )
-            assert (
-                val_remap.artifact_type == StructuredArtifactType.RELATIVE_VALUATION_OBSERVATION
-            )
+            assert val_remap.artifact_type == StructuredArtifactType.RELATIVE_VALUATION_OBSERVATION
             async with sessionmaker() as session:
                 val_row = await session.get(
                     ValuationMetricObservationModel, val_remap.observation_id

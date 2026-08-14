@@ -5,8 +5,14 @@
 
 - `INSTRUMENTED_LLM_COMPONENTS` registry 必须 == Part G 审计冻结的 10 个
   component 集合；
-- 静态扫描 `app/`（排除 `app/cli/`）：凡用 `ChatDeepSeek(` 的文件必须恰好是那
-  10 个 production adapter，且每个都调用 `invoke_structured_with_usage(`。
+- 静态扫描 `app/`（排除 `app/cli/` 与 `app/eval/benchmark/`——开发期 CLI /
+  benchmark 工具）：凡用 `ChatDeepSeek(` 的文件必须恰好是那 10 个 production
+  adapter，且每个都调用 `invoke_structured_with_usage(`。
+
+`app/eval/benchmark/experiment.py` 的 real 模式在装配期构造 single_rag 的
+`ChatDeepSeek`（注入 `DeepSeekSingleRagAnswerModel`，实际调用仍走
+`invoke_structured_with_usage` wrapper）——与 `app/cli/` 同类：dev 工具，不是
+production pipeline 调用点。
 
 这不是脆弱的字符串 grep：断言的是「production LLM 调用点都经 wrapper」这一
 结构化不变量，而不是 provider 名 / 环境变量等易变文本。
@@ -40,7 +46,7 @@ def _production_chatdeepseek_files() -> set[str]:
     found: set[str] = set()
     for path in _APP_DIR.rglob("*.py"):
         rel = path.relative_to(_APP_DIR.parent).as_posix()
-        if rel.startswith("app/cli/"):
+        if rel.startswith(("app/cli/", "app/eval/benchmark/")):
             continue
         if "ChatDeepSeek(" in path.read_text(encoding="utf-8"):
             found.add(rel)

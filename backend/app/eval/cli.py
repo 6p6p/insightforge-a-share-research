@@ -29,9 +29,7 @@ from app.eval.benchmark.experiment import (
 from app.eval.variants import EvalVariantId
 
 _DEFAULT_CASES = ("moutai-business", "moutai-financial", "moutai-full")
-_VARIANTS_BY_NAME = {
-    variant.value: variant for variant in EvalVariantId
-}
+_VARIANTS_BY_NAME = {variant.value: variant for variant in EvalVariantId}
 
 
 def _cmd_dataset(args: argparse.Namespace) -> int:
@@ -56,8 +54,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     payload = asyncio.run(run_benchmark_experiment(options))
     print(
-        f"[run] done: {len(payload['attempts'])} attempts -> "
-        f"{Path(args.workdir) / 'results.json'}"
+        f"[run] done: {len(payload['attempts'])} attempts -> {Path(args.workdir) / 'results.json'}"
     )
     return 0
 

@@ -222,9 +222,14 @@ class EvalJudgeRunModel(Base):
     __tablename__ = "eval_judge_runs"
     __table_args__ = (
         CheckConstraint(_RUN_STATUS, name="ck_eval_judge_runs_status"),
+        CheckConstraint("judge_version >= 1", name="ck_eval_judge_runs_judge_version"),
         CheckConstraint(
             f"judge_config_fingerprint {_SHA256_CHECK}",
             name="ck_eval_judge_runs_judge_config_fingerprint",
+        ),
+        CheckConstraint(
+            f"judge_run_fingerprint {_SHA256_CHECK}",
+            name="ck_eval_judge_runs_judge_run_fingerprint",
         ),
         CheckConstraint(
             f"judge_output_fingerprint IS NULL OR judge_output_fingerprint {_SHA256_CHECK}",
