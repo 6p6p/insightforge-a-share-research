@@ -601,7 +601,6 @@ async def test_e2e_citation_via_http(app_ctx, monkeypatch) -> None:
     assert response.status_code == 200, response.text
     citation = response.json()
     assert citation["evidence"]["evidence_card_id"] == str(evidence_card_id)
-    assert citation["evidence"]["quote_text"]
     related_claim_ids = {UUID(row["claim_id"]) for row in citation["claim_relations"]}
     assert related_claim_ids, "citation 应有 claim relations"
     assert set(paragraph_claim_ids) <= related_claim_ids, (
@@ -612,12 +611,19 @@ async def test_e2e_citation_via_http(app_ctx, monkeypatch) -> None:
         "contradicts",
         "context",
     }
+    # quote_text 断言必须按 origin 分支：document_chunk 卡必有 quote，macro_observation
+    # 卡由 schema CHECK 约束强制 quote_text 为 NULL（Stage4 collect 按 claim_id UUID
+    # 排序分配 C alias，report 第一段引用的首张证据卡可能是任意 domain 的卡——本测试
+    # 曾因 C1 恰为 macro claim 而偶发失败，见 Stage 7 Final Closeout 调查记录）。
     prov = citation["provenance"]
     if prov["origin_type"] == "document_chunk":
         assert prov["source_id"] and prov["chunk_id"] and prov["locator"]
+        assert citation["evidence"]["quote_text"], "document 卡必须有 quote_text"
         assert len(prov["context_text"]) <= 5000
     else:
+        assert prov["origin_type"] == "macro_observation"
         assert prov["observation_id"] and prov["series_id"]
+        assert citation["evidence"]["quote_text"] is None, "macro 卡 quote_text 必须为 NULL"
 
     # ---- Macro Evidence → citation → macro provenance ----
     response = await client.get(f"/api/v1/tasks/{task_id}/evidence")
