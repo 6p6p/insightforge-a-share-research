@@ -20,6 +20,14 @@ from app.db.models.eval_execution import (
     EvalLlmCallUsageModel,
     EvalTrialModel,
 )
+from app.db.models.eval_scoring import (
+    EvalHumanLabelBindingModel,
+    EvalJudgeMetricResultModel,
+    EvalJudgeRunModel,
+    EvalMetricValueModel,
+    EvalScoreRunModel,
+    EvalScoringSpecModel,
+)
 from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.financial_calculation import (
     FinancialCalculationInputModel,

@@ -149,3 +149,14 @@ class EvalRemapError(EvalError):
     """
 
     code = "eval_remap_error"
+
+
+class EvalJudgeError(EvalError):
+    """LLM Judge 执行失败（provider / malformed / 重试耗尽）。
+
+    judge 属 scoring layer：失败是可重试的稳定 outcome（`JudgeRunOutcome
+    (status=failed)`），**不**伪装 deterministic truth。错误消息**不**包含
+    prompt / raw response / reasoning / API key。
+    """
+
+    code = "eval_judge_error"

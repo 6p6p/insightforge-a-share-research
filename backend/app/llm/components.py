@@ -31,6 +31,11 @@ COMPONENT_RESEARCH_PLANNER = "research_planner"
 # usage 可归因，但**不计入** production adapter 审计集合。
 COMPONENT_EVAL_SINGLE_RAG_ANSWER = "eval_single_rag_answer"
 
+# eval-only component：semantic judge 的一次结构化评分。同样**不**加入
+# `INSTRUMENTED_LLM_COMPONENTS`（judge 属 scoring layer，非 production pipeline
+# 组件）。
+COMPONENT_EVAL_JUDGE = "eval_judge"
+
 # 顺序稳定：与 audit 的顺序一致（evidence → claim → ... → planner）。
 INSTRUMENTED_LLM_COMPONENTS: tuple[str, ...] = (
     COMPONENT_EVIDENCE_EXTRACTION,
