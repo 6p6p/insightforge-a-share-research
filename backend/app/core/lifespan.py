@@ -63,6 +63,7 @@ def _create_research_orchestration(
     settings,
     sessionmaker,
     langgraph: LangGraphCheckpointManager,
+    source_preparation=None,
 ) -> ResearchOrchestrationService:
     """生产装配顶层编排（7A.2B.2 spec S/T + Gate B）：构造 0 model call / 0 network。
 
@@ -90,6 +91,7 @@ def _create_research_orchestration(
         stage5_runner=deps.stage5_runner,
         orchestration_runner=orchestration_runner,
         execution_manager=execution_manager,
+        source_preparation=source_preparation,
     )
 
 
@@ -116,14 +118,33 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         shutdown_timeout_seconds=settings.workflow_shutdown_timeout_seconds,
         sessionmaker=sessionmaker,
     )
-    research_execution = _create_research_execution(settings, sessionmaker, langgraph)
-    research_orchestration = _create_research_orchestration(settings, sessionmaker, langgraph)
+    # V1.1 P0-2：Source Preparation 生产实例（ingest 后后台 prepare / resume 前
+    # 预准备共用；构造 0 network / 0 LLM / 0 DB 连接，模型惰性加载）。
     raw_storage = LocalRawArtifactStore(
         root=settings.raw_storage_root,
         max_bytes=settings.source_max_file_size_bytes,
         max_json_bytes=settings.macro_max_json_response_bytes,
     )
     export_storage = ExportArtifactStore(root=settings.export_storage_root)
+    from app.rag.embedding.bge import BGEProvider
+    from app.rag.index.service import VectorIndexService
+    from app.services.chunking_service import ChunkingService
+    from app.services.source_preparation_service import SourcePreparationService
+
+    source_preparation = SourcePreparationService(
+        sessionmaker,
+        raw_storage,
+        ChunkingService(sessionmaker),
+        VectorIndexService(
+            sessionmaker=sessionmaker,
+            embedding_provider=BGEProvider(),
+            chroma=chroma,
+        ),
+    )
+    research_execution = _create_research_execution(settings, sessionmaker, langgraph)
+    research_orchestration = _create_research_orchestration(
+        settings, sessionmaker, langgraph, source_preparation=source_preparation
+    )
     resources = ApplicationResources(
         database=database,
         chroma=chroma,
@@ -133,6 +154,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         research_orchestration=research_orchestration,
         raw_storage=raw_storage,
         export_storage=export_storage,
+        source_preparation=source_preparation,
     )
     application.state.resources = resources
     logger.info("application_startup", environment=settings.app_env)
@@ -188,6 +210,41 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             "research_chains_recover_failed",
             error_type=type(exc).__name__,
         )
+    # V1.1 P0-3/P0-1：production bootstrap（幂等、离线、可观测；失败不阻止启动，
+    # 但必须留下明确日志供运维定位）：
+    #   1. Source Registry defaults（seed_defaults upsert，不覆盖既有配置）；
+    #   2. Company Master（空表 → 导入 bundled versioned snapshot；非空 → skip）。
+    if settings.bootstrap_on_startup:
+        try:
+            from app.services.source_registry_service import SourceRegistryService
+
+            await SourceRegistryService(sessionmaker).seed_defaults()
+            logger.info("source_registry_bootstrap_completed")
+        except Exception as exc:
+            logger.warning(
+                "source_registry_bootstrap_failed",
+                error_type=type(exc).__name__,
+                error_code=getattr(exc, "code", None),
+            )
+        try:
+            from app.services.company_master_service import CompanyMasterBootstrapService
+
+            result = await CompanyMasterBootstrapService(sessionmaker).bootstrap()
+            logger.info(
+                "company_master_bootstrap_completed",
+                snapshot_version=result.snapshot_version,
+                imported_companies=result.imported_companies,
+                imported_aliases=result.imported_aliases,
+                skipped=result.skipped,
+                replayed=result.replayed,
+                error_code=result.error_code,
+            )
+        except Exception as exc:
+            logger.warning(
+                "company_master_bootstrap_failed",
+                error_type=type(exc).__name__,
+                error_code=getattr(exc, "code", None),
+            )
     try:
         yield
     finally:

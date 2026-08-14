@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     workflow_shutdown_timeout_seconds: int = 10
     workflow_reconcile_timeout_seconds: int = 5
 
+    # V1.1 P0-1/P0-3：启动时自动执行 Source Registry defaults bootstrap +
+    # Company Master bootstrap（幂等、离线、不覆盖既有数据）。测试环境关闭，
+    # 避免污染共享测试库（fresh acceptance 测试显式驱动 bootstrap）。
+    bootstrap_on_startup: bool = True
+
     # 本地不可变原始文件存储（开发环境本地磁盘；未来可替换为 S3/MinIO）
     raw_storage_root: Path = PROJECT_ROOT / ".data" / "raw"
     # 导出字节内容寻址存储根（stage 6C；`.data/exports/sha256/<ab>/<cd>/<sha>.<ext>`）

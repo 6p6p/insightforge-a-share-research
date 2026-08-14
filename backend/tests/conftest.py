@@ -1,4 +1,17 @@
-"""Shared fixtures for the backend test suite."""
+"""Shared fixtures for the backend test suite.
+
+测试进程级策略（V1.1 P0-1/P0-3）：默认禁用启动 bootstrap（
+`BOOTSTRAP_ON_STARTUP=false`）。原因：真实 lifespan（如
+test_stage6_vertical_slice 用 `create_app(get_settings())` + lifespan_context）
+会在共享测试库导入 5543 家公司主数据，与测试自行 seed 的公司（如 600519）
+冲突。Startup bootstrap 的正确性由 Fresh Product Acceptance
+（test_fresh_product_acceptance.py，临时 fresh DB + 显式驱动 bootstrap）覆盖。
+用户显式设置 BOOTSTRAP_ON_STARTUP=true 时尊重其值（setdefault）。
+"""
+
+import os
+
+os.environ.setdefault("BOOTSTRAP_ON_STARTUP", "false")
 
 import httpx
 import pytest
