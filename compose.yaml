@@ -53,6 +53,8 @@ services:
     volumes:
       - raw_data:/app/data/raw
       - export_data:/app/data/exports
+      # 评估 benchmark workspace（只读诊断：Web 对比视图读取 CLI 产物）。
+      - ./benchmark:/app/benchmark:ro
     ports:
       - "8001:8000"
     depends_on:
