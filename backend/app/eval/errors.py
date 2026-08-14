@@ -62,6 +62,17 @@ class EvalMultiStageNoAuditPlanError(EvalVariantError):
     code = "multi_stage_no_audit_plan_not_supported"
 
 
+class EvalInsightForgeFullInputError(EvalVariantError):
+    """insightforge_full variant 收到无法满足的输入。
+
+    v1 需要 >=1 document source；macro / structured 可选。frozen snapshot 无法
+    满足 planner 计划（orchestration 停在 waiting_manual / research_backflow
+    manual）→ 稳定 fail-fast（不伪造 readiness、不假装 research completed）。
+    """
+
+    code = "insightforge_full_input_not_supported"
+
+
 class EvalMaterializationError(EvalError):
     """Snapshot materialization 失败（缺失 / 跨公司 / 未来证据 / 字节篡改 /
     领域 verifier 校验失败等）。"""
