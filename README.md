@@ -76,7 +76,7 @@ python -m alembic upgrade head        # 空库 → 0047 head
 
 ```bash
 cd backend
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8001
+python -m app        # 跨平台入口（Windows 需 SelectorEventLoop，见 app/__main__.py）
 ```
 
 - 存活：http://127.0.0.1:8001/api/v1/health/live → `{"status":"ok"}`
