@@ -19,6 +19,7 @@ export function App(): React.JSX.Element {
           items={[
             { key: 'tasks', label: <Link to="/tasks">任务列表</Link> },
             { key: 'new', label: <Link to="/tasks/new">新建任务</Link> },
+            { key: 'eval', label: <Link to="/eval">评估对比</Link> },
           ]}
           style={{ flex: 1, minWidth: 0 }}
         />

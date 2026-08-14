@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.api.v1.routes import (
     companies,
+    eval_benchmark,
     health,
     research_orchestrations,
     source_records,
@@ -21,3 +22,4 @@ api_router.include_router(source_registry.router)
 api_router.include_router(source_records.router)
 api_router.include_router(research_orchestrations.tasks_router)
 api_router.include_router(research_orchestrations.orchestrations_router)
+api_router.include_router(eval_benchmark.router)
