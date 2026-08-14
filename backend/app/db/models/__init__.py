@@ -11,6 +11,7 @@ from app.db.models.claim_synthesis_result import ClaimSynthesisResultModel
 from app.db.models.claim_synthesis_run import ClaimSynthesisRunModel
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
+from app.db.models.company_master_snapshot import CompanyMasterSnapshotRow
 from app.db.models.document_chunk import DocumentChunkModel
 from app.db.models.draft_section import DraftSectionModel
 from app.db.models.draft_section_revision import DraftSectionRevisionModel

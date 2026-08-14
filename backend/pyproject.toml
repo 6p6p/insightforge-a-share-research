@@ -67,3 +67,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# db/models/__init__.py 只负责汇集模型注册进 Base.metadata（autogenerate 依赖），
+# 导入本身是副作用；显式豁免 F401。
+[tool.ruff.lint.per-file-ignores]
+"app/db/models/__init__.py" = ["F401"]
