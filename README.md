@@ -183,13 +183,17 @@ python -m scripts.golden_full_real_preflight --mode controlled-plan \
      `structured_data_refresh_required`（该分支按设计拒绝文档补料恢复）。
    上述均为**确定性政策拒绝（0 写、稳定错误码）**，证据与复现见
    `backend/scripts/golden_full_real_preflight.py` 与 Stage 7 Final Closeout 记录。
-   因此**「真实模型全自动无人值守生成报告」不是当前承诺**；受控组件 + 人工确认
-   是当前支持的路径。
-2. **人工确认机制不可绕过**：`awaiting_stage5` / `waiting_manual` /
-   `research_backflow` 均需显式人工 action 或补资料，编排不做自动代理。
-3. **外部数据源**：宏观 Provider（World Bank）依赖出网；部分网络环境存在域名级
-   阻断（离线回放 / captured fetch 支持无网验证）。
-4. **范围边界**：仅 A 股基本面研究；不提供自动交易、技术分析、短期预测或买卖建议。
+   因此**「真实模型对任意公司全自动无人值守生成报告」不是当前承诺**；受控组件 +
+   人工确认是当前支持的路径。
+2. **外部数据源依赖出网**：宏观 Provider（World Bank）等依赖公网访问；部分网络
+   环境存在域名级阻断（离线回放 / captured fetch 支持无网验证）。
+3. **范围边界**：仅 A 股基本面研究；不提供自动交易、技术分析、短期预测或买卖建议。
+
+> **设计特性（非限制）**：Human-in-the-loop 是刻意设计——编排在
+> `awaiting_stage5` / `waiting_manual` / `research_backflow` 处等待显式人工
+> action 或补资料（`act_on_orchestration` / `resume_after_source_acquisition`），
+> 不做自动代理；人工确认记录（human_review_requests / decisions）全程留痕且不可
+> 绕过。这也是「受控组件 + 人工确认」路径的一部分。
 
 ## 文档
 
@@ -200,4 +204,4 @@ python -m scripts.golden_full_real_preflight --mode controlled-plan \
 
 ## License
 
-（待定——发布前补充。）
+[MIT](LICENSE)（Copyright © 2026 InsightForge contributors）。
