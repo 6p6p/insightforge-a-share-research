@@ -92,13 +92,11 @@ def upgrade() -> None:
             name="ck_eval_scoring_specs_variant_output_fingerprint",
         ),
         sa.CheckConstraint(
-            "human_label_fingerprint IS NULL OR "
-            f"human_label_fingerprint {_SHA256_CHECK}",
+            f"human_label_fingerprint IS NULL OR human_label_fingerprint {_SHA256_CHECK}",
             name="ck_eval_scoring_specs_human_label_fingerprint",
         ),
         sa.CheckConstraint(
-            "judge_config_fingerprint IS NULL OR "
-            f"judge_config_fingerprint {_SHA256_CHECK}",
+            f"judge_config_fingerprint IS NULL OR judge_config_fingerprint {_SHA256_CHECK}",
             name="ck_eval_scoring_specs_judge_config_fingerprint",
         ),
         sa.CheckConstraint(
@@ -334,9 +332,7 @@ def upgrade() -> None:
             name="uq_eval_judge_metric_results_run_metric",
         ),
     )
-    op.create_index(
-        "ix_eval_judge_metric_results_judge_run_id", _JUDGE_RESULTS, ["judge_run_id"]
-    )
+    op.create_index("ix_eval_judge_metric_results_judge_run_id", _JUDGE_RESULTS, ["judge_run_id"])
 
 
 def downgrade() -> None:

@@ -39,7 +39,9 @@ dependencies = [
 dev = [
     "pytest>=8.2,<9.0",
     "pytest-asyncio>=0.23,<1.0",
-    "ruff>=0.5,<2.0",
+    # ruff 精确 pin：local 与 CI（fresh `pip install -e "./backend[dev]"`）必须
+    # 使用同一 formatter 版本（宽泛约束曾导致 CI 装到更新版本而本地滞后）。
+    "ruff==0.16.3",
 ]
 
 [tool.setuptools]

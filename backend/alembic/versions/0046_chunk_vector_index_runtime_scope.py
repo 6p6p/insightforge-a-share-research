@@ -50,10 +50,7 @@ _NOT_BLANK = "ck_chunk_vector_indexes_runtime_scope_not_blank"
 def _has_non_production_scope() -> bool:
     bind = op.get_bind()
     rows = bind.execute(
-        sa.text(
-            f"SELECT 1 FROM {_TABLE} "
-            "WHERE runtime_scope IS DISTINCT FROM 'production' LIMIT 1"
-        )
+        sa.text(f"SELECT 1 FROM {_TABLE} WHERE runtime_scope IS DISTINCT FROM 'production' LIMIT 1")
     )
     return rows.first() is not None
 
