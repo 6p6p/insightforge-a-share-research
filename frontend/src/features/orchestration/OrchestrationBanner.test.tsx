@@ -82,7 +82,7 @@ const sseProvider = {
   enabled: true,
 };
 
-describe('OrchestrationBanner（7A Product Gate spec N）', () => {
+describe('OrchestrationBanner（V1.1 产品语义）', () => {
   it('无编排 → 不渲染', () => {
     const { container } = renderWithProviders(
       <OrchestrationBanner orchestration={null} companyId="c1" />,
@@ -97,7 +97,7 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
         companyId="c1"
       />,
     );
-    expect(screen.getByText('自动研究已完成')).toBeInTheDocument();
+    expect(screen.getByText('研究完成')).toBeInTheDocument();
   });
 
   it('运行中 phase → 显示阶段文案，不渲染人工操作', () => {
@@ -107,7 +107,7 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
         companyId="c1"
       />,
     );
-    expect(screen.getByText('自动研究进行中：Stage 4 分析')).toBeInTheDocument();
+    expect(screen.getByText('自动研究进行中：正在分析')).toBeInTheDocument();
     expect(screen.queryByText('需要人工确认')).not.toBeInTheDocument();
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
   });
@@ -121,7 +121,7 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
       />,
     );
 
-    expect(screen.getByText('等待报告审核')).toBeInTheDocument();
+    expect(screen.getByText('等待人工确认')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '要求重写' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '需要补充研究' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '取消执行' })).toBeInTheDocument();
@@ -134,7 +134,7 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
     );
   });
 
-  it('waiting_manual → 展示 need codes + 原因；导入官方 URL 成功后「继续研究」→ resume', async () => {
+  it('waiting_manual → 产品化原因；need codes 折叠在技术详情；导入官方链接成功后「继续研究」→ resume', async () => {
     mocks.listSourceProviders.mockResolvedValue({ items: [sseProvider], total: 1 });
     mocks.importUrlSource.mockResolvedValue({ source_id: 'src-1' });
     mocks.resumeSourceAcquisition.mockResolvedValue({ orchestration_id: 'orch-1' });
@@ -151,11 +151,14 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
     );
 
     expect(await screen.findByText('研究资料不足')).toBeInTheDocument();
-    // need codes 渲染在「缺失需求代码：」同一 div 内 → 用正则子串匹配。
-    expect(screen.getByText(/annual_report_financial、audit_report/)).toBeInTheDocument();
+    // 产品化原因：需要补充资料（不暴露 manual_reason 枚举）。
+    expect(screen.getByText(/原因：需要补充资料/)).toBeInTheDocument();
+    // need codes 折叠在「技术详情」内（默认不直接暴露）。
+    fireEvent.click(screen.getByText('技术详情'));
+    expect(screen.getByText(/缺失需求：annual_report_financial、audit_report/)).toBeInTheDocument();
 
-    // 切到「导入官方 URL」tab。
-    fireEvent.click(screen.getByRole('tab', { name: '导入官方 URL' }));
+    // 切到「导入官方链接」tab。
+    fireEvent.click(screen.getByRole('tab', { name: '导入官方链接' }));
 
     // 选择来源机构（antd Select）。
     await userEvent.click(screen.getByRole('combobox', { name: '来源机构' }));
@@ -179,7 +182,7 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
       }),
     );
 
-    expect(await screen.findByText('官方 URL 已导入为研究来源')).toBeInTheDocument();
+    expect(await screen.findByText('官方链接已导入并开始处理')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: '继续研究' }));
     await waitFor(() => expect(mocks.resumeSourceAcquisition).toHaveBeenCalledWith('orch-1'));
   });
@@ -209,7 +212,7 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
         companyId="c1"
       />,
     );
-    expect(screen.getByText('研究已暂停，等待人工介入')).toBeInTheDocument();
+    expect(screen.getByText('研究已暂停，等待人工确认')).toBeInTheDocument();
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
   });
 
@@ -224,11 +227,11 @@ describe('OrchestrationBanner（7A Product Gate spec N）', () => {
         companyId="c1"
       />,
     );
-    expect(screen.getByText('需要结构化数据补充')).toBeInTheDocument();
+    expect(screen.getByText('需要更新结构化数据')).toBeInTheDocument();
     expect(
       screen.getByText(/当前自动补充研究仅支持文档资料，该缺口需要人工处理或后续结构化数据刷新能力。/),
     ).toBeInTheDocument();
-    // 不提供「上传 PDF / 导入官方 URL / 继续研究」的补资料面板。
+    // 不提供「上传 PDF / 导入官方链接 / 继续研究」的补资料面板。
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '继续研究' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '上传并保存' })).not.toBeInTheDocument();

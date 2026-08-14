@@ -1,9 +1,14 @@
-/** Task Create 表单（spec J + 7A Product Gate spec M）。
+/** Task Create 表单（V1.1 产品语义）。
 
-Stage6A 只做实际后端当前支持的字段：公司、研究起止日期、模块、研究问题、
-相对估值开关。提交后 create task → 默认「创建后自动开始研究」（POST
-/tasks/{id}/orchestrations，一键入口）；高级「创建后执行研究」仍保留显式
-Stage 4 work plan（开启时优先于自动研究）。跳转 /tasks/:taskId。
+V1.1 产品冻结：一次研究任务 = 一个核心研究问题。
+
+两阶段提交语义（P2-1 孤儿任务收口）：
+1. 创建任务（POST /tasks）——成功即任务存在（带 task_id）；
+2. 尝试自动开始研究（POST /tasks/{id}/orchestrations）——失败**不误报
+   「创建失败」**，任务已创建；提供「重新启动研究」与「查看任务」。
+
+高级「手动指定研究方案」（显式 work plan，引用已入库证据 ID）仍保留：
+开启时优先于自动研究。
  */
 
 import { useState } from 'react';
@@ -18,6 +23,7 @@ import {
   Select,
   Space,
   Switch,
+  Typography,
 } from 'antd';
 import type { Dayjs } from 'dayjs';
 
@@ -27,6 +33,8 @@ import { ApiError } from '../../types/api';
 import { type ResearchModule, type TaskCreateRequest } from '../../types/task';
 import type { AnalysisWorkItem } from '../../types/workspace';
 import { WorkPlanEditor } from './WorkPlanEditor';
+
+const { Text } = Typography;
 
 const MODULE_OPTIONS: { value: ResearchModule; label: string }[] = [
   { value: 'company_profile', label: '公司概况' },
@@ -54,8 +62,10 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
   const [workItems, setWorkItems] = useState<AnalysisWorkItem[]>([]);
   const [enableExecute, setEnableExecute] = useState(false);
   const [autoStart, setAutoStart] = useState(true);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
 
-  const mutation = useMutation({
+  const createMutation = useMutation({
     mutationFn: async (values: FormValues) => {
       const [start, end] = values.research_dates;
       const payload: TaskCreateRequest = {
@@ -63,38 +73,74 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
         research_start_date: start.format('YYYY-MM-DD'),
         research_end_date: end.format('YYYY-MM-DD'),
         modules: values.modules,
-        // Stage 6A 只支持单个研究问题（后端 execute 要求 len==1，多问题 422）。
         questions: values.questions?.trim() ? [values.questions.trim()] : [],
         include_relative_valuation: values.include_relative_valuation,
-        require_plan_approval: true,
+        require_plan_approval: false,
       };
-      const task = await createTask(payload);
-      // 显式 work plan 优先；否则默认走自动研究编排（一键入口）。
-      if (enableExecute && workItems.length > 0) {
-        await executeTask(task.task_id, { analysis_work_items: workItems });
-      } else if (autoStart) {
-        await createOrchestration(task.task_id);
-      }
-      return task.task_id;
+      return await createTask(payload);
     },
-    onSuccess: (taskId) => onCreated(taskId),
   });
 
-  const submit = (values: FormValues): void => {
-    mutation.mutate(values);
+  const startMutation = useMutation({
+    mutationFn: async (args: { taskId: string; values: FormValues }) => {
+      const { taskId: id, values } = args;
+      // 显式研究方案优先；否则默认自动研究（一键入口）。
+      if (enableExecute && workItems.length > 0) {
+        await executeTask(id, { analysis_work_items: workItems });
+        return;
+      }
+      if (autoStart) {
+        await createOrchestration(id);
+      }
+      void values;
+    },
+    onSuccess: () => {
+      if (taskId) {
+        onCreated(taskId);
+      }
+    },
+    onError: (error: unknown) => {
+      const message =
+        error instanceof ApiError ? error.message : '自动研究启动失败，请稍后重试';
+      setStartError(message);
+    },
+  });
+
+  /** 两阶段提交：先创建任务，再尝试自动启动研究。 */
+  const submit = async (values: FormValues): Promise<void> => {
+    setStartError(null);
+    const task = await createMutation.mutateAsync(values);
+    setTaskId(task.task_id);
+    const willStart = (enableExecute && workItems.length > 0) || autoStart;
+    if (willStart) {
+      startMutation.mutate({ taskId: task.task_id, values });
+    } else {
+      onCreated(task.task_id);
+    }
+  };
+
+  const retryStart = (): void => {
+    if (taskId) {
+      setStartError(null);
+      startMutation.mutate({ taskId, values: form.getFieldsValue() });
+    }
   };
 
   const errorMessage =
-    mutation.error instanceof ApiError ? mutation.error.message : mutation.error?.message;
+    createMutation.error instanceof ApiError
+      ? createMutation.error.message
+      : createMutation.error?.message;
+
   const willExecute = enableExecute && workItems.length > 0;
-  const submitLabel = willExecute ? '创建并执行研究' : autoStart ? '创建并自动研究' : '创建任务';
+  const submitLabel = willExecute ? '创建并执行研究' : autoStart ? '创建并自动开始研究' : '创建任务';
+  const starting = createMutation.isPending || startMutation.isPending;
 
   return (
     <Card title="新建研究任务">
       <Form<FormValues>
         form={form}
         layout="vertical"
-        onFinish={submit}
+        onFinish={(values) => void submit(values)}
         initialValues={{ include_relative_valuation: false }}
         requiredMark
       >
@@ -128,10 +174,11 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
 
         <Form.Item
           name="questions"
-          label="研究问题"
-          tooltip="Stage 6A 只支持单个研究问题；多个问题会被后端以 422 拒绝。"
+          label="核心研究问题"
+          tooltip="请填写本次研究希望回答的核心问题"
+          rules={[{ required: true, message: '请填写本次研究希望回答的核心问题' }]}
         >
-          <Input placeholder="例如：贵州茅台 2026 年营收与估值是否合理？" />
+          <Input placeholder="例如：宁德时代近三年的盈利能力和增长驱动发生了什么变化？" maxLength={500} />
         </Form.Item>
 
         <Form.Item name="include_relative_valuation" label="包含相对估值" valuePropName="checked">
@@ -148,21 +195,21 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
           />
         </Form.Item>
 
-        <Form.Item label="执行研究（高级，可选）">
+        <Form.Item label="手动指定研究方案（高级，可选）">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Switch
               checked={enableExecute}
               onChange={setEnableExecute}
-              checkedChildren="显式 work plan"
-              unCheckedChildren="不显式执行"
-              aria-label="是否执行研究"
+              checkedChildren="使用手动研究方案"
+              unCheckedChildren="不使用手动研究方案"
+              aria-label="是否使用手动研究方案"
             />
             {enableExecute ? (
               <>
                 <Alert
                   type="info"
                   showIcon
-                  message="显式 work plan 优先于自动研究：需引用已入库的真实证据 / 计算 / 对比 ID（Stage 6A 能力，不含自动 Source Planning）。"
+                  message="手动研究方案需要引用已入库的真实证据 / 计算 / 对比 ID；开启后优先于自动研究。"
                 />
                 <WorkPlanEditor value={workItems} onChange={setWorkItems} />
               </>
@@ -174,10 +221,32 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
           <Alert type="error" showIcon message="创建失败" description={errorMessage} style={{ marginBottom: 16 }} />
         ) : null}
 
+        {taskId && startError ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="任务已创建，但自动研究未启动。"
+            description={
+              <Space direction="vertical" size={4}>
+                <Text>{startError}</Text>
+                <Space wrap>
+                  <Button size="small" type="primary" loading={starting} onClick={retryStart}>
+                    重新启动研究
+                  </Button>
+                  <Button size="small" onClick={() => onCreated(taskId)}>
+                    查看任务
+                  </Button>
+                </Space>
+              </Space>
+            }
+            style={{ marginBottom: 16 }}
+          />
+        ) : null}
+
         <Button
           type="primary"
           htmlType="submit"
-          loading={mutation.isPending}
+          loading={starting}
           disabled={enableExecute && workItems.length === 0}
         >
           {submitLabel}

@@ -1,12 +1,13 @@
-/** 顶层自动研究编排横幅（7A Product Gate spec N）。
+/** 自动研究状态横幅（V1.1 产品语义）。
 
-- 编排运行中：显示当前 phase / status / attempt / backflow_round。
-- `waiting_manual` 或 `research_backflow` + 可 resume 的 manual_reason：
-  「资料不足」面板 —— 展示缺失 need codes + 原因，提供「上传 PDF」与
-  「导入官方 URL」（复用既有 source-records 能力），成功后显示
-  「继续研究」→ resume-source-acquisition（同 orchestration + 同顶层 thread）。
-- `awaiting_stage5`：Stage 5 人工决策，复用现有 approve/rewrite/research/cancel
-  文案，但 dispatch 到 /research-orchestrations/{id}/actions（继续顶层图）。
+- 研究进行中：显示当前阶段（产品中文语义，不暴露后端 phase/status 枚举）；
+- 资料不足（waiting_manual / 可 resume 的 research_backflow）：提供「上传 PDF」
+  与「导入官方 URL」（复用既有 source-records 能力），成功后「继续研究」；
+- 需要更新结构化数据：明确告知该缺口不能通过补文档解决；
+- awaiting_stage5：人工审核决策（批准/重写/补充研究/取消）。
+
+技术细节（error_code / need codes / attempt 等）折叠进「技术详情」，
+默认 UI 回答三件事：发生了什么、为什么、用户下一步可以做什么。
  */
 
 import { useState } from 'react';
@@ -15,6 +16,7 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Descriptions,
   Form,
   Input,
@@ -45,18 +47,45 @@ import { CONTROLLED_DOCUMENT_TYPES, type SourceDocumentType } from '../../types/
 
 const { Text } = Typography;
 
+/** 阶段 → 产品语义（不暴露后端枚举）。 */
 const PHASE_LABELS: Record<OrchestrationPhase, string> = {
-  planning: '生成研究计划',
-  routing: '规划分析路线',
-  preparing: '准备资料',
-  fulfilling: '补齐资料',
-  stage4: 'Stage 4 分析',
-  stage5: 'Stage 5 报告',
-  research_backflow: '研究回填',
+  planning: '正在规划研究',
+  routing: '正在规划分析路线',
+  preparing: '正在准备资料',
+  fulfilling: '正在补齐资料',
+  stage4: '正在分析',
+  stage5: '正在生成报告',
+  research_backflow: '正在补充研究',
   waiting_manual: '等待补充资料',
-  awaiting_stage5: '等待报告审核',
-  completed: '已完成',
+  awaiting_stage5: '等待人工确认',
+  completed: '研究完成',
 };
+
+const STATUS_LABELS: Record<string, string> = {
+  pending: '待执行',
+  running: '进行中',
+  waiting_human: '等待人工介入',
+  completed: '研究完成',
+  failed: '已失败',
+  cancelled: '已取消',
+};
+
+/** manual_reason / error_code → 产品语义。 */
+const MANUAL_REASON_LABELS: Record<string, string> = {
+  source_acquisition_required: '需要补充资料',
+  structured_data_refresh_required: '需要更新结构化数据',
+  research_backflow_limit_reached: '自动补充研究已达到上限，需要人工确认',
+  research_backflow_no_progress: '未能获取新的补充资料，需要人工确认',
+  index_not_ready: '资料尚未处理完成，请稍后重试或重新补充',
+  evidence_not_extracted: '资料已入库但未能提取证据，需要人工确认',
+};
+
+function reasonLabel(reason: string | null | undefined): string {
+  if (!reason) {
+    return '需要人工确认';
+  }
+  return MANUAL_REASON_LABELS[reason] ?? '需要人工确认';
+}
 
 const DOCUMENT_TYPE_LABELS: Record<SourceDocumentType, string> = {
   annual_report: '年报',
@@ -102,8 +131,8 @@ export function OrchestrationBanner({
       <Alert
         type="success"
         showIcon
-        message="自动研究已完成"
-        description={`报告已生成（尝试 #${orchestration.attempt_no}）。`}
+        message="研究完成"
+        description="报告已生成，可在「报告」标签页查看并导出。"
       />
     );
   }
@@ -113,9 +142,24 @@ export function OrchestrationBanner({
       <Alert
         type="error"
         showIcon
-        message={status === 'failed' ? '自动研究失败' : '自动研究已取消'}
+        message={status === 'failed' ? '研究执行失败' : '研究已取消'}
         description={
-          orchestration.error_message ?? orchestration.error_code ?? '无错误信息'
+          <Space direction="vertical" size={4}>
+            <Text>{orchestration.error_message ?? '无错误信息'}</Text>
+            {orchestration.error_code ? (
+              <Collapse
+                ghost
+                size="small"
+                items={[
+                  {
+                    key: 'detail',
+                    label: '技术详情',
+                    children: <Text type="secondary">错误代码：{orchestration.error_code}</Text>,
+                  },
+                ]}
+              />
+            ) : null}
+          </Space>
         }
       />
     );
@@ -127,27 +171,26 @@ export function OrchestrationBanner({
       orchestration.manual_reason != null &&
       RESUME_MANUAL_REASONS.includes(orchestration.manual_reason));
 
-  // 7A Product Gate spec E：结构化数据补充缺口不在 automatic 文档补充研究范围，
-  // 上传 PDF / URL 不能解决 → 显示明确警告，**不提供**「继续研究」resume。
+  // 结构化数据补充缺口不在自动文档补充研究范围：上传 PDF / URL 不能解决。
   const structuredGap =
     current_phase === 'research_backflow' &&
     orchestration.manual_reason === STRUCTURED_DATA_REFRESH_REASON;
 
   const awaitingStage5 = status === 'waiting_human' && current_phase === 'awaiting_stage5';
 
+  const phaseLabel = PHASE_LABELS[current_phase] ?? current_phase;
+  const statusLabel = STATUS_LABELS[status] ?? status;
+
   return (
-    <Card title="自动研究编排" style={{ marginBottom: 16 }}>
+    <Card title="自动研究" style={{ marginBottom: 16 }}>
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <Descriptions size="small" column={3}>
           <Descriptions.Item label="状态">
-            <Text>{status === 'waiting_human' ? '等待人工介入' : status}</Text>
+            <Text>{statusLabel}</Text>
           </Descriptions.Item>
-          <Descriptions.Item label="当前阶段">
-            {PHASE_LABELS[current_phase] ?? current_phase}
-          </Descriptions.Item>
-          <Descriptions.Item label="尝试次数">#{orchestration.attempt_no}</Descriptions.Item>
+          <Descriptions.Item label="当前阶段">{phaseLabel}</Descriptions.Item>
           {orchestration.backflow_round > 0 ? (
-            <Descriptions.Item label="回填轮次">
+            <Descriptions.Item label="补充研究轮次">
               {orchestration.backflow_round}
             </Descriptions.Item>
           ) : null}
@@ -158,19 +201,31 @@ export function OrchestrationBanner({
         ) : null}
 
         {structuredGap ? (
-          // 7A Product Gate spec E：结构化缺口不能用「补 PDF / URL」解决，也不提供
-          // resume-source-acquisition 按钮；明确告知人工处理或后续结构化刷新能力。
           <Alert
             type="warning"
             showIcon
-            message="需要结构化数据补充"
+            message="需要更新结构化数据"
             description={
-              <Space direction="vertical" size={0}>
+              <Space direction="vertical" size={4}>
                 <div>当前自动补充研究仅支持文档资料，该缺口需要人工处理或后续结构化数据刷新能力。</div>
-                <div>原因：{orchestration.manual_reason}</div>
-                {orchestration.missing_need_codes.length > 0 ? (
-                  <div>缺失需求代码：{orchestration.missing_need_codes.join('、')}</div>
-                ) : null}
+                <Collapse
+                  ghost
+                  size="small"
+                  items={[
+                    {
+                      key: 'detail',
+                      label: '技术详情',
+                      children: (
+                        <Text type="secondary">
+                          原因：{reasonLabel(orchestration.manual_reason)}
+                          {orchestration.missing_need_codes.length > 0
+                            ? `；缺失需求：${orchestration.missing_need_codes.join('、')}`
+                            : ''}
+                        </Text>
+                      ),
+                    },
+                  ]}
+                />
               </Space>
             }
           />
@@ -181,22 +236,50 @@ export function OrchestrationBanner({
         ) : null}
 
         {status === 'waiting_human' && !needsSource && !structuredGap && !awaitingStage5 ? (
-          // 例如 research_backflow_limit_reached / research_backflow_no_progress：顶层
-          // 已暂停，但没有可 resume 的补资料路径，也没有 Stage 5 人工决策 → 明确告知
-          // （不可绕过 MAX rounds / 无新增证据）。
           <Alert
             type="warning"
             showIcon
-            message="研究已暂停，等待人工介入"
-            description={orchestration.manual_reason ?? undefined}
+            message="研究已暂停，等待人工确认"
+            description={
+              <Space direction="vertical" size={4}>
+                <Text>{reasonLabel(orchestration.manual_reason)}</Text>
+                {orchestration.manual_reason ? (
+                  <Collapse
+                    ghost
+                    size="small"
+                    items={[
+                      {
+                        key: 'detail',
+                        label: '技术详情',
+                        children: (
+                          <Text type="secondary">原因：{orchestration.manual_reason}</Text>
+                        ),
+                      },
+                    ]}
+                  />
+                ) : null}
+              </Space>
+            }
           />
         ) : null}
 
         {status !== 'waiting_human' && !needsSource && !awaitingStage5 ? (
-          <Alert
-            type="info"
-            showIcon
-            message={`自动研究进行中：${PHASE_LABELS[current_phase] ?? current_phase}`}
+          <Alert type="info" showIcon message={`自动研究进行中：${phaseLabel}`} />
+        ) : null}
+
+        {orchestration.attempt_no > 1 ? (
+          <Collapse
+            ghost
+            size="small"
+            items={[
+              {
+                key: 'detail',
+                label: '技术详情',
+                children: (
+                  <Text type="secondary">尝试次数：# {orchestration.attempt_no}</Text>
+                ),
+              },
+            ]}
           />
         ) : null}
       </Space>
@@ -227,7 +310,7 @@ interface ImportFormValues {
   source_url: string;
 }
 
-/** 资料不足面板：need codes + 原因 + 上传 PDF / 受控 URL 导入 → 继续研究。 */
+/** 资料不足面板：原因 + 上传 PDF / 受控 URL 导入 → 继续研究。 */
 function SourceAcquisitionPanel({
   orchestration,
   companyId,
@@ -324,14 +407,26 @@ function SourceAcquisitionPanel({
           showIcon
           message="研究需要的资料不完整"
           description={
-            <Space direction="vertical" size={0}>
-              <div>原因：{orchestration.manual_reason ?? '—'}</div>
-              <div>
-                缺失需求代码：
-                {orchestration.missing_need_codes.length > 0
-                  ? orchestration.missing_need_codes.join('、')
-                  : '—'}
-              </div>
+            <Space direction="vertical" size={4}>
+              <div>原因：{reasonLabel(orchestration.manual_reason)}</div>
+              <div>请上传公司披露文件（如年报 PDF），或导入官方披露链接。资料处理完成后即可继续研究。</div>
+              {orchestration.missing_need_codes.length > 0 ? (
+                <Collapse
+                  ghost
+                  size="small"
+                  items={[
+                    {
+                      key: 'detail',
+                      label: '技术详情',
+                      children: (
+                        <Text type="secondary">
+                          缺失需求：{orchestration.missing_need_codes.join('、')}
+                        </Text>
+                      ),
+                    },
+                  ]}
+                />
+              ) : null}
             </Space>
           }
         />
@@ -392,14 +487,14 @@ function SourceAcquisitionPanel({
                       label="标题"
                       rules={[{ required: true, message: '请输入文档标题' }]}
                     >
-                      <Input maxLength={500} placeholder="例如：贵州茅台 2025 年年度报告" />
+                      <Input maxLength={500} placeholder="例如：宁德时代 2023 年年度报告" />
                     </Form.Item>
                     <Form.Item
                       name="source_url"
                       label="原始链接（必须在所选来源机构的受控域名内）"
                       rules={[{ required: true, message: '请输入原始链接' }]}
                     >
-                      <Input maxLength={2000} placeholder="https://static.sse.com.cn/…" />
+                      <Input maxLength={2000} placeholder="https://static.szse.cn/…" />
                     </Form.Item>
                     <Button
                       type="primary"
@@ -414,7 +509,7 @@ function SourceAcquisitionPanel({
               },
               {
                 key: 'import',
-                label: '导入官方 URL',
+                label: '导入官方链接',
                 children: (
                   <Form<ImportFormValues>
                     form={importForm}
@@ -447,14 +542,14 @@ function SourceAcquisitionPanel({
                       label="标题"
                       rules={[{ required: true, message: '请输入文档标题' }]}
                     >
-                      <Input maxLength={500} placeholder="例如：贵州茅台 2025 年年度报告" />
+                      <Input maxLength={500} placeholder="例如：宁德时代 2023 年年度报告" />
                     </Form.Item>
                     <Form.Item
                       name="source_url"
                       label="官方 PDF 链接（受控域名）"
                       rules={[{ required: true, message: '请输入官方 PDF 链接' }]}
                     >
-                      <Input maxLength={2000} placeholder="https://static.sse.com.cn/…/annual.pdf" />
+                      <Input maxLength={2000} placeholder="https://static.szse.cn/…/annual.pdf" />
                     </Form.Item>
                     <Button type="primary" htmlType="submit" loading={importMutation.isPending}>
                       导入并保存
@@ -469,7 +564,8 @@ function SourceAcquisitionPanel({
             <Alert
               type="success"
               showIcon
-              message={mode === 'upload' ? 'PDF 已保存为研究来源' : '官方 URL 已导入为研究来源'}
+              message={mode === 'upload' ? 'PDF 已保存并开始处理' : '官方链接已导入并开始处理'}
+              description="资料处理完成后即可继续研究。"
             />
             <Button
               type="primary"
@@ -488,10 +584,9 @@ function SourceAcquisitionPanel({
   );
 }
 
-// ------------------------------------------------------------------ Stage 5 人工决策
+// ------------------------------------------------------------------ 人工审核决策
 
-/** awaiting_stage5：与 HumanActionCard 相同的操作文案，但 dispatch 到
- * /research-orchestrations/{id}/actions（继续顶层编排，而不是只 resume 子图）。 */
+/** awaiting_stage5：报告审核决策（继续顶层编排）。 */
 function OrchestrationHumanActionCard({
   orchestration,
 }: {

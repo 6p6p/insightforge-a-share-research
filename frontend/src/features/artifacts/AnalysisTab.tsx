@@ -81,25 +81,13 @@ function AnalysisContent({ data }: { data: AnalysisArtifactResponse }): React.JS
         <Descriptions size="small" column={2}>
           <Descriptions.Item label="研究问题">{data.research_question ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="分析基准日">{data.analysis_as_of ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="综合运行 ID">
-            <Text code>{data.synthesis_id ?? '—'}</Text>
-          </Descriptions.Item>
-          <Descriptions.Item label="综合结果 ID">
-            {data.synthesis_result_id ? <Text code>{data.synthesis_result_id}</Text> : '—'}
-          </Descriptions.Item>
-          <Descriptions.Item label="综合指纹">
-            {data.synthesis_fingerprint ? <Text code>{data.synthesis_fingerprint}</Text> : '—'}
-          </Descriptions.Item>
-          <Descriptions.Item label="结果指纹">
-            {data.result_fingerprint ? <Text code>{data.result_fingerprint}</Text> : '—'}
-          </Descriptions.Item>
         </Descriptions>
       </Card>
       {!hasArtifacts ? (
-        <Alert type="info" showIcon message="该任务尚无分析产物（未执行 Stage 4 或执行未完成）。" />
+        <Alert type="info" showIcon message="该任务尚无分析产物（分析尚未完成）。" />
       ) : null}
       {data.work_items.length > 0 ? (
-        <Card title={`分析工作项（${data.work_items.length}）`}>
+        <Card title={`分析条目（${data.work_items.length}）`}>
           <List
             dataSource={data.work_items}
             renderItem={(item) => (
@@ -107,8 +95,7 @@ function AnalysisContent({ data }: { data: AnalysisArtifactResponse }): React.JS
                 <Space direction="vertical" size={4}>
                   <Space>
                     <Tag color={DOMAIN_COLOR[item.analysis_type] ?? 'default'}>{item.analysis_type}</Tag>
-                    <Text type="secondary">item: {item.item_id}</Text>
-                    <Text type="secondary">产物 claim: {item.claim_ids.length}</Text>
+                    <Text type="secondary">观点 {item.claim_ids.length} 条</Text>
                   </Space>
                   <Text type="secondary">
                     输入：{inputCounts(item).join(' / ') || '无'}
@@ -178,8 +165,8 @@ function AnalysisContent({ data }: { data: AnalysisArtifactResponse }): React.JS
         <Alert
           type="warning"
           showIcon
-          message="未匹配到可用的分析工作项"
-          description="当前综合结果未匹配到同一 Synthesis 的 Stage 4 工作项（例如经由研究回流的全新综合）。为保持证据链一致性，不展示旧任务的工作项。"
+          message="未匹配到可用的分析条目"
+          description="当前综合结果未匹配到同一轮分析的分析条目（例如经由补充研究产生的新综合）。为保持证据链一致性，不展示旧的分析条目。"
         />
       ) : null}
     </Space>

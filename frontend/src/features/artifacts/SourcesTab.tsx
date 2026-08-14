@@ -6,20 +6,26 @@ source_identity 由 provider/series/snapshot 恢复）都按任务级精确集�
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Alert, Table, Tag, Typography } from 'antd';
+import { Alert, Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import { getTaskSources, taskKeys } from '../../api/tasks';
 import type { SourceArtifactResponse } from '../../types/artifacts';
 import { artifactErrorMessage } from './integrity';
 
-const { Text } = Typography;
-
 const STATUS_COLOR: Record<string, string> = {
   available: 'green',
   pending: 'orange',
   failed: 'red',
   disabled: 'default',
+};
+
+/** 来源状态 → 产品语义（V1.1 不暴露内部枚举）。 */
+const STATUS_LABEL: Record<string, string> = {
+  available: '可用',
+  pending: '处理中',
+  failed: '失败',
+  disabled: '已停用',
 };
 
 const ORIGIN_LABEL: Record<string, { label: string; color: string }> = {
@@ -57,13 +63,6 @@ export function SourcesTab({ taskId }: Props): React.JSX.Element {
       render: (_, row) => row.source_type ?? row.document_type ?? '—',
     },
     { title: '提供方', dataIndex: 'provider_key', width: 110, render: (v: string | null) => v ?? '—' },
-    {
-      title: '来源标识',
-      dataIndex: 'source_identity',
-      width: 220,
-      ellipsis: true,
-      render: (v: string) => <Text code>{v}</Text>,
-    },
     { title: '标签', dataIndex: 'label', width: 120, render: (v: string | null) => v ?? '—' },
     {
       title: '权威级别',
@@ -76,7 +75,11 @@ export function SourcesTab({ taskId }: Props): React.JSX.Element {
       dataIndex: 'status',
       width: 100,
       render: (v: string | null) =>
-        v ? <Tag color={STATUS_COLOR[v] ?? 'default'}>{v}</Tag> : '—',
+        v ? (
+          <Tag color={STATUS_COLOR[v] ?? 'default'}>{STATUS_LABEL[v] ?? v}</Tag>
+        ) : (
+          '—'
+        ),
     },
     {
       title: '定位摘要',

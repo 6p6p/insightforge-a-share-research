@@ -156,7 +156,7 @@ export function ReportTab({
     return <Alert type="info" showIcon message="正在加载报告…" />;
   }
   if (!data.report_id) {
-    return <Alert type="info" showIcon message="该任务尚无报告（未执行 Stage 5 或审核未通过）。" />;
+    return <Alert type="info" showIcon message="该任务尚无报告（报告尚未生成或审核未通过）。" />;
   }
   return (
     <ReportContent
@@ -211,18 +211,8 @@ function ReportContent({
       <ExportMenu taskId={taskId} />
       <Card title="报告概览">
         <Descriptions size="small" column={2}>
-          <Descriptions.Item label="报告 ID">
-            <Text code>{data.report_id}</Text>
-          </Descriptions.Item>
-          <Descriptions.Item label="大纲 ID">
-            {data.outline_id ? <Text code>{data.outline_id}</Text> : '—'}
-          </Descriptions.Item>
           <Descriptions.Item label="分析基准日">{data.analysis_as_of ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="Schema 版本">{data.report_schema_version ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="章节数">{data.section_count ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="报告指纹">
-            {data.report_fingerprint ? <Text code>{data.report_fingerprint}</Text> : '—'}
-          </Descriptions.Item>
         </Descriptions>
       </Card>
       {data.sections.length > 0 ? (

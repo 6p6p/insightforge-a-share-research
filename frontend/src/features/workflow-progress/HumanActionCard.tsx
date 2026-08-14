@@ -1,7 +1,8 @@
-/** Human Action UI（spec M）。
+/** Human Action UI（V1.1 产品语义）。
 
-pending_action 出现时显示操作卡；按钮按真实 pending_action / graph_name 动态
+待人工处理事项出现时显示操作卡；按钮按真实 pending_action / graph_name 动态
 出现。提交后禁用按钮直到服务器响应；409 时重新 fetch 状态、不假装成功。
+待处理事项以产品语义展示（不暴露 pending_action 枚举）。
  */
 
 import { useState } from 'react';
@@ -15,6 +16,13 @@ import { taskKeys } from '../../api/tasks';
 import { STAGE5_GRAPH_NAME } from '../../utils/stage5';
 
 const { Text } = Typography;
+
+/** 待处理事项 → 产品语义。 */
+const PENDING_ACTION_LABELS: Record<string, string> = {
+  human_review: '报告审核',
+  approve_plan: '研究方案审批',
+  plan_approval: '研究方案审批',
+};
 
 interface ActionOption {
   type: ActionType;
@@ -77,7 +85,14 @@ export function HumanActionCard({ run, onSettled }: Props): React.JSX.Element {
     <Card
       title="需要人工确认"
       type="inner"
-      extra={<Text type="secondary">待处理操作：{run.pending_action ?? '—'}</Text>}
+      extra={
+        <Text type="secondary">
+          待处理事项：
+          {run.pending_action
+            ? (PENDING_ACTION_LABELS[run.pending_action] ?? run.pending_action)
+            : '—'}
+        </Text>
+      }
     >
       <Space direction="vertical" style={{ width: '100%' }}>
         {conflict ? (

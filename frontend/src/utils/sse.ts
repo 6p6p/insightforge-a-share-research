@@ -93,16 +93,16 @@ export function reduceTaskEvents(
   return { events, latestId: events.length ? events[events.length - 1].event_id : null };
 }
 
-/** 事件类型 → 中文说明（用于 Timeline 展示）。 */
+/** 事件类型 → 中文说明（用于 Timeline 展示；V1.1 产品语义）。 */
 export const EVENT_TYPE_LABEL: Record<WorkflowEventType, string> = {
-  run_created: '运行已创建',
-  run_started: '运行已启动',
-  node_completed: '节点完成',
-  run_completed: '运行已完成',
-  run_failed: '运行失败',
+  run_created: '研究已创建',
+  run_started: '研究已启动',
+  node_completed: '步骤完成',
+  run_completed: '研究已完成',
+  run_failed: '研究失败',
   run_waiting_human: '等待人工确认',
-  run_resumed: '运行已恢复',
-  run_cancelled: '运行已取消',
+  run_resumed: '研究已恢复',
+  run_cancelled: '研究已取消',
 };
 
 export function eventTypeLabel(type: WorkflowEventType): string {

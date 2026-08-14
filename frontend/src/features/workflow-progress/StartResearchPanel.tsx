@@ -1,7 +1,7 @@
-/** 启动研究执行面板：显式 Stage 4 work plan（spec J/C）。
+/** 启动研究执行面板（V1.1 产品语义）。
 
-任务已创建但尚无 active run 时显示；提交 → POST /tasks/{id}/execute。
-已有 active run（pending/running/waiting_human）时隐藏。
+任务已创建但尚无进行中的研究时显示；提交 → 按手动研究方案启动研究。
+已有进行中的研究（pending/running/waiting_human）时隐藏。
  */
 
 import { useState } from 'react';
@@ -45,7 +45,7 @@ export function StartResearchPanel({ taskId, onStarted }: Props): React.JSX.Elem
         <Alert
           type="info"
           showIcon
-          message="Stage 6A 不包含自动 Source Planning。请显式填写 Stage 4 work plan：每条工作项引用已入库的真实证据 / 计算 / 对比 ID。"
+          message="请填写研究方案：每条研究条目引用已入库的真实证据 / 计算 / 对比 ID。"
         />
         <WorkPlanEditor value={workItems} onChange={setWorkItems} disabled={mutation.isPending} />
         {errorMessage ? <Alert type="error" showIcon message={errorMessage} /> : null}

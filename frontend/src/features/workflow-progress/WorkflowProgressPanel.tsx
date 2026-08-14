@@ -1,7 +1,7 @@
-/** 工作流进度面板（spec K）。
+/** 研究进度面板（V1.1 产品语义）。
 
-任务概要 + 当前 run 状态 + 真实工作流阶段 + progress + node/event timeline
-+ pending human action + error 信息。简单 Timeline/Steps，不做 DAG 编辑器。
+任务概要 + 当前研究状态 + 真实阶段 + progress + 事件时间线 + 待人工处理 +
+错误信息。简单 Timeline/Steps，不做 DAG 编辑器。
  */
 
 import { Alert, Card, Descriptions, Empty, Progress, Space, Steps, Typography } from 'antd';
@@ -14,6 +14,13 @@ import { stageLabel } from '../../utils/status';
 import { HumanActionCard } from './HumanActionCard';
 
 const { Title } = Typography;
+
+/** 待处理事项 → 产品语义。 */
+const PENDING_ACTION_LABELS: Record<string, string> = {
+  human_review: '报告审核',
+  approve_plan: '研究方案审批',
+  plan_approval: '研究方案审批',
+};
 
 /** 运行中 run 的阶段映射（事件 stage → Steps 序号）。 */
 function runStageIndex(events: WorkflowEventResponse[]): number {
@@ -57,7 +64,7 @@ export function WorkflowProgressPanel({
 }: Props): React.JSX.Element {
   if (!run) {
     return (
-      <Card title="工作流进度">
+      <Card title="研究进度">
         <Empty description="尚未启动研究执行" />
       </Card>
     );
@@ -66,18 +73,19 @@ export function WorkflowProgressPanel({
   const stageIndex = runStageIndex(events);
   const latestProgress =
     events.length > 0 ? (events[events.length - 1].progress ?? task.progress) : task.progress;
+  const pendingLabel = run.pending_action
+    ? (PENDING_ACTION_LABELS[run.pending_action] ?? run.pending_action)
+    : '—';
 
   return (
-    <Card title="工作流进度">
+    <Card title="研究进度">
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <Descriptions size="small" column={3}>
           <Descriptions.Item label="运行状态">
             <StatusTag kind="run" status={run.status} />
           </Descriptions.Item>
-          <Descriptions.Item label="图">{run.graph_name}</Descriptions.Item>
-          <Descriptions.Item label="版本">{run.graph_version}</Descriptions.Item>
           <Descriptions.Item label="当前阶段">{stageLabel(task.current_stage)}</Descriptions.Item>
-          <Descriptions.Item label="待处理操作">{run.pending_action ?? '—'}</Descriptions.Item>
+          <Descriptions.Item label="待处理事项">{pendingLabel}</Descriptions.Item>
           <Descriptions.Item label="任务进度">{latestProgress}%</Descriptions.Item>
         </Descriptions>
 
@@ -99,13 +107,8 @@ export function WorkflowProgressPanel({
           <Alert
             type="error"
             showIcon
-            message="运行失败"
-            description={
-              <span>
-                {run.error_code ? <strong>{run.error_code}：</strong> : null}
-                {run.error_message ?? '无错误信息'}
-              </span>
-            }
+            message="研究执行失败"
+            description={run.error_message ?? '无错误信息'}
           />
         ) : null}
 

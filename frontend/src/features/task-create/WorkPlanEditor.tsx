@@ -1,11 +1,10 @@
-/** 显式 Stage 4 work plan 编辑器（spec J/C）。
+/** 手动研究方案编辑器（V1.1 产品语义）。
 
-Stage 6A **不假装自动 source planning 已完成**：这里逐条暴露后端 execute
-契约的字段（analysis_type + 各类真实 ID），由用户填写。每条 work item 对应
-后端 stage4.contracts.AnalysisWorkItem 判别联合的一个分支。
+每条研究条目对应一个分析模块，引用已入库的真实证据 / 计算 / 对比 ID
+（自动研究方案由系统规划；手动方案不包含自动资料收集）。
 
-Stage 6B.1：每条 work item 用 antd Collapse 包裹（默认全展开），长表单可折叠
-以压缩空间；`disabled` 时面板锁定为展开（内容仍可见，符合只读回显语义）。
+V1.1：界面文案产品化（不再暴露 Stage/plan/work item 开发术语），
+字段标签只保留中文语义，ID 输入框用通用占位符。
  */
 
 import { Button, Collapse, Input, Select, Space, Typography } from 'antd';
@@ -24,25 +23,25 @@ const ANALYSIS_TYPE_OPTIONS: { value: AnalysisType; label: string }[] = [
   { value: 'valuation', label: '估值分析' },
 ];
 
-/** 按分析类型返回需要填写的 ID 字段。 */
+/** 按分析类型返回需要填写的 ID 字段（中文标签 + 内部字段名）。 */
 function idFieldsFor(type: AnalysisType): { key: string; label: string; required: boolean }[] {
   switch (type) {
     case 'financial':
       return [
-        { key: 'calculation_ids', label: '财务计算 ID（calculation_ids）', required: true },
-        { key: 'additional_evidence_ids', label: '附加证据 ID（additional_evidence_ids，可选）', required: false },
+        { key: 'calculation_ids', label: '财务计算', required: true },
+        { key: 'additional_evidence_ids', label: '附加证据（可选）', required: false },
       ];
     case 'macro':
       return [
-        { key: 'macro_driver_evidence_ids', label: '宏观驱动证据 ID', required: true },
-        { key: 'company_evidence_ids', label: '公司证据 ID', required: true },
+        { key: 'macro_driver_evidence_ids', label: '宏观驱动证据', required: true },
+        { key: 'company_evidence_ids', label: '公司证据', required: true },
       ];
     case 'valuation':
-      return [{ key: 'comparison_ids', label: '相对估值对比 ID（comparison_ids）', required: true }];
+      return [{ key: 'comparison_ids', label: '相对估值对比', required: true }];
     case 'business':
     case 'event':
     case 'risk':
-      return [{ key: 'evidence_card_ids', label: '证据卡 ID（evidence_card_ids）', required: true }];
+      return [{ key: 'evidence_card_ids', label: '证据', required: true }];
   }
 }
 
@@ -91,7 +90,7 @@ export function WorkPlanEditor({ value, onChange, disabled = false }: Props): Re
     <div>
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         {value.length === 0 ? (
-          <Text type="secondary">尚未添加执行工作项。Stage 6A 不包含自动 Source Planning，请手动输入工作项。每个工作项需要引用已入库的真实证据 / 计算 / 对比 ID。</Text>
+          <Text type="secondary">尚未添加研究条目。请手动添加研究条目，每条引用已入库的真实证据 / 计算 / 对比 ID。</Text>
         ) : null}
         {value.length > 0 ? (
           <Collapse
@@ -99,7 +98,7 @@ export function WorkPlanEditor({ value, onChange, disabled = false }: Props): Re
               const fields = idFieldsFor(item.analysis_type);
               return {
                 key: String(index),
-                label: `工作项 ${index + 1}`,
+                label: `研究条目 ${index + 1}`,
                 extra: (
                   <Button
                     type="text"
@@ -111,7 +110,7 @@ export function WorkPlanEditor({ value, onChange, disabled = false }: Props): Re
                       e.stopPropagation();
                       removeItem(index);
                     }}
-                    aria-label={`删除工作项 ${index + 1}`}
+                    aria-label={`删除研究条目 ${index + 1}`}
                   >
                     删除
                   </Button>
@@ -123,7 +122,7 @@ export function WorkPlanEditor({ value, onChange, disabled = false }: Props): Re
                       options={ANALYSIS_TYPE_OPTIONS}
                       disabled={disabled}
                       style={{ width: 220 }}
-                      aria-label={`工作项 ${index + 1} 分析类型`}
+                      aria-label={`研究条目 ${index + 1} 分析类型`}
                       onChange={(type: AnalysisType) => {
                         // 整体替换为当前类型的空工作项，丢弃旧类型遗留字段。
                         onChange(value.map((v, i) => (i === index ? blankItemFor(type, v.item_id) : v)));
@@ -143,7 +142,7 @@ export function WorkPlanEditor({ value, onChange, disabled = false }: Props): Re
                           disabled={disabled}
                           value={(item as unknown as Record<string, string[]>)[field.key]?.join(', ') ?? ''}
                           onChange={(e) => setIds(index, field.key, e.target.value)}
-                          aria-label={`工作项 ${index + 1} ${field.key}`}
+                          aria-label={`研究条目 ${index + 1} ${field.label}`}
                         />
                       </div>
                     ))}
@@ -160,7 +159,7 @@ export function WorkPlanEditor({ value, onChange, disabled = false }: Props): Re
           disabled={disabled}
           onClick={addItem}
         >
-          添加工作项
+          添加研究条目
         </Button>
       </Space>
     </div>

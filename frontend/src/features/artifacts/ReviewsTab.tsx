@@ -45,6 +45,20 @@ const ACTION_TYPE_COLOR: Record<string, string> = {
   research: 'purple',
 };
 
+/** 审核状态 / 动作类型 → 产品语义（V1.1 不暴露内部枚举）。 */
+const AUDIT_STATUS_LABEL: Record<string, string> = {
+  pass: '通过',
+  fail: '未通过',
+  human_review: '待人工审核',
+  pending: '待审核',
+};
+
+const ACTION_TYPE_LABEL: Record<string, string> = {
+  rewrite: '要求重写',
+  request_human_review: '请求人工审核',
+  research: '需要补充研究',
+};
+
 const HUMAN_DECISION_COLOR: Record<string, string> = {
   approve: 'green',
   reject: 'red',
@@ -70,7 +84,7 @@ export function ReviewsTab({ taskId, onLocateReport }: Props): React.JSX.Element
     return <Alert type="info" showIcon message="正在加载审核视图…" />;
   }
   if (!data.audit_id) {
-    return <Alert type="info" showIcon message="该任务尚无审核（未执行 Stage 5 审核）。" />;
+    return <Alert type="info" showIcon message="该任务尚无审核记录（报告审核尚未完成）。" />;
   }
   return <ReviewsContent data={data} onLocateReport={onLocateReport} />;
 }
@@ -126,22 +140,15 @@ function ReviewsContent({
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <Card title="审核概览">
         <Descriptions size="small" column={2}>
-          <Descriptions.Item label="审核 ID">
-            <Text code>{data.audit_id}</Text>
+          <Descriptions.Item label="审核状态">
+            {data.audit_status ? (AUDIT_STATUS_LABEL[data.audit_status] ?? data.audit_status) : '—'}
           </Descriptions.Item>
-          <Descriptions.Item label="报告 ID">
-            {data.report_id ? <Text code>{data.report_id}</Text> : '—'}
-          </Descriptions.Item>
-          <Descriptions.Item label="审核状态">{data.audit_status ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="建议路由">
             {data.recommended_route
               ? (ROUTE_LABEL[data.recommended_route] ?? data.recommended_route)
               : '—'}
           </Descriptions.Item>
           <Descriptions.Item label="问题数">{data.issue_count}</Descriptions.Item>
-          <Descriptions.Item label="审核指纹">
-            {data.audit_fingerprint ? <Text code>{data.audit_fingerprint}</Text> : '—'}
-          </Descriptions.Item>
         </Descriptions>
       </Card>
       <Card title={`审核问题（${data.issue_count}）`}>
@@ -154,12 +161,12 @@ function ReviewsContent({
           size="small"
         />
       </Card>
-      <Card title="确定性检查（Deterministic Check）">
+      <Card title="确定性检查">
         {data.check ? (
           <Space direction="vertical" style={{ width: '100%' }} size="small">
             <Space>
               <Tag color={CHECK_STATUS_COLOR[data.check.status] ?? 'default'}>{data.check.status}</Tag>
-              <Text type="secondary">检查结果 {data.check.check_result_id.slice(0, 8)}</Text>
+              <Text type="secondary">检查项 {data.check.findings.length} 条</Text>
             </Space>
             <Table<CheckFindingArtifact>
               rowKey="code"
@@ -174,12 +181,12 @@ function ReviewsContent({
           <Text type="secondary">该审核无确定性检查记录。</Text>
         )}
       </Card>
-      <Card title="审核动作（ReviewAction）">
+      <Card title="审核动作">
         {data.review_action ? (
           <Descriptions size="small" column={2}>
             <Descriptions.Item label="动作类型">
               <Tag color={ACTION_TYPE_COLOR[data.review_action.action_type] ?? 'default'}>
-                {data.review_action.action_type}
+                {ACTION_TYPE_LABEL[data.review_action.action_type] ?? data.review_action.action_type}
               </Tag>
             </Descriptions.Item>
             <Descriptions.Item label="问题数">{data.review_action.issue_count}</Descriptions.Item>
@@ -193,7 +200,7 @@ function ReviewsContent({
           <Text type="secondary">无审核动作记录。</Text>
         )}
       </Card>
-      <Card title="人工审核（Human Review）">
+      <Card title="人工审核">
         {data.human_review ? (
           <Descriptions size="small" column={2}>
             <Descriptions.Item label="决策">
@@ -214,14 +221,14 @@ function ReviewsContent({
           <Text type="secondary">无人工审核请求。</Text>
         )}
       </Card>
-      <Card title="研究回流（Research Backflow）">
+      <Card title="补充研究">
         {data.research_backflow ? (
           <Descriptions size="small" column={2}>
             <Descriptions.Item label="状态">
               {data.research_backflow.fulfilled ? (
-                <Tag color="green">已回填</Tag>
+                <Tag color="green">已补充</Tag>
               ) : (
-                <Tag color="orange">待回填</Tag>
+                <Tag color="orange">待补充</Tag>
               )}
             </Descriptions.Item>
             <Descriptions.Item label="请求 ID">
@@ -236,7 +243,7 @@ function ReviewsContent({
             </Descriptions.Item>
           </Descriptions>
         ) : (
-          <Text type="secondary">无研究回流记录。</Text>
+          <Text type="secondary">无补充研究记录。</Text>
         )}
       </Card>
     </Space>
