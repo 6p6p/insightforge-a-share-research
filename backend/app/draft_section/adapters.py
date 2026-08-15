@@ -46,14 +46,16 @@ class DeepSeekDraftSectionModel:
         """稳定 identifier：provider:model（无 immutable revision，不伪造 @rev）。"""
         return self._model_id
 
-    async def write(self, pack: SectionInputPack) -> WriterDecision:
+    async def write(
+        self, pack: SectionInputPack, correction_hint: str | None = None
+    ) -> WriterDecision:
         try:
             from langchain_core.exceptions import OutputParserException  # noqa: F401
             from langchain_deepseek import ChatDeepSeek
         except ImportError as exc:
             raise DraftSectionModelUnavailable("langchain-deepseek 未安装") from exc
 
-        messages = build_writer_messages(pack)
+        messages = build_writer_messages(pack, correction_hint=correction_hint)
         api_key = self._settings.deepseek_api_key
         llm = ChatDeepSeek(
             model=self._settings.llm_model,

@@ -6,6 +6,7 @@ from app.services.announcement_discovery_service import (
     _keyword_for,
     _matches_keyword,
     _parse_notice_date,
+    _scan_cutoff,
     looks_like_pdf,
     parse_challenge_cookies,
     reporting_period_end_for,
@@ -18,6 +19,28 @@ def test_keyword_for() -> None:
     assert _keyword_for("quarterly_report") == "季度报告"
     assert _keyword_for("company_announcement") is None
     assert _keyword_for("other") is None
+
+
+def test_matches_ir_title() -> None:
+    from app.services.announcement_discovery_service import _matches_ir_title
+
+    assert _matches_ir_title("宁德时代:2025年8月14日投资者关系活动记录表")
+    assert _matches_ir_title("宁德时代:2024年度业绩说明会")
+    assert not _matches_ir_title("宁德时代:2025年年度报告")
+    assert not _matches_ir_title("宁德时代:投资者关系活动记录表(摘要)")
+    assert not _matches_ir_title("宁德时代:2025年三季度报告")
+
+
+def test_matches_announcement_title() -> None:
+    from app.services.announcement_discovery_service import _matches_announcement_title
+
+    assert _matches_announcement_title("宁德时代:关于回购公司股份的公告")
+    assert _matches_announcement_title("宁德时代:2025年半年度权益分派实施公告")
+    assert not _matches_announcement_title(
+        "宁德时代:关于宁德时代新能源科技股份有限公司2025年第二次临时股东会的法律意见书"
+    )
+    assert not _matches_announcement_title("宁德时代:验资报告")
+    assert not _matches_announcement_title("宁德时代:更正公告")
 
 
 def test_matches_keyword_annual() -> None:
@@ -95,3 +118,16 @@ def test_reporting_period_end_for() -> None:
     assert reporting_period_end_for("annual_report", None, "x") is None
     assert reporting_period_end_for("annual_report", "20", "x") is None
     assert reporting_period_end_for("company_announcement", "2024", "x") is None
+
+
+def test_scan_cutoff() -> None:
+    as_of = date(2025, 12, 31)
+    # 年报 Y：最早 Y+1-01-01 披露（2023 年报 2024-03 可被发现）。
+    assert _scan_cutoff("annual_report", "2023", as_of) == date(2024, 1, 1)
+    assert _scan_cutoff("annual_report", "2024", as_of) == date(2025, 1, 1)
+    assert _scan_cutoff("semiannual_report", "2025", as_of) == date(2025, 7, 1)
+    assert _scan_cutoff("quarterly_report", "2025", as_of) == date(2025, 1, 1)
+    # 无 period → as_of - 400 天。
+    assert _scan_cutoff("annual_report", None, as_of) == date(2024, 11, 26)
+    # 非法 period → 回落无 period 窗口。
+    assert _scan_cutoff("annual_report", "20", as_of) == date(2024, 11, 26)

@@ -49,7 +49,9 @@ def _decision(**overrides) -> dict:
 
 def test_frozen_constants() -> None:
     assert EVIDENCE_EXTRACTOR_NAME == "structured_llm"
-    assert EVIDENCE_EXTRACTOR_VERSION == 1
+    # v3（V1.1 closure）：quote 解析增加空白容差（PDF 布局空白）——行为变化
+    # 必须 bump，旧卡保留、新抽取为 v3 新卡。
+    assert EVIDENCE_EXTRACTOR_VERSION == 3
     assert MAX_EXTRACTION_ITEMS_PER_HIT == 3
 
 
@@ -90,9 +92,12 @@ def test_relevant_false_with_items_rejected() -> None:
         EvidenceExtractionDecision.model_validate(_decision(relevant=False, items=[_item()]))
 
 
-def test_relevant_true_with_zero_items_rejected() -> None:
-    with pytest.raises(ValidationError):
-        EvidenceExtractionDecision.model_validate(_decision(items=[]))
+def test_relevant_true_with_zero_items_allowed() -> None:
+    """v3（V1.1 closure）：relevant=true + items=[] 合法——「相关但无原子证据」，
+    生产实测模型高频输出该形态，硬性 1..3 导致整条 hit 被 schema 拒绝。"""
+    decision = EvidenceExtractionDecision.model_validate(_decision(items=[]))
+    assert decision.relevant is True
+    assert decision.items == []
 
 
 def test_relevant_true_with_four_items_rejected() -> None:

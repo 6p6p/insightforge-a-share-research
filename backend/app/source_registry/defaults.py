@@ -241,6 +241,7 @@ DEFAULT_PROVIDERS: list[SourceProviderDefinition] = [
         allowed_domains=["eastmoney.com", "dfcfw.com"],
         capabilities=[
             SourceCapability.COMPANY_ANNOUNCEMENT,
+            SourceCapability.ISSUER_IR,
             SourceCapability.DOCUMENT_DOWNLOAD,
         ],
         acquisition_methods=[

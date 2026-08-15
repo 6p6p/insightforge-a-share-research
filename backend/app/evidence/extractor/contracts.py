@@ -10,7 +10,10 @@
 - Extractor **不调用** RetrievalService：输入是已经得到的 RetrievalHit。
 
 冻结：
-- EVIDENCE_EXTRACTOR_NAME = "structured_llm"；EVIDENCE_EXTRACTOR_VERSION = 1。
+- EVIDENCE_EXTRACTOR_NAME = "structured_llm"；EVIDENCE_EXTRACTOR_VERSION = 3
+  （v3 = V1.1 closure quote 解析语义：PDF 解析布局空白下精确匹配高频失败 →
+  新增空白容差匹配，唯一允许差异是空白，quote 存储仍为原文逐字切片；
+  v2 = 相关性标准细化——片段讨论/涉及问题主题即相关）。
   version 代表：prompt contract + structured schema + quote extraction
   semantics；任一行为改变必须 bump（不用新增 migration）。
 - EvidenceExtractionItem / EvidenceExtractionDecision（Pydantic 结构化输出）：
@@ -32,7 +35,7 @@ from app.evidence.contracts import EvidenceConfidence, EvidenceType
 from app.rag.retrieval.contracts import RetrievalHit
 
 EVIDENCE_EXTRACTOR_NAME = "structured_llm"
-EVIDENCE_EXTRACTOR_VERSION = 1
+EVIDENCE_EXTRACTOR_VERSION = 3
 
 # 单 RetrievalHit 最多返回 3 个 Evidence item（→ 最多 3 卡）。
 MAX_EXTRACTION_ITEMS_PER_HIT = 3
@@ -80,7 +83,10 @@ class EvidenceExtractionDecision(BaseModel):
     规则（Pydantic 构造时强制，违反 → ValidationError → 服务层翻译为
     EvidenceExtractionMalformedOutput）：
     - relevant=false → items 必须为空；reason_code 可选（仅限非相关/无证据）；
-    - relevant=true → items 必须 1..3 个；reason_code 必须为 None；
+    - relevant=true → items 0..3 个（v3：允许 0——「相关但无原子证据」，
+      生产实测模型高频输出 relevant=true + items=[]，硬性 1..3 导致整条
+      hit 被 schema 拒绝；0 个 item → 无卡创建，效果等同无证据）；
+      reason_code 必须为 None；
     - 单 response 不允许完全重复 item（statement/type/quote/confidence 全同）。
     """
 
@@ -94,8 +100,8 @@ class EvidenceExtractionDecision(BaseModel):
     def _validate_rules(self) -> "EvidenceExtractionDecision":
         if not self.relevant and self.items:
             raise ValueError("relevant=false 时 items 必须为空")
-        if self.relevant and not (1 <= len(self.items) <= MAX_EXTRACTION_ITEMS_PER_HIT):
-            raise ValueError(f"relevant=true 时 items 必须在 1..{MAX_EXTRACTION_ITEMS_PER_HIT}")
+        if self.relevant and len(self.items) > MAX_EXTRACTION_ITEMS_PER_HIT:
+            raise ValueError(f"relevant=true 时 items 最多 {MAX_EXTRACTION_ITEMS_PER_HIT} 个")
         if self.relevant and self.reason_code is not None:
             raise ValueError("reason_code 仅用于非相关/无证据")
         seen: set[tuple] = set()

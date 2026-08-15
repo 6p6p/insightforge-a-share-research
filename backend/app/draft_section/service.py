@@ -47,6 +47,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.analysis.synthesis.contracts import VerifiedSynthesisResult
+from app.core.logging import get_logger
 from app.db.models.claim import ClaimModel
 from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.company import CompanyModel
@@ -63,6 +64,7 @@ from app.draft_section.contracts import (
     compute_section_fingerprint,
     compute_writer_input_fingerprint,
 )
+from app.core.logging import get_logger
 from app.draft_section.errors import (
     DraftSectionError,
     DraftSectionInputError,
@@ -126,6 +128,9 @@ class LoadedSectionInput:
     evidence: list[LoadedEvidence]
     conflicts: list[ResolvedConflict]
     gaps: list[ResolvedGap]
+
+
+logger = get_logger("app.draft_section")
 
 
 class DraftSectionService:
@@ -200,14 +205,28 @@ class DraftSectionService:
             return self._result(existing, replayed=True)
 
         # 7. 关闭 session → 调模型（structured output）。
+        # V1.1 closure（writer v4）：hard provenance validation 违规 → 带违规
+        # 摘要**有界重试一次**（生产实测 writer 对绑定/数字规则偶发违反，重试
+        # 显著提高通过率；仍违规才拒绝——0 写，不自动改写）。
         decision = await self._call_model(pack)
-
-        # 8. hard provenance validation → 解析为 persisted payload（真实 ID）。
-        validate_decision(
-            pack=pack,
-            decision=decision,
-            total_claim_count=len(verified.verified_synthesis_result.input_claim_ids),
-        )
+        correction_hint: str | None = None
+        for attempt in range(2):
+            try:
+                # 8. hard provenance validation → 解析为 persisted payload。
+                validate_decision(
+                    pack=pack,
+                    decision=decision,
+                    total_claim_count=len(verified.verified_synthesis_result.input_claim_ids),
+                )
+                correction_hint = None
+                break
+            except DraftSectionError as exc:
+                if attempt == 0:
+                    correction_hint = str(exc)
+                    logger.warning("draft_section_validation_retry", reason=correction_hint)
+                    decision = await self._call_model(pack, correction_hint=correction_hint)
+                    continue
+                raise
         payload = resolve_decision(pack, decision)
 
         # 9. 草稿不可变指纹（writer_input_fingerprint + normalized payload）。
@@ -581,11 +600,13 @@ class DraftSectionService:
             )
         return items
 
-    async def _call_model(self, pack: SectionInputPack) -> WriterDecision:
+    async def _call_model(
+        self, pack: SectionInputPack, correction_hint: str | None = None
+    ) -> WriterDecision:
         """调用模型并归一到 WriterDecision（防御性 double-check）。"""
         if self._model is None:
             raise DraftSectionModelUnavailable()
-        raw = await self._model.write(pack)
+        raw = await self._model.write(pack, correction_hint=correction_hint)
         if isinstance(raw, WriterDecision):
             return raw
         try:

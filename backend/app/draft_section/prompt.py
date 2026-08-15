@@ -42,6 +42,12 @@ DRAFT_SECTION_WRITER_SYSTEM_PROMPT = (
     "5. 不创造新事实、不重算财务数字、不修改任何 Claim 的含义、不加入外部知识、不补充"
     "新的来源。所有数字必须逐字来自所引用 C/E 的陈述或原文引用；不得引入 C/E 中不存在"
     "的数字。\n"
+    "5a. 数字逐字核查清单（写完后逐项自检）：① 正文里出现的每个数字（年份、百分比、"
+    "金额、倍数等）都必须能在你引用的 C/E 的「陈述」或「原文引用」中找到**完全一致**"
+    "的写法（如证据写「4009.17亿元」，正文只能写「4009.17」，不能写「4009」「约"
+    "4010亿」「4009.17 亿元四舍五入」）；② 不换算单位、不四舍五入、不计算同比/环比；"
+    "③ 找不到逐字数字就不写数字，改用定性表述；④ 正文不得出现你引用的 C/E 中不存在"
+    "的任何数字（含年份与百分比）。\n"
     "6. 不写买入/卖出/增持/减持/推荐/目标价/收益承诺/保证收益等投资建议，不做短期股价"
     "预测。\n"
     "7. C/E/X/G 编号是程序分配的稳定标识，不可修改。只输出给定编号；不输出 UUID / "
@@ -112,12 +118,16 @@ def _render_gap(item) -> str:
     return "\n".join(lines)
 
 
-def build_writer_messages(pack: SectionInputPack) -> list[dict[str, str]]:
-    """构建 [system, user] 两条消息：Section Input Pack 只进入 user（data delimiter 内）。
+def build_writer_messages(
+    pack: SectionInputPack, correction_hint: str | None = None
+) -> list[dict[str, str]]:
+    """构建 [system, user(, user-correction)] 消息：Section Input Pack 只进 user。
 
     system 内容 == DRAFT_SECTION_WRITER_SYSTEM_PROMPT（固定、无插值）；user payload
     = research question + cutoff + company + section 标题 + delimiter 包裹的
-    C/E/X/G packs。
+    C/E/X/G packs。`correction_hint`（V1.1 closure，writer v4）：首稿 hard
+    validation 违规时的有界重试提示（追加一条 user 消息；提示只含违规摘要，
+    不含正文/prompt）。
     """
     if not pack.research_question.strip():
         raise DraftSectionInputError("research_question 不能为空（trim 后）")
@@ -150,10 +160,22 @@ def build_writer_messages(pack: SectionInputPack) -> list[dict[str, str]]:
             lines.append(_render_gap(item))
     lines.append(SECTION_PACK_END)
 
-    return [
+    messages: list[dict[str, str]] = [
         {"role": "system", "content": DRAFT_SECTION_WRITER_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(lines)},
     ]
+    if correction_hint:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"你的上一稿被硬性校验拒绝，原因：{correction_hint}。"
+                    "请严格遵守【Evidence-bound 写作规则】重写完整 JSON 输出"
+                    "（不要解释、不要输出非 JSON 内容）。"
+                ),
+            }
+        )
+    return messages
 
 
 def extract_section_pack_data(user_content: str) -> str:

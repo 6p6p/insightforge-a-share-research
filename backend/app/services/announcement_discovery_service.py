@@ -44,13 +44,38 @@ _REFERER = "https://data.eastmoney.com/"
 _PAGE_SIZE = 50
 # 扫描上限（1000 条公告 ≈ 大盘股 2 年公告量；防止无限分页）。
 _MAX_PAGES = 20
-# 报告发布窗口：目标年报告最迟在次年 4 月底披露；扫描下限 = as_of - 400 天。
+# 无 period 过滤时的扫描下限（as_of - 400 天）。
 _SCAN_WINDOW_DAYS = 400
+# 扫描下限的绝对守卫（防误配 period 导致无限扫描）。
+_SCAN_EARLIEST_GUARD = date(2000, 1, 1)
 
 # 标题关键词（source_type → 必须包含；exclude 规则单独处理）。
 _ANNUAL_KEYWORD = "年度报告"
 _SEMIANNUAL_KEYWORD = "半年度报告"
 _QUARTERLY_KEYWORD = "季度报告"
+# issuer_ir_material 关键词（投资者关系材料 / 业绩说明会）。
+_IR_KEYWORDS = ("投资者关系", "业绩说明会")
+
+# company_announcement need 最多自动获取的最近公告数（有界：不无限下载）。
+_MAX_ACQUIRE_ANNOUNCEMENTS = 2
+
+# company_announcement 排除标题：法律意见/验资/评估等程序性文件通常是扫描件，
+# 解析器无法提取文本（parse_failed 实测），且对业务研究价值低。
+_ANNOUNCEMENT_EXCLUDE_TERMS = (
+    "法律意见",
+    "律师见证",
+    "验资报告",
+    "资产评估报告",
+    "专项审计",
+    "更正公告",
+)
+
+
+def _matches_announcement_title(title: str) -> bool:
+    """公告标题匹配：排除程序性/扫描件类公告（法律意见、验资等）。"""
+    if "摘要" in title or "英文" in title:
+        return False
+    return not any(term in title for term in _ANNOUNCEMENT_EXCLUDE_TERMS)
 
 # pdf.dfcfw.com 反爬 challenge 常量提取（Alibaba __tst_status 型）：
 #   t = WTKkN + bOYDu + wyeCN；EO_Bot_Ssid = (t, <ssid>) 中的常量。
@@ -87,6 +112,27 @@ _QUARTER_MAP = {
     "三": 9,
     "四": 12,
 }
+
+
+def _scan_cutoff(source_type: str, period: str | None, as_of: date) -> date:
+    """扫描下限（确定性）：period 存在时按报告发布窗口推导，否则 as_of - 400 天。
+
+    年报 Y 最早在 Y+1-01-01 披露（常见 3-4 月）；半年报 Y 在 Y-07-01 起；
+    季报 Y 在 Y-01-01 起。下限 = max(发布窗口起点, 绝对守卫)，保证旧年度
+    报告（如 as_of=2025-12-31 时的 2023 年报，2024-03 披露）可被发现。
+    """
+    if period and re.fullmatch(r"\d{4}", period):
+        year = int(period)
+        if source_type == "annual_report":
+            earliest = date(year + 1, 1, 1)
+        elif source_type == "semiannual_report":
+            earliest = date(year, 7, 1)
+        elif source_type == "quarterly_report":
+            earliest = date(year, 1, 1)
+        else:
+            earliest = date.fromordinal(as_of.toordinal() - _SCAN_WINDOW_DAYS)
+        return max(earliest, _SCAN_EARLIEST_GUARD)
+    return date.fromordinal(as_of.toordinal() - _SCAN_WINDOW_DAYS)
 
 
 def reporting_period_end_for(
@@ -168,10 +214,12 @@ class AnnouncementDiscoveryService:
         """确定性发现：标题关键词 + 年份 + no-lookahead（notice_date ≤ as_of）。
 
         source_type ∈ annual_report / semiannual_report / quarterly_report /
-        company_announcement / other。company_announcement / other 不做关键词
-        过滤（返回窗口内全部公告，调用方自行裁剪）。
+        company_announcement / issuer_ir_material / other。company_announcement
+        / other 不做关键词过滤（返回窗口内全部公告）；issuer_ir_material 用
+        投资者关系关键词（「投资者关系」「业绩说明会」）。
         """
         keyword = _keyword_for(source_type)
+        cutoff = _scan_cutoff(source_type, period, as_of)
         results: list[DiscoveredAnnouncement] = []
         for page in range(1, _MAX_PAGES + 1):
             items = await self._fetch_page(security_code, page)
@@ -181,14 +229,18 @@ class AnnouncementDiscoveryService:
                 notice = _parse_notice_date(item.get("notice_date"))
                 if notice is not None and notice > as_of:
                     continue
-                if notice is not None and notice < date.fromordinal(
-                    as_of.toordinal() - _SCAN_WINDOW_DAYS
-                ):
+                if notice is not None and notice < cutoff:
                     return results
                 title = str(item.get("title") or "").strip()
                 if not title:
                     continue
-                if keyword is not None and not _matches_keyword(title, keyword):
+                if source_type == "issuer_ir_material":
+                    if not _matches_ir_title(title):
+                        continue
+                elif source_type == "company_announcement":
+                    if not _matches_announcement_title(title):
+                        continue
+                elif keyword is not None and not _matches_keyword(title, keyword):
                     continue
                 if period and str(period) not in title:
                     continue
@@ -215,9 +267,12 @@ class AnnouncementDiscoveryService:
     ) -> AcquireResult | None:
         """discover → resolve → download → ingest → schedule prepare（幂等）。
 
-        - 只处理年度/半年度/季度报告（公告类过宽泛，留给用户上传）；
-        - 候选逐个尝试，第一个成功落库即返回；全部失败 → None（调用方保持
-          SOURCE_NOT_FOUND / human fallback，绝不冒充来源）；
+        - 支持 annual/semiannual/quarterly（关键词过滤）+ company_announcement
+          （最近公告，有界 ≤2）+ issuer_ir_material（投资者关系关键词）；
+          news_article 不支持（需原创发布者验证链，留给用户路径）；
+        - 候选逐个尝试，第一个成功落库即返回；company_announcement 尝试最近
+          若干条（有界）；全部失败 → None（调用方保持 SOURCE_NOT_FOUND /
+          human fallback，绝不冒充来源）；
         - 需要 `sessionmaker` / `raw_store`（构造时注入）；缺失 → 直接返回 None
           （只读发现场景不落库）。
         """
@@ -227,6 +282,8 @@ class AnnouncementDiscoveryService:
             "annual_report",
             "semiannual_report",
             "quarterly_report",
+            "company_announcement",
+            "issuer_ir_material",
         ):
             return None
         candidates = await self.discover(
@@ -237,6 +294,8 @@ class AnnouncementDiscoveryService:
         )
         if not candidates:
             return None
+        if source_type == "company_announcement":
+            candidates = candidates[:_MAX_ACQUIRE_ANNOUNCEMENTS]
         provider = await self._load_provider("eastmoney")
         if provider is None:
             return None
@@ -283,7 +342,9 @@ class AnnouncementDiscoveryService:
                 continue
             if result.replayed:
                 continue  # 已存在相同来源 → 尝试下一个候选
-            await self._schedule_prepare(result.record.source_id)
+            # 不在此处后台 schedule_prepare：fulfill 随后会对该来源同步
+            # ensure_indexed（parse → chunk → index），并发后台任务会与同步
+            # 路径竞争 Chroma/BGE（生产实测 index_failed / 连接池耗尽）。
             return AcquireResult(
                 source_id=str(result.record.source_id),
                 title=candidate.title,
@@ -500,6 +561,13 @@ def _matches_keyword(title: str, keyword: str) -> bool:
     if keyword in title and "摘要" not in title and "英文" not in title:
         return True
     return False
+
+
+def _matches_ir_title(title: str) -> bool:
+    """投资者关系材料标题匹配（排除摘要/英文版）。"""
+    if "摘要" in title or "英文" in title:
+        return False
+    return any(keyword in title for keyword in _IR_KEYWORDS)
 
 
 def _parse_notice_date(raw: object) -> date | None:

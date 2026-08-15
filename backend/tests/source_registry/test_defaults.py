@@ -59,6 +59,7 @@ def test_eastmoney_provider_definition() -> None:
     assert eastmoney.authority_tier == 3
     assert eastmoney.critical_claim_eligible is False
     assert "company_announcement" in [c.value for c in eastmoney.capabilities]
+    assert "issuer_ir" in [c.value for c in eastmoney.capabilities]
     assert "document_download" in [c.value for c in eastmoney.capabilities]
     assert "automatic_discovery" in [m.value for m in eastmoney.acquisition_methods]
     assert set(eastmoney.exchange_scope) == {"SSE", "SZSE", "BSE"}

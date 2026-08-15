@@ -44,7 +44,7 @@ from app.analysis.claims.errors import (
 from app.analysis.claims.evidence_pack import EvidencePackSource, build_evidence_pack
 from app.analysis.claims.ref_resolver import ResolvedClaim, resolve_decision_refs
 from app.analysis.claims.strategies import strategy_for_domain
-from app.claims.contracts import ClaimAnalysisDomain, ClaimDraft
+from app.claims.contracts import ClaimAnalysisDomain, ClaimDraft, ClaimImportance
 from app.db.models.evidence_card import EvidenceCardModel
 from app.services.claim_service import ClaimService
 
@@ -83,7 +83,7 @@ class ClaimAnalysisService:
         # 5. ref resolution → ClaimDrafts（全部 candidate 先完成 schema + ref
         #    resolution，任一无效 → 整次失败，0 写）。
         resolved = resolve_decision_refs(decision, pack)
-        drafts = self._build_drafts(request, context.strategy, resolved)
+        drafts = self._build_drafts(request, context.strategy, resolved, sources)
         self._check_kind_compatibility(drafts)
 
         # 6. 原子持久化（ClaimService 全量校验 + 单 transaction，无 partial writes）。
@@ -148,13 +148,31 @@ class ClaimAnalysisService:
         request: ClaimAnalysisRequest,
         strategy: str,
         resolved: list[ResolvedClaim],
+        sources: list[EvidencePackSource],
     ) -> list[ClaimDraft]:
         """把解析后的 Claim 候选构造为 ClaimDraft（analyst 身份确定性派生）。
 
         ClaimDraft 构造时已做去重 + canonical 排序（幂等，对已排序输入无副作用）。
+
+        V1.1 closure：**确定性 importance 上限**——critical Claim 需要 ≥1
+        supports Evidence critical_claim_eligible=true（ClaimService 硬规则）；
+        analyst 模型不知道证据 eligibility（policy 不泄漏给模型），当 supports
+        证据均不可 critical-eligible 时把 critical 降级为 normal（而不是让
+        ClaimCriticalEvidenceInsufficient 炸掉整个 Stage4 分析）。
         """
+        eligible_ids = {
+            source.evidence_card_id
+            for source in sources
+            if source.critical_claim_eligible
+        }
         drafts: list[ClaimDraft] = []
         for claim in resolved:
+            supports = list(claim.supports)
+            importance = claim.importance
+            if importance == ClaimImportance.CRITICAL and not (
+                eligible_ids & set(supports)
+            ):
+                importance = ClaimImportance.NORMAL
             drafts.append(
                 ClaimDraft(
                     company_id=request.company_id,
@@ -163,8 +181,8 @@ class ClaimAnalysisService:
                     analysis_domain=request.analysis_domain,
                     claim_kind=claim.claim_kind,
                     confidence=claim.confidence,
-                    importance=claim.importance,
-                    support_evidence_ids=list(claim.supports),
+                    importance=importance,
+                    support_evidence_ids=supports,
                     contradict_evidence_ids=list(claim.contradicts),
                     context_evidence_ids=list(claim.context),
                     analyst_name=strategy,

@@ -145,3 +145,47 @@ def test_apply_selected_modules_empty_scope_raises() -> None:
     payload = _payload(research_scope=[ResearchScope.FINANCIAL])
     with pytest.raises(ResearchPlanScopeMismatch):
         apply_selected_modules(payload, ["business"])
+
+
+def test_apply_selected_modules_events_gate() -> None:
+    from app.research_planning.contracts import EventNeed
+
+    payload = _payload(
+        event_needs=[EventNeed(need_code="evt_cap", purpose="产能扩张事件", topic="产能扩张")],
+        document_needs=[
+            DocumentNeed(
+                need_code="news_industry",
+                purpose="行业新闻",
+                source_type=ResearchDocumentNeedType.NEWS_ARTICLE,
+            ),
+            DocumentNeed(
+                need_code="ann_capacity",
+                purpose="产能公告",
+                source_type=ResearchDocumentNeedType.COMPANY_ANNOUNCEMENT,
+            ),
+            DocumentNeed(
+                need_code="ir_material",
+                purpose="IR 材料",
+                source_type=ResearchDocumentNeedType.ISSUER_IR_MATERIAL,
+            ),
+            DocumentNeed(
+                need_code="annual_2023",
+                purpose="2023 年报",
+                source_type=ResearchDocumentNeedType.ANNUAL_REPORT,
+                period="2023",
+            ),
+        ],
+    )
+    # 未选 events → event_needs 与新闻/公告/IR 文档需求剔除；定期报告保留。
+    filtered = apply_selected_modules(payload, ["business"])
+    assert filtered.event_needs == []
+    assert [n.need_code for n in filtered.document_needs] == ["annual_2023"]
+    # 选 events → 全部保留。
+    filtered = apply_selected_modules(payload, ["business", "events"])
+    assert [n.need_code for n in filtered.event_needs] == ["evt_cap"]
+    assert [n.need_code for n in filtered.document_needs] == [
+        "news_industry",
+        "ann_capacity",
+        "ir_material",
+        "annual_2023",
+    ]

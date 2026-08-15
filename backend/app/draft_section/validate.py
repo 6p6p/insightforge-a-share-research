@@ -188,6 +188,13 @@ def _validate_paragraph(
         grounding_texts.append(item.evidence_statement)
         if item.quote_text:
             grounding_texts.append(item.quote_text)
+        # V1.1 closure：报告期/发布时间是证据的**事实上下文**（writer 正文写
+        # 「2024年」而证据原文用「报告期内」时，"2024" 只能从日期派生）——
+        # 把日期原文加入 grounding corpus（token 子串匹配天然覆盖年份）。
+        if item.period:
+            grounding_texts.append(item.period)
+        if item.published:
+            grounding_texts.append(item.published)
     assert_numeric_grounding(paragraph_text=paragraph.text, grounding_texts=grounding_texts)
 
     forbidden = contains_forbidden_language(paragraph.text)

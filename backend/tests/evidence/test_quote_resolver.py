@@ -15,7 +15,10 @@ from app.evidence.extractor.errors import (
     EvidenceExtractionQuoteAmbiguous,
     EvidenceExtractionQuoteNotFound,
 )
-from app.evidence.extractor.quote import resolve_exact_quote
+from app.evidence.extractor.quote import (
+    resolve_exact_quote,
+    resolve_quote_whitespace_tolerant,
+)
 
 _ZH = "公司2025年营业收入为100亿元，同比增长12%；其中茅台酒收入150亿元。"
 _ASCII = "The quick brown fox jumps over the lazy dog."
@@ -96,3 +99,50 @@ def test_repeated_substring_across_newline_raises_ambiguous() -> None:
 def test_blank_quote_raises_not_found() -> None:
     with pytest.raises(EvidenceExtractionQuoteNotFound):
         resolve_exact_quote(_ZH, "   ")
+
+
+# ------------------------------------------------------------------ 空白容差（V1.1 closure，extractor v3）
+
+
+def test_tolerant_resolves_single_space_difference() -> None:
+    # PDF 解析布局空白：「约 90%」vs 模型引用「约90%」。
+    chunk = "公司今年上半年总体产能利用率保持在约 90%的较高水平。"
+    quote = "公司今年上半年总体产能利用率保持在约90%的较高水平"
+    start, end = resolve_quote_whitespace_tolerant(chunk, quote)
+    # 命中区间 = 原文逐字切片（含布局空格）。
+    assert chunk[start:end] == "公司今年上半年总体产能利用率保持在约 90%的较高水平"
+
+
+def test_tolerant_resolves_newline_difference() -> None:
+    chunk = "公司今年上半年总体产能利用率保持在约\n90%的较高水平。"
+    quote = "总体产能利用率保持在约90%"
+    start, end = resolve_quote_whitespace_tolerant(chunk, quote)
+    assert chunk[start:end] == "总体产能利用率保持在约\n90%"
+
+
+def test_tolerant_exact_match_still_works() -> None:
+    chunk = "营业收入为100亿元"
+    start, end = resolve_quote_whitespace_tolerant(chunk, "营业收入为100亿元")
+    assert (start, end) == (0, len(chunk))
+
+
+def test_tolerant_non_whitespace_difference_still_rejected() -> None:
+    # 数字/标点差异（非空白）→ 仍然拒绝（只允许空白差异）。
+    with pytest.raises(EvidenceExtractionQuoteNotFound):
+        resolve_quote_whitespace_tolerant("收入100亿元，同比", "收入100亿元,同比")
+
+
+def test_tolerant_missing_content_still_rejected() -> None:
+    with pytest.raises(EvidenceExtractionQuoteNotFound):
+        resolve_quote_whitespace_tolerant(_ZH, "营业收入为999亿元")
+
+
+def test_tolerant_repeated_quote_raises_ambiguous() -> None:
+    with pytest.raises(EvidenceExtractionQuoteAmbiguous):
+        resolve_quote_whitespace_tolerant("重复。重复。", "重 复")
+
+
+def test_tolerant_multi_whitespace_run_maps_to_original() -> None:
+    chunk = "a    b"  # 4 空格
+    start, end = resolve_quote_whitespace_tolerant(chunk, "a b")
+    assert chunk[start:end] == "a    b"

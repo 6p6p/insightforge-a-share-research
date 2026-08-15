@@ -101,21 +101,35 @@ def apply_selected_modules(
 
     keep_macro = AnalysisModule.MACRO.value in planner_values
     keep_financial = AnalysisModule.FINANCIAL.value in planner_values
-    keep_business_event = AnalysisModule.BUSINESS_EVENT.value in planner_values
     keep_valuation = AnalysisModule.VALUATION.value in planner_values
+    # 事件模块是用户显式选择（ResearchModule.EVENTS）；未选择时剔除 event_needs
+    # 与新闻/公告/IR 文档需求——这些是事件驱动的资料输入（且新闻在生产路径
+    # 需要原创发布者验证链、公告/IR 为目的事件型资料，无法可靠自动匹配），
+    # 保留会卡死自动研究。定期报告（年报/半年报/季报）是通用输入，恒保留。
+    keep_events = ResearchModule.EVENTS.value in {
+        m.value if isinstance(m, ResearchModule) else str(m) for m in selected
+    }
+    _EVENT_DRIVEN_DOC_TYPES = frozenset(
+        {
+            ResearchDocumentNeedType.NEWS_ARTICLE,
+            ResearchDocumentNeedType.COMPANY_ANNOUNCEMENT,
+            ResearchDocumentNeedType.ISSUER_IR_MATERIAL,
+        }
+    )
 
     return ResearchPlanPayload(
         research_scope=keep_scopes,
         document_needs=[
             need
             for need in payload.document_needs
-            if keep_macro or need.source_type != ResearchDocumentNeedType.MACRO_DATASET
+            if (keep_macro or need.source_type != ResearchDocumentNeedType.MACRO_DATASET)
+            and (keep_events or need.source_type not in _EVENT_DRIVEN_DOC_TYPES)
         ],
         financial_needs=(
             payload.financial_needs if keep_financial else []
         ),
         macro_needs=(payload.macro_needs if keep_macro else []),
-        event_needs=(payload.event_needs if keep_business_event else []),
+        event_needs=(payload.event_needs if keep_events else []),
         valuation_needs=(payload.valuation_needs if keep_valuation else []),
         analysis_modules=keep_modules,
         research_focus=payload.research_focus,

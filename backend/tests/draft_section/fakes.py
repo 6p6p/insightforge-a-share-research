@@ -83,8 +83,13 @@ class FakeDraftSectionModel:
     def model_id(self) -> str:
         return self._model_id
 
-    async def write(self, pack: SectionInputPack) -> WriterDecision | dict:
+    async def write(
+        self, pack: SectionInputPack, correction_hint: str | None = None
+    ) -> WriterDecision | dict:
         self.calls.append(pack)
+        if correction_hint is not None:
+            self.correction_hints = getattr(self, "correction_hints", [])
+            self.correction_hints.append(correction_hint)
         if self._error is not None:
             raise self._error()
         if self._decision_factory is not None:

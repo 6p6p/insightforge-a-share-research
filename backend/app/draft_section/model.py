@@ -23,9 +23,13 @@ class DraftSectionModel(Protocol):
 
     model_id: str
 
-    async def write(self, pack: SectionInputPack) -> WriterDecision:
+    async def write(
+        self, pack: SectionInputPack, correction_hint: str | None = None
+    ) -> WriterDecision:
         """基于已验证 section 输入包生成结构化草稿。
 
+        - `correction_hint`（V1.1 closure，writer v4）：service 对首稿做 hard
+          provenance validation，违规时带违规摘要重试一次（有界；仍违规才拒绝）；
         - 返回必须可通过 pydantic 解析为 `WriterDecision`；解析失败 / 模型异常 →
           上层（adapters / service）捕获并归一化为 `DraftSectionModelUnavailable` 或
           `DraftSectionMalformedOutput`；

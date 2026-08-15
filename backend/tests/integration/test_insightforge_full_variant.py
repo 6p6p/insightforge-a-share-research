@@ -874,7 +874,7 @@ class _E2eDraftModel:
     def model_id(self) -> str:
         return f"{self._provider}:{self._model_id}"
 
-    async def write(self, pack):
+    async def write(self, pack, correction_hint: str | None = None):
         await _record(
             self._observer, "draft_section_writer", provider=self._provider, model_id=self._model_id
         )

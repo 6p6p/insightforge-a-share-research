@@ -230,14 +230,16 @@ async def test_rerun_replays_counts_replayed(monkeypatch) -> None:
 # ---------------------------------------------------------------- malformed / errors
 
 
-async def test_malformed_output_raises_and_no_cards(monkeypatch) -> None:
-    # relevant=true 但 items 为空 → schema 违反。
+async def test_relevant_true_with_zero_items_yields_no_cards(monkeypatch) -> None:
+    """v3（V1.1 closure）：relevant=true + items=[] 合法 → 无卡创建（相关但无原子证据）。"""
     fake = FakeEvidenceExtractionModel(decision={"relevant": True, "items": []})
     card = _RecordingCardService()
     service = _service(fake, card_service=card)
     _install_fresh(service, monkeypatch)
-    with pytest.raises(EvidenceExtractionMalformedOutput):
-        await service.extract_from_hit(_QUESTION, _hit())
+    result = await service.extract_from_hit(_QUESTION, _hit())
+    assert result.relevant is True
+    assert result.created_count == 0
+    assert result.replayed_count == 0
     assert card.drafts == []
 
 

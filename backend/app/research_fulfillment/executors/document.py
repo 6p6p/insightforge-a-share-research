@@ -233,6 +233,21 @@ class DocumentNeedExecutor:
             sources,
             build_query=lambda source: self._document_query(context, doc_need, source),
         )
+        if not_indexable and not created and not existing and self._auto_acquisition is not None:
+            # 现有来源全部不可索引（如扫描件 parse 失败）→ 获取替代来源后重试
+            # （V1.1 closure：不因一条坏来源卡死整条 need）。
+            acquired = await self._try_auto_acquire(context, doc_need)
+            if acquired:
+                sources = await self._eligible_sources(context, doc_need, entry)
+                more_created, more_existing, _ = await self._fulfill_sources(
+                    context,
+                    need,
+                    entry,
+                    sources,
+                    build_query=lambda source: self._document_query(context, doc_need, source),
+                )
+                created.extend(more_created)
+                existing.extend(more_existing)
         return self._outcome(need, entry, created, existing, not_indexable)
 
     # ------------------------------------------------------------ event

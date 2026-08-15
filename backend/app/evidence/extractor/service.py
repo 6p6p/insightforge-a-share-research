@@ -40,9 +40,13 @@ from app.evidence.extractor.errors import (
     EvidenceExtractionInputError,
     EvidenceExtractionInputStale,
     EvidenceExtractionMalformedOutput,
+    EvidenceExtractionQuoteNotFound,
     EvidenceExtractorUnavailable,
 )
-from app.evidence.extractor.quote import resolve_exact_quote
+from app.evidence.extractor.quote import (
+    resolve_exact_quote,
+    resolve_quote_whitespace_tolerant,
+)
 from app.rag.retrieval.contracts import RetrievalHit
 from app.repositories.chunk_set_repository import ChunkSetRepository
 from app.repositories.document_chunk_repository import DocumentChunkRepository
@@ -218,7 +222,12 @@ class EvidenceExtractionService:
         """
         drafts: list[EvidenceCardDraft] = []
         for item in decision.items:
-            start, end = resolve_exact_quote(fresh.text, item.quote_text)
+            # V1.1 closure（extractor v3）：先精确匹配；PDF 解析布局空白导致
+            # 高频 miss 时回退空白容差匹配（只允许空白差异，逐字不变量不变）。
+            try:
+                start, end = resolve_exact_quote(fresh.text, item.quote_text)
+            except EvidenceExtractionQuoteNotFound:
+                start, end = resolve_quote_whitespace_tolerant(fresh.text, item.quote_text)
             drafts.append(
                 EvidenceCardDraft(
                     research_question=question,

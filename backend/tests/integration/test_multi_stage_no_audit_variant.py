@@ -490,7 +490,7 @@ class _E2eDraftModel(FakeDraftSectionModel):
         self._provider = provider
         self._model_id = model_id
 
-    async def write(self, pack):
+    async def write(self, pack, correction_hint: str | None = None):
         if self._observer is not None:
             await _record_usage(
                 self._observer,
@@ -498,7 +498,7 @@ class _E2eDraftModel(FakeDraftSectionModel):
                 provider=self._provider,
                 model_id=self._model_id,
             )
-        return await super().write(pack)
+        return await super().write(pack, correction_hint=correction_hint)
 
 
 def _fake_bundle(

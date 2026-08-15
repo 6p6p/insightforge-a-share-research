@@ -14,7 +14,10 @@ Claim / Evidence 原文中逐字找到。提取器的 token 顺序固定（先�
 
 import re
 
+from app.core.logging import get_logger
 from app.draft_section.errors import DraftSectionNumericGroundingError
+
+logger = get_logger("app.draft_section.numeric")
 
 # 中文数字字符集（含「两」「〇」）。
 _CN = "零〇一二三四五六七八九十百千万亿两"
@@ -85,6 +88,10 @@ def assert_numeric_grounding(*, paragraph_text: str, grounding_texts: list[str])
     corpus = "\n".join(grounding_texts)
     for token in extract_quantitative_tokens(paragraph_text):
         if token not in corpus:
+            logger.warning(
+                "draft_section_ungrounded_token",
+                token=token,
+            )
             raise DraftSectionNumericGroundingError(
                 f"paragraph introduces ungrounded quantitative token: {token!r}"
             )

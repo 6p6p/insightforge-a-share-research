@@ -27,7 +27,6 @@ question，只由 document executor / 提取路径按需生成）。
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
@@ -35,13 +34,14 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.core.logging import get_logger
 from app.db.models.parsed_source import ParsedSourceModel
 from app.db.models.source_record import SourceRecordModel
 from app.services.chunking_service import ChunkingService
 from app.services.source_parsing_service import SourceParsingService
 from app.storage.raw_store import LocalRawArtifactStore
 
-logger = logging.getLogger("app.source_preparation")
+logger = get_logger("app.source_preparation")
 
 
 class SourcePreparationStatus(StrEnum):

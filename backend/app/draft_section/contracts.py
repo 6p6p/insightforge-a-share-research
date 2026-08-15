@@ -13,8 +13,9 @@
 冻结常量：
 - `DRAFT_SECTION_SCHEMA_VERSION = 1`（draft_sections.section_schema_version；
   persisted payload shape 未变化，保持 1）；
-- `WRITER_NAME = "evidence_bound_section_writer"`；`WRITER_VERSION = 2`（persisted
-  writer provenance；v1 冻结不再使用）；production writer_model_id =
+- `WRITER_NAME = "evidence_bound_section_writer"`；`WRITER_VERSION = 4`（v4 =
+  V1.1 closure：hard provenance validation 违规 → 带违规摘要**有界重试一次**
+  （correction_hint）；v3 = 数字逐字核查清单；production writer_model_id =
   `deepseek:deepseek-v4-flash`。
 
 v2 Writer contract（本轮 Gate 0）：
@@ -65,7 +66,7 @@ WRITER_NAME = "evidence_bound_section_writer"
 # relation 改变 Writer contract。v1 冻结不再使用；旧 v1 rows 不修改 / 不 backfill
 # （同 section 用 v2 → writer_input_fingerprint 不同 → 新 DraftSection）。
 WRITER_VERSION_V1 = 1
-WRITER_VERSION = 2
+WRITER_VERSION = 4
 
 # 段落数量边界（spec J：1..10）。
 MIN_PARAGRAPHS = 1

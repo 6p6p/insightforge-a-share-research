@@ -34,6 +34,9 @@ class EvidencePackSource:
     quote_text: str | None = None
     source_published_at: datetime | None = None
     reporting_period_end: date | None = None
+    # V1.1 closure：确定性 importance 上限策略的输入（critical claim 需要
+    # supports 证据 critical_claim_eligible=true；不进模型 prompt）。
+    critical_claim_eligible: bool = False
 
     @classmethod
     def from_model(cls, card) -> "EvidencePackSource":
@@ -48,6 +51,7 @@ class EvidencePackSource:
             quote_text=card.quote_text,
             source_published_at=card.source_published_at,
             reporting_period_end=card.reporting_period_end,
+            critical_claim_eligible=card.critical_claim_eligible_snapshot,
         )
 
 

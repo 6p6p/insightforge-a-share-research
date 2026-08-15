@@ -688,9 +688,10 @@ def test_verify_resolved_payload_rejects_corruption() -> None:
 # ---------------------------------------------------------------- Gate 0: writer version (spec D)
 
 
-def test_writer_version_v2() -> None:
+def test_writer_version_v4() -> None:
     assert WRITER_VERSION_V1 == 1
-    assert WRITER_VERSION == 2
+    # v4（V1.1 closure）：validation 违规有界重试（correction_hint）。
+    assert WRITER_VERSION == 4
     assert DRAFT_SECTION_SCHEMA_VERSION == 1  # persisted payload shape 未变
 
 
