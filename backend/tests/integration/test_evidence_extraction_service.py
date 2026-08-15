@@ -39,7 +39,6 @@ from app.evidence.extractor.contracts import (
 )
 from app.evidence.extractor.errors import (
     EvidenceExtractionInputStale,
-    EvidenceExtractionMalformedOutput,
     EvidenceExtractionQuoteAmbiguous,
     EvidenceExtractionQuoteNotFound,
 )
@@ -470,7 +469,9 @@ async def test_quote_ambiguous_zero_writes(env) -> None:
     assert await _card_count(env["sessionmaker"]) == 0
 
 
-async def test_malformed_output_zero_writes(env) -> None:
+async def test_relevant_true_zero_items_yields_no_cards(env) -> None:
+    """v3（V1.1 closure）：relevant=true + items=[] 合法——「相关但无原子证据」，
+    生产实测模型高频输出该形态；无卡创建（等同无证据，不抛错）。"""
     src, parsed_id, _, chunks = await _seed_html_source(env)
     chunk = chunks[0]
     fake = FakeEvidenceExtractionModel(decision={"relevant": True, "items": []})
@@ -481,8 +482,9 @@ async def test_malformed_output_zero_writes(env) -> None:
         company_id=env["company_id"],
     )
     service = EvidenceExtractionService(env["sessionmaker"], model=fake)
-    with pytest.raises(EvidenceExtractionMalformedOutput):
-        await service.extract_from_hit(_QUESTION, hit)
+    result = await service.extract_from_hit(_QUESTION, hit)
+    assert result.relevant is True
+    assert result.created_count == 0
     assert await _card_count(env["sessionmaker"]) == 0
 
 

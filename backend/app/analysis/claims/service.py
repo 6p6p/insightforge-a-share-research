@@ -161,17 +161,13 @@ class ClaimAnalysisService:
         ClaimCriticalEvidenceInsufficient 炸掉整个 Stage4 分析）。
         """
         eligible_ids = {
-            source.evidence_card_id
-            for source in sources
-            if source.critical_claim_eligible
+            source.evidence_card_id for source in sources if source.critical_claim_eligible
         }
         drafts: list[ClaimDraft] = []
         for claim in resolved:
             supports = list(claim.supports)
             importance = claim.importance
-            if importance == ClaimImportance.CRITICAL and not (
-                eligible_ids & set(supports)
-            ):
+            if importance == ClaimImportance.CRITICAL and not (eligible_ids & set(supports)):
                 importance = ClaimImportance.NORMAL
             drafts.append(
                 ClaimDraft(

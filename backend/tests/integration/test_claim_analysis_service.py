@@ -50,7 +50,6 @@ from app.claims.contracts import (
     ClaimImportance,
     ClaimKind,
 )
-from app.claims.errors import ClaimCriticalEvidenceInsufficient
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.models.company import CompanyModel
@@ -325,14 +324,30 @@ async def test_domain_not_ready_defensive(env) -> None:
 
 
 async def test_critical_policy_enforced(env) -> None:
+    """V1.1 closure：supports 无 critical-eligible 证据时 critical 确定性降级 normal。
+
+    修复前：ClaimAnalysisService 直接透传 CRITICAL → ClaimService 抛
+    ClaimCriticalEvidenceInsufficient 炸掉整个 Stage4 分析；现在降级为 normal
+    （模型不知道证据 eligibility，政策不泄漏给模型）。
+    """
     card = await _seed_document_card(env, critical_claim_eligible=False, source_url=_URL_1)
     decision = _decision(
         claims=[_candidate(support_refs=["E1"], importance=ClaimImportance.CRITICAL)]
     )
     service, _ = _service(env, decision)
-    with pytest.raises(ClaimCriticalEvidenceInsufficient):
-        await service.analyze(_request(env, evidence_card_ids=[card["evidence_card_id"]]))
-    assert await _claim_count(env["sessionmaker"]) == 0
+    result = await service.analyze(_request(env, evidence_card_ids=[card["evidence_card_id"]]))
+    assert result.created_count == 1
+    async with env["sessionmaker"]() as session:
+        from sqlalchemy import select
+
+        from app.db.models.claim import ClaimModel
+
+        row = (
+            await session.execute(
+                select(ClaimModel).where(ClaimModel.company_id == env["company_id"])
+            )
+        ).scalar_one()
+    assert row.importance == ClaimImportance.NORMAL.value
 
 
 async def test_critical_with_eligible_support_accepted(env) -> None:

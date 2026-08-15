@@ -73,8 +73,8 @@ def test_parse_notice_date() -> None:
 
 def test_parse_challenge_cookies() -> None:
     js = (
-        '<script>function a(a){var e={WTKkN:146423112,bOYDu:353574479,'
-        'dtzqS:function(a,n){return a+n},wyeCN:586194283,pCQRM:function(a){return a()}},'
+        "<script>function a(a){var e={WTKkN:146423112,bOYDu:353574479,"
+        "dtzqS:function(a,n){return a+n},wyeCN:586194283,pCQRM:function(a){return a()}},"
         't=0;return t+=e["WTKkN"],t+=e["bOYDu"],t=e["dtzqS"](t,e["wyeCN"]),'
         '[t,e["pCQRM"](n)][a]}'
         '...a["iTyzs"](t,2975465472)...'
@@ -103,9 +103,9 @@ def test_reporting_period_end_for() -> None:
     assert reporting_period_end_for("annual_report", "2024", "宁德时代:2024年年度报告") == date(
         2024, 12, 31
     )
-    assert reporting_period_end_for("semiannual_report", "2025", "宁德时代:2025年半年度报告") == date(
-        2025, 6, 30
-    )
+    assert reporting_period_end_for(
+        "semiannual_report", "2025", "宁德时代:2025年半年度报告"
+    ) == date(2025, 6, 30)
     assert reporting_period_end_for(
         "quarterly_report", "2025", "宁德时代:2025年第一季度报告"
     ) == date(2025, 3, 31)

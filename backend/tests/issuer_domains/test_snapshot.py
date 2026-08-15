@@ -41,7 +41,9 @@ def test_bundled_snapshot_has_key_company() -> None:
 
 
 def test_snapshot_validation_rejects_bad_domain() -> None:
-    with pytest.raises(Exception):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         IssuerDomainSnapshot.model_validate(
             {
                 "schema_version": 1,

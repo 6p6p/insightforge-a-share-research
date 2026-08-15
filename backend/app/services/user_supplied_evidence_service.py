@@ -189,9 +189,7 @@ class UserSuppliedEvidenceService:
             raise EvidenceProviderNotRegisteredError()
         return provider
 
-    async def _ensure_artifact(
-        self, session, draft: UserSuppliedEvidenceDraft
-    ) -> RawArtifactModel:
+    async def _ensure_artifact(self, session, draft: UserSuppliedEvidenceDraft) -> RawArtifactModel:
         payload = _build_artifact_payload(draft)
         canonical = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -309,9 +307,7 @@ class UserSuppliedEvidenceService:
         )
 
     @staticmethod
-    def _verify_replay(
-        existing: EvidenceCardModel, derived: _DerivedEvidence
-    ) -> None:
+    def _verify_replay(existing: EvidenceCardModel, derived: _DerivedEvidence) -> None:
         """已有 fingerprint 卡的 replay 完整性校验（逐字段比对真实 provenance）。"""
         pairs = (
             ("origin_type", existing.origin_type, derived.origin_type),

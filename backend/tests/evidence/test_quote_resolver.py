@@ -101,7 +101,7 @@ def test_blank_quote_raises_not_found() -> None:
         resolve_exact_quote(_ZH, "   ")
 
 
-# ------------------------------------------------------------------ 空白容差（V1.1 closure，extractor v3）
+# ---- 空白容差（V1.1 closure，extractor v3）
 
 
 def test_tolerant_resolves_single_space_difference() -> None:

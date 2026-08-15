@@ -207,12 +207,16 @@ class IssuerDomainService:
         """公司登记的全部官网域名（稳定排序）。"""
         async with self._sessionmaker() as session:
             rows = (
-                await session.execute(
-                    select(IssuerDomainModel.domain)
-                    .where(IssuerDomainModel.company_id == company_id)
-                    .order_by(IssuerDomainModel.domain.asc())
+                (
+                    await session.execute(
+                        select(IssuerDomainModel.domain)
+                        .where(IssuerDomainModel.company_id == company_id)
+                        .order_by(IssuerDomainModel.domain.asc())
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         return list(rows)
 
     async def match_issuer_url(self, company_id: UUID, url: str) -> bool:
@@ -246,12 +250,16 @@ class IssuerDomainService:
         host = _idna_host(parsed.hostname)
         async with self._sessionmaker() as session:
             rows = (
-                await session.execute(
-                    select(IssuerDomainModel.domain).where(
-                        IssuerDomainModel.company_id == company_id
+                (
+                    await session.execute(
+                        select(IssuerDomainModel.domain).where(
+                            IssuerDomainModel.company_id == company_id
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         if not rows:
             raise IssuerDomainBootstrapError(
                 code="issuer_domain_not_registered",
@@ -302,9 +310,7 @@ class IssuerDomainService:
                     "domain": entry.domain,
                     "source_url": entry.source_url,
                     "provider_key": entry.provider_key,
-                    "verified_at": datetime.fromisoformat(entry.verified_at).replace(
-                        tzinfo=UTC
-                    ),
+                    "verified_at": datetime.fromisoformat(entry.verified_at).replace(tzinfo=UTC),
                     "created_at": now,
                 }
             )

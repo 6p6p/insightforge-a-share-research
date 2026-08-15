@@ -25,7 +25,6 @@ CNINFO WAF 不可用（hisAnnouncement/query 恒返回空）时，年度/半年�
 _eligible=False、Tier-3 快照由 eastmoney provider 行提供）。
 """
 
-import io
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -76,6 +75,7 @@ def _matches_announcement_title(title: str) -> bool:
     if "摘要" in title or "英文" in title:
         return False
     return not any(term in title for term in _ANNOUNCEMENT_EXCLUDE_TERMS)
+
 
 # pdf.dfcfw.com 反爬 challenge 常量提取（Alibaba __tst_status 型）：
 #   t = WTKkN + bOYDu + wyeCN；EO_Bot_Ssid = (t, <ssid>) 中的常量。
@@ -135,9 +135,7 @@ def _scan_cutoff(source_type: str, period: str | None, as_of: date) -> date:
     return date.fromordinal(as_of.toordinal() - _SCAN_WINDOW_DAYS)
 
 
-def reporting_period_end_for(
-    source_type: str, period: str | None, title: str
-) -> date | None:
+def reporting_period_end_for(source_type: str, period: str | None, title: str) -> date | None:
     """由 source_type + period + 标题确定性推导报告期结束日。
 
     - annual_report + period=2024 → 2024-12-31；
@@ -299,7 +297,8 @@ class AnnouncementDiscoveryService:
         provider = await self._load_provider("eastmoney")
         if provider is None:
             return None
-        from datetime import datetime, time as dtime
+        from datetime import datetime
+        from datetime import time as dtime
 
         from app.core.config import get_settings
 

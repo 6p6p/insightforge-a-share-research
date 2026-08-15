@@ -37,9 +37,7 @@ SNAPSHOT_SCHEMA_VERSION = 1
 MIN_EXPECTED_DOMAINS = 1000
 
 _CODE_RE = re.compile(r"^\d{6}$")
-_HOST_RE = re.compile(
-    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
-)
+_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 
 
 class IssuerDomainEntry(BaseModel):
@@ -175,15 +173,11 @@ def load_snapshot_file(path: Path) -> LoadedIssuerDomainSnapshot:
     sha256 = hashlib.sha256(raw).hexdigest()
     snapshot = IssuerDomainSnapshot.model_validate(json.loads(raw))
     snapshot.validate_consistency()
-    return LoadedIssuerDomainSnapshot(
-        snapshot=snapshot, content_sha256=sha256, byte_size=len(raw)
-    )
+    return LoadedIssuerDomainSnapshot(snapshot=snapshot, content_sha256=sha256, byte_size=len(raw))
 
 
 def load_bundled_snapshot() -> LoadedIssuerDomainSnapshot:
     """读取仓库内 bundled issuer domain snapshot（缺失/损坏 → 明确异常）。"""
     if not BUNDLED_SNAPSHOT_PATH.exists():
-        raise FileNotFoundError(
-            f"bundled issuer domain snapshot missing: {BUNDLED_SNAPSHOT_PATH}"
-        )
+        raise FileNotFoundError(f"bundled issuer domain snapshot missing: {BUNDLED_SNAPSHOT_PATH}")
     return load_snapshot_file(BUNDLED_SNAPSHOT_PATH)

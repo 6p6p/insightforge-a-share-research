@@ -64,7 +64,6 @@ from app.draft_section.contracts import (
     compute_section_fingerprint,
     compute_writer_input_fingerprint,
 )
-from app.core.logging import get_logger
 from app.draft_section.errors import (
     DraftSectionError,
     DraftSectionInputError,

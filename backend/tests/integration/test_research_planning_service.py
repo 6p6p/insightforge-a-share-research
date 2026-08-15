@@ -768,7 +768,7 @@ async def test_plan_tamper_breaks_route_verify(env) -> None:
 
 
 async def test_route_issuer_ir_provider_available(env) -> None:
-    """ISSUER_IR → issuer_official provider（V1.1 closure：registry 已登记）。"""
+    """ISSUER_IR → issuer_official + eastmoney（V1.1 closure：registry 已登记）。"""
     fake = FakeResearchPlannerModel(
         _plan_payload(
             document_needs=[
@@ -786,7 +786,7 @@ async def test_route_issuer_ir_provider_available(env) -> None:
     routed = await router.route_research_plan(plan.research_plan_id)
     entry = next(e for e in routed.route_payload["entries"] if e["need_code"] == "ir_material")
     assert entry["route_type"] == SourceRouteType.ISSUER_IR.value
-    assert entry["provider_keys"] == ["issuer_official"]
+    assert entry["provider_keys"] == ["eastmoney", "issuer_official"]
 
 
 # ================================================================ Preparation

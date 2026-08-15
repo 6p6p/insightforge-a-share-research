@@ -116,9 +116,7 @@ class SourceRegistryService:
         if not is_url_allowed(url, provider.allowed_domains):
             raise SourceUrlNotAllowed()
 
-    async def resolve_provider_for_url(
-        self, company_id: UUID, url: str
-    ) -> ResolvedProvider:
+    async def resolve_provider_for_url(self, company_id: UUID, url: str) -> ResolvedProvider:
         """URL → provider 的确定性自动解析（V1.1 closure）。
 
         1. issuer_domains registry：URL hostname 匹配该公司登记的官网域名 →

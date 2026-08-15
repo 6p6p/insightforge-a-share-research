@@ -4,7 +4,7 @@
 1. issuer_domains bootstrap（5470 域名）+ 幂等 replay/skip；
 2. resolve_provider_for_url：issuer_official（catl.com）/ allowed_domain（sse）/
    拒绝（不在任何 allowlist）；
-3. user_supplied evidence card（Tier-4、critical=False、user_transcription）+ 
+3. user_supplied evidence card（Tier-4、critical=False、user_transcription）+
    replay 幂等；
 4. FinancialMetricService 接受 user_supplied origin（quote 含精确数字 token）；
 5. provider seed 总数 14。
@@ -111,9 +111,7 @@ async def env(tmp_path_factory):
 
 
 async def test_provider_seed_has_closure_providers(env) -> None:
-    providers = await SourceRegistryService(env["sessionmaker"]).list_providers(
-        enabled_only=False
-    )
+    providers = await SourceRegistryService(env["sessionmaker"]).list_providers(enabled_only=False)
     keys = {p.provider_key for p in providers}
     assert keys >= {"eastmoney", "issuer_official", "user_supplied"}
     assert len(keys) == 14
@@ -171,9 +169,10 @@ async def _resolve_catl(env) -> tuple:
 
 
 async def test_user_supplied_evidence_and_financial_observation(env) -> None:
-    from app.domain.source_records import SourceDocumentType
-    from app.db.models.evidence_card import EvidenceCardModel
     from sqlalchemy import select
+
+    from app.db.models.evidence_card import EvidenceCardModel
+    from app.domain.source_records import SourceDocumentType
 
     company_id, _ = await _resolve_catl(env)
     quote = "报告期内，公司实现营业收入4009.17亿元，同比增长22.01%。"

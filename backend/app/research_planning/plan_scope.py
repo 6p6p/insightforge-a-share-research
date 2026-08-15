@@ -3,7 +3,7 @@
 Planner 输出必须**尊重用户选择的研究模块**（`ResearchTask.modules`）：
 
 - `allowed_planner_modules(selected)`：用户 ResearchModule 值 → 允许的
-  planner `AnalysisModule` 值（company_profile/business/events → 
+  planner `AnalysisModule` 值（company_profile/business/events →
   business_event；financial → financial；macro → macro；risk → risk）；
 - `allowed_scopes(selected)`：用户模块 → 允许的 `ResearchScope` 值；
 - `apply_selected_modules(payload, selected, include_relative_valuation)`：
@@ -125,9 +125,7 @@ def apply_selected_modules(
             if (keep_macro or need.source_type != ResearchDocumentNeedType.MACRO_DATASET)
             and (keep_events or need.source_type not in _EVENT_DRIVEN_DOC_TYPES)
         ],
-        financial_needs=(
-            payload.financial_needs if keep_financial else []
-        ),
+        financial_needs=(payload.financial_needs if keep_financial else []),
         macro_needs=(payload.macro_needs if keep_macro else []),
         event_needs=(payload.event_needs if keep_events else []),
         valuation_needs=(payload.valuation_needs if keep_valuation else []),

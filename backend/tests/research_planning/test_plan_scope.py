@@ -2,6 +2,8 @@
 
 import pytest
 
+from app.financial.calculations.contracts import CalculationCode
+from app.financial.contracts import MetricCode
 from app.research_planning.contracts import (
     AnalysisModule,
     DocumentNeed,
@@ -17,8 +19,6 @@ from app.research_planning.plan_scope import (
     allowed_scopes,
     apply_selected_modules,
 )
-from app.financial.calculations.contracts import CalculationCode
-from app.financial.contracts import MetricCode
 
 
 def _payload(**overrides) -> ResearchPlanPayload:
@@ -66,9 +66,7 @@ def _payload(**overrides) -> ResearchPlanPayload:
 
 
 def test_allowed_planner_modules_mapping() -> None:
-    assert allowed_planner_modules(["business", "events", "company_profile"]) == {
-        "business_event"
-    }
+    assert allowed_planner_modules(["business", "events", "company_profile"]) == {"business_event"}
     assert allowed_planner_modules(["financial"]) == {"financial"}
     assert allowed_planner_modules(["macro"]) == {"macro"}
     assert allowed_planner_modules(["risk"]) == {"risk"}
