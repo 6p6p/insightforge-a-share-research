@@ -18,7 +18,9 @@ FinancialClaimService.create_claim_batch 原子持久化。
 
 冻结：
 - `FINANCIAL_ANALYST_NAME = "structured_financial_analyst"`；
-  `FINANCIAL_ANALYST_VERSION = 1`；
+  `FINANCIAL_ANALYST_VERSION = 2`（v2 = V1.1 closure 数字自检清单：statement
+  输出前逐条核对数字/百分号/中文数字/定量短语并删除——修复生产实测模型反复
+  输出数字字面量触发 FinancialAnalysisNumericLiteralForbidden）；
   `MAX_CALCULATIONS_PER_REQUEST = 20`；`MAX_EVIDENCE_PER_REQUEST = 20`；
   `MAX_CLAIMS_PER_DECISION = 3`。
 - FinancialClaimCandidate：claim_kind 只允许 inference / risk（**不输出 fact**：
@@ -50,7 +52,7 @@ from app.claims.financial_contracts import (
 
 # structured financial analyst 的身份常量（persisted analyst_name）。
 FINANCIAL_ANALYST_NAME = "structured_financial_analyst"
-FINANCIAL_ANALYST_VERSION = 1
+FINANCIAL_ANALYST_VERSION = 2
 
 # 单次分析最多 20 条 Calculation（Calculation Pack 上限）。
 MAX_CALCULATIONS_PER_REQUEST = 20

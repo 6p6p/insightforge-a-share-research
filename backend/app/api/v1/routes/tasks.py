@@ -325,8 +325,9 @@ async def create_user_supplied_financial_observation(
         raise RuntimeError("application resources are not initialized")
     sessionmaker = resources.database.session_factory()
 
-    task_service = TaskService(ResearchTaskRepository(sessionmaker))
-    task = await task_service.get_task(task_id)
+    async with sessionmaker() as session:
+        task_service = TaskService(ResearchTaskRepository(session))
+        task = await task_service.get_task(task_id)
 
     from app.services.company_identity_service import CompanyIdentityService
 

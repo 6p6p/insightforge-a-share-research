@@ -249,11 +249,21 @@ def test_numeric_guard_rejects_ascii_digits_and_percent() -> None:
     for statement in (
         "收入同比增长20%",
         "利润率为15.3%",
-        "2025年营业收入增长",
         "公司拥有2家子公司",
+        "营业收入增长3倍",
     ):
         with pytest.raises(FinancialAnalysisNumericLiteralForbidden):
             assert_statement_has_no_numeric_literals(statement)
+
+
+def test_numeric_guard_accepts_year_references() -> None:
+    """V1.1 closure：4 位年份（19xx/20xx）是期间引用（metadata）→ 允许。"""
+    for statement in (
+        "2025年营业收入增长",
+        "公司营业收入在2022至2023年间同比有所增长，但2024年同比出现回落。",
+        "2024年毛利率较以前年度有所提升，反映盈利能力有所增强。",
+    ):
+        assert_statement_has_no_numeric_literals(statement)  # 不抛错
 
 
 def test_numeric_guard_rejects_fullwidth_digits() -> None:
@@ -353,6 +363,16 @@ def test_numeric_guard_rejects_numeric_context_periods() -> None:
     ):
         with pytest.raises(FinancialAnalysisNumericLiteralForbidden):
             assert_statement_has_no_numeric_literals(statement)
+
+
+def test_numeric_guard_accepts_upper_lower_period_references() -> None:
+    """V1.1 closure：「上一年度/下一季度」是期间引用复合词（非数量表达）→ 允许。"""
+    for statement in (
+        "上一年度收入同比有所增长，本年度同比转为下降。",
+        "上一季度毛利率环比有所改善。",
+        "下一年度盈利能力有望保持稳定。",
+    ):
+        assert_statement_has_no_numeric_literals(statement)  # 不抛错
 
 
 def test_numeric_guard_keeps_accepting_gate_a_context_phrases() -> None:

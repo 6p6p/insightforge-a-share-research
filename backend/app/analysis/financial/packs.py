@@ -65,7 +65,12 @@ _FORBIDDEN_PHRASES = ("百分之", "翻倍", "翻番", "过半", "半数", "倍"
 # 增加 / 第一期项目完成 / 第一年度经营改善 / 一日发生变化 / 一号项目。单个语义明确
 # 的 pattern（第? + 一 + 季/月/年/期/日/号）覆盖全部 required 用例，不用大量硬编码
 # if；"一"后接非上述量词语素（定/步/个/致等）不命中，继续允许。
-_NUMERIC_CONTEXT_RE = re.compile(r"(?:第)?一(?:季|月|年|期|日|号)")
+# V1.1 closure：排除「上一季度/上一年度/下一季度/下一年度」等期间引用复合词
+# （"上/下一年度"= 上一年度/下一年度，非数量表达；生产实测模型以「上一年度」
+# 引用报告期，误命中导致整次分析失败）。
+_NUMERIC_CONTEXT_RE = re.compile(r"(?<!上)(?<!下)(?:第)?一(?:季|月|年|期|日|号)")
+# V1.1 closure：4 位年份（19xx/20xx）允许（期间引用，非定量事实）。
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
 
 def assert_statement_has_no_numeric_literals(statement: str) -> None:
@@ -76,6 +81,9 @@ def assert_statement_has_no_numeric_literals(statement: str) -> None:
     - 短语：百分之 / 倍 / 翻倍 / 翻番 / 过半 / 半数 / 一成 / 一半 / 一点；
     - numeric-context：第? + 一 + 季/月/年/期/日/号（含"季度/一季度/一月/一月份/
       一年/第一年度/一期/一日/一号"），此时"一"是量词而非非数量词语素。
+    - **V1.1 closure：4 位年份（19xx/20xx）允许**——年份是期间引用（metadata），
+      不是定量事实；生产实测模型系统性以年份引用报告期，硬性拒绝导致整次
+      财务分析反复失败。百分比 / 金额 / 其他数字 / 中文数字仍全部禁止。
     "收入同比增长20%" / "营业收入增长两成" / "盈利能力提升一倍" / "利润实现翻倍" /
     "二〇二五年收入改善" / "利润增长一成" / "第一季度收入改善" / "一季度收入改善" /
     "一月份需求增加" / "第一期项目完成" / "第一年度经营改善" / "一日发生变化" /
@@ -83,7 +91,8 @@ def assert_statement_has_no_numeric_literals(statement: str) -> None:
     "管理层观点"（"一/点"在非数量词中）允许。**不自动删数字 / 不改写 / 不让第二个
     LLM 修正**——违反即整次分析失败（0 写）。
     """
-    if any(ch in _FORBIDDEN_CHARS for ch in statement):
+    scrubbed = _YEAR_RE.sub("", statement)
+    if any(ch in _FORBIDDEN_CHARS for ch in scrubbed):
         raise FinancialAnalysisNumericLiteralForbidden(
             "financial claim statement must not contain numeric literals"
         )
