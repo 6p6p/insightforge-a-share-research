@@ -6,6 +6,7 @@
 
 import { apiRequest } from './client';
 import type {
+  ResolveProviderResponse,
   SourceDocumentType,
   SourceProviderListResponse,
   SourceRecordResponse,
@@ -19,13 +20,14 @@ export const sourceKeys = {
     [...sourceKeys.all, 'providers', params] as const,
 };
 
-/** 上传 PDF（multipart）到 raw artifact store；返回入库的 SourceRecord。 */
+/** 上传 PDF（multipart）到 raw artifact store；返回入库的 SourceRecord。
+ * source_url 可选：本地 PDF（无官方链接）时传 null，不 append 该字段。 */
 export async function uploadSourceFile(payload: {
   company_id: string;
   provider_key: string;
   document_type: SourceDocumentType;
   title: string;
-  source_url: string;
+  source_url: string | null;
   file: File;
   published_at?: string | null;
   reporting_period_end?: string | null;
@@ -36,7 +38,9 @@ export async function uploadSourceFile(payload: {
   form.append('provider_key', payload.provider_key);
   form.append('document_type', payload.document_type);
   form.append('title', payload.title);
-  form.append('source_url', payload.source_url);
+  if (payload.source_url) {
+    form.append('source_url', payload.source_url);
+  }
   form.append('file', payload.file);
   if (payload.published_at) {
     form.append('published_at', payload.published_at);
@@ -50,6 +54,17 @@ export async function uploadSourceFile(payload: {
   return apiRequest<SourceRecordResponse>('/source-records/upload', {
     method: 'POST',
     body: form,
+  });
+}
+
+/** URL → 来源机构自动识别（POST /source-providers/resolve）。 */
+export async function resolveProvider(
+  companyId: string,
+  url: string,
+): Promise<ResolveProviderResponse> {
+  return apiRequest<ResolveProviderResponse>('/source-providers/resolve', {
+    method: 'POST',
+    body: { company_id: companyId, url },
   });
 }
 

@@ -6,7 +6,13 @@ vi.mock('./client', async (importOriginal) => {
 });
 
 import { apiRequest } from './client';
-import { importUrlSource, listSourceProviders, sourceKeys, uploadSourceFile } from './sources';
+import {
+  importUrlSource,
+  listSourceProviders,
+  resolveProvider,
+  sourceKeys,
+  uploadSourceFile,
+} from './sources';
 
 const mockedApiRequest = vi.mocked(apiRequest);
 
@@ -47,17 +53,18 @@ describe('source 受控获取 API（7A Product Gate spec I）', () => {
     expect(body.get('file')).toBe(file);
   });
 
-  it('uploadSourceFile 可选字段为空时不 append', async () => {
+  it('uploadSourceFile 可选字段为空时不 append（source_url / published_at / external_document_id）', async () => {
     mockedApiRequest.mockResolvedValue({ source_id: 'src-1' });
     await uploadSourceFile({
       company_id: 'c1',
       provider_key: 'sse',
       document_type: 'other',
       title: 't',
-      source_url: 'u',
+      source_url: null,
       file: new File(['x'], 'x.pdf'),
     });
     const body = (mockedApiRequest.mock.calls[0][1] as { body: FormData }).body;
+    expect(body.get('source_url')).toBeNull();
     expect(body.get('published_at')).toBeNull();
     expect(body.get('external_document_id')).toBeNull();
   });
@@ -87,5 +94,20 @@ describe('source 受控获取 API（7A Product Gate spec I）', () => {
     mockedApiRequest.mockResolvedValue({ items: [], total: 0 });
     await listSourceProviders();
     expect(mockedApiRequest).toHaveBeenCalledWith('/source-providers?enabled_only=true');
+  });
+
+  it('resolveProvider → POST /source-providers/resolve（URL 自动识别来源）', async () => {
+    mockedApiRequest.mockResolvedValue({
+      provider_key: 'sse',
+      display_name: '上海证券交易所',
+      authority_tier: 1,
+      critical_claim_eligible: true,
+      matched_by: 'issuer_domain',
+    });
+    await resolveProvider('c1', 'https://www.sse.com.cn/annual.pdf');
+    expect(mockedApiRequest).toHaveBeenCalledWith('/source-providers/resolve', {
+      method: 'POST',
+      body: { company_id: 'c1', url: 'https://www.sse.com.cn/annual.pdf' },
+    });
   });
 });

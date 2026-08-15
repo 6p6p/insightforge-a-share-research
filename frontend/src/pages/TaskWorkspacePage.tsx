@@ -23,18 +23,21 @@ awaiting_stage5 时抑制 WorkflowProgressPanel 的 workflow-runs HumanActionCar
 
 import { useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { Alert, Badge, Button, Card, Descriptions, Layout, Space, Tabs, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 
-import { getCurrentOrchestration, orchestrationKeys } from '../api/orchestrations';
+import {
+  createOrchestration,
+  getCurrentOrchestration,
+  orchestrationKeys,
+} from '../api/orchestrations';
 import { getTaskWorkspace, taskKeys } from '../api/tasks';
 import { ArtifactSummaryCards } from '../components/ArtifactSummaryCards';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import { useTaskEvents } from '../hooks/useTaskEvents';
 import { OrchestrationBanner } from '../features/orchestration/OrchestrationBanner';
-import { StartResearchPanel } from '../features/workflow-progress/StartResearchPanel';
 import { WorkflowProgressPanel } from '../features/workflow-progress/WorkflowProgressPanel';
 import { AnalysisTab } from '../features/artifacts/AnalysisTab';
 import { EvidenceTab } from '../features/artifacts/EvidenceTab';
@@ -42,6 +45,7 @@ import { ReportTab } from '../features/artifacts/ReportTab';
 import { ReviewsTab } from '../features/artifacts/ReviewsTab';
 import { SourcesTab } from '../features/artifacts/SourcesTab';
 import { CitationDrawer } from '../features/citation/CitationDrawer';
+import { FinancialObservationForm } from '../features/financial/FinancialObservationForm';
 import type { CitationTarget } from '../types/citation';
 import { ApiError } from '../types/api';
 import type { WorkflowEventResponse, WorkflowRunResponse } from '../types/workflow';
@@ -55,7 +59,7 @@ type UseQueryResult = {
   refetch: () => Promise<unknown>;
 };
 
-const TAB_KEYS = ['overview', 'sources', 'evidence', 'analysis', 'report', 'reviews'];
+const TAB_KEYS = ['overview', 'sources', 'evidence', 'analysis', 'report', 'reviews', 'financial'];
 
 /** 从 URL `?tab=` 读取当前 tab，非法值回退到 overview。 */
 function tabFromParams(searchParams: URLSearchParams): string {
@@ -176,6 +180,7 @@ export function TaskWorkspacePage(): React.JSX.Element {
                 query={{ data, isLoading, isError, error, refetch }}
                 run={run}
                 hasActiveRun={hasActiveRun}
+                noOrchestration={orchestration == null}
                 suppressHumanAction={suppressHumanAction}
                 events={events}
                 sseError={sseError}
@@ -206,6 +211,16 @@ export function TaskWorkspacePage(): React.JSX.Element {
             label: '审核',
             children: <ReviewsTab taskId={taskId} onLocateReport={onLocateReport} />,
           },
+          {
+            key: 'financial',
+            label: '财务数据',
+            children: (
+              <FinancialObservationForm
+                taskId={taskId}
+                companyId={data?.resolved_company?.company_id ?? null}
+              />
+            ),
+          },
         ]}
       />
 
@@ -225,6 +240,8 @@ interface OverviewPanelProps {
   query: UseQueryResult;
   run: WorkflowRunResponse | null;
   hasActiveRun: boolean;
+  /** 尚无编排（orchestration == null）时提供「重新启动研究」入口。 */
+  noOrchestration: boolean;
   /** 编排 awaiting_stage5 时隐藏 workflow-runs 的 HumanActionCard。 */
   suppressHumanAction: boolean;
   events: WorkflowEventResponse[];
@@ -237,11 +254,17 @@ function OverviewPanel({
   query,
   run,
   hasActiveRun,
+  noOrchestration,
   suppressHumanAction,
   events,
   sseError,
 }: OverviewPanelProps): React.JSX.Element | null {
   const { data, isLoading, isError, error, refetch } = query;
+
+  const startMutation = useMutation({
+    mutationFn: () => createOrchestration(taskId),
+    onSuccess: () => void refetch(),
+  });
 
   if (isLoading) {
     return <Card loading />;
@@ -303,7 +326,27 @@ function OverviewPanel({
         />
       ) : null}
 
-      {!hasActiveRun ? <StartResearchPanel taskId={taskId} onStarted={() => void refetch()} /> : null}
+      {noOrchestration && !hasActiveRun ? (
+        <div>
+          <Space direction="vertical" size={8}>
+            <Typography.Text type="secondary">
+              该任务尚未创建研究编排，可点击下方按钮重新启动研究。
+            </Typography.Text>
+            <Space wrap>
+              <Button type="primary" loading={startMutation.isPending} onClick={() => startMutation.mutate()}>
+                重新启动研究
+              </Button>
+              {startMutation.error ? (
+                <Typography.Text type="danger">
+                  {startMutation.error instanceof ApiError
+                    ? startMutation.error.message
+                    : '重新启动失败，请稍后重试'}
+                </Typography.Text>
+              ) : null}
+            </Space>
+          </Space>
+        </div>
+      ) : null}
 
       {sseError ? <Alert type="warning" showIcon message={sseError} /> : null}
 

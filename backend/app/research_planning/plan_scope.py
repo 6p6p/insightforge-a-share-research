@@ -80,7 +80,12 @@ def apply_selected_modules(
 
     valuation 是额外开关（task.include_relative_valuation），不来自用户模块
     列表；未开启时删除 valuation 模块与 valuation_needs。
+
+    `selected` 为空（历史任务 / eval runner 未声明模块）→ **不约束**：原样
+    返回 payload（planner 自由生成，保持向后兼容）。
     """
+    if not selected:
+        return payload
     planner_values = allowed_planner_modules(selected)
     scope_values = allowed_scopes(selected)
     if include_relative_valuation:

@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { renderWithProviders } from '../../test/render';
+import { ApiError } from '../../types/api';
 import type { ResearchOrchestrationResponse } from '../../types/orchestration';
 import { OrchestrationBanner } from './OrchestrationBanner';
 
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   listSourceProviders: vi.fn(),
   importUrlSource: vi.fn(),
   uploadSourceFile: vi.fn(),
+  resolveProvider: vi.fn(),
 }));
 
 vi.mock('../../api/orchestrations', () => ({
@@ -28,6 +30,7 @@ vi.mock('../../api/sources', () => ({
   listSourceProviders: mocks.listSourceProviders,
   importUrlSource: mocks.importUrlSource,
   uploadSourceFile: mocks.uploadSourceFile,
+  resolveProvider: mocks.resolveProvider,
   sourceKeys: {
     all: ['sources'],
     providers: () => ['sources', 'providers'],
@@ -153,9 +156,11 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     expect(await screen.findByText('研究资料不足')).toBeInTheDocument();
     // 产品化原因：需要补充资料（不暴露 manual_reason 枚举）。
     expect(screen.getByText(/原因：需要补充资料/)).toBeInTheDocument();
-    // need codes 折叠在「技术详情」内（默认不直接暴露）。
+    // need codes 折叠在「技术详情」内：产品术语为主文本 + 原始代码附注。
     fireEvent.click(screen.getByText('技术详情'));
-    expect(screen.getByText(/缺失需求：annual_report_financial、audit_report/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/缺失需求：年度报告、审计报告（原始代码：annual_report_financial、audit_report）/),
+    ).toBeInTheDocument();
 
     // 切到「导入官方链接」tab。
     fireEvent.click(screen.getByRole('tab', { name: '导入官方链接' }));
@@ -235,5 +240,116 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '继续研究' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '上传并保存' })).not.toBeInTheDocument();
+  });
+
+  it('「自动识别来源」解析成功 → 自动填入来源机构并显示提示', async () => {
+    mocks.listSourceProviders.mockResolvedValue({ items: [sseProvider], total: 1 });
+    mocks.resolveProvider.mockResolvedValue({
+      provider_key: 'sse',
+      display_name: '上海证券交易所',
+      authority_tier: 1,
+      critical_claim_eligible: true,
+      matched_by: 'issuer_domain',
+    });
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'waiting_manual',
+          manual_reason: 'source_acquisition_required',
+        })}
+        companyId="c1"
+      />,
+    );
+    await screen.findByText('研究资料不足');
+
+    fireEvent.click(screen.getByRole('tab', { name: '导入官方链接' }));
+    await userEvent.type(
+      screen.getByLabelText('官方 PDF 链接（受控域名）'),
+      'https://static.sse.com.cn/annual.pdf',
+    );
+    await userEvent.click(screen.getByRole('button', { name: '自动识别来源' }));
+
+    await waitFor(() =>
+      expect(mocks.resolveProvider).toHaveBeenCalledWith(
+        'c1',
+        'https://static.sse.com.cn/annual.pdf',
+      ),
+    );
+    expect(await screen.findByText('已识别来源：上海证券交易所（自动匹配）')).toBeInTheDocument();
+    // 来源机构 select 已自动填入 sse：提交时 importUrlSource 收到 provider_key='sse'。
+    await userEvent.type(screen.getByLabelText('标题'), '贵州茅台 2025 年报');
+    await userEvent.click(screen.getByRole('button', { name: '导入并保存' }));
+    await waitFor(() =>
+      expect(mocks.importUrlSource).toHaveBeenCalledWith({
+        company_id: 'c1',
+        provider_key: 'sse',
+        document_type: 'annual_report',
+        title: '贵州茅台 2025 年报',
+        source_url: 'https://static.sse.com.cn/annual.pdf',
+      }),
+    );
+  });
+
+  it('「自动识别来源」解析失败 → 提示手动选择来源机构', async () => {
+    mocks.listSourceProviders.mockResolvedValue({ items: [sseProvider], total: 1 });
+    mocks.resolveProvider.mockRejectedValue(
+      new ApiError(400, 'source_url_not_allowed', 'URL 不在受控域名内', 'req-1'),
+    );
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'waiting_manual',
+          manual_reason: 'source_acquisition_required',
+        })}
+        companyId="c1"
+      />,
+    );
+    await screen.findByText('研究资料不足');
+
+    fireEvent.click(screen.getByRole('tab', { name: '导入官方链接' }));
+    await userEvent.type(
+      screen.getByLabelText('官方 PDF 链接（受控域名）'),
+      'https://example.com/annual.pdf',
+    );
+    await userEvent.click(screen.getByRole('button', { name: '自动识别来源' }));
+
+    expect(
+      await screen.findByText('未能自动识别来源，请手动选择来源机构'),
+    ).toBeInTheDocument();
+  });
+
+  it('上传 PDF 返回 413 → 显示「文件过大」友好提示', async () => {
+    mocks.listSourceProviders.mockResolvedValue({ items: [sseProvider], total: 1 });
+    mocks.uploadSourceFile.mockRejectedValue(
+      new ApiError(413, 'file_too_large', '请求体过大', 'req-1'),
+    );
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'waiting_manual',
+          manual_reason: 'source_acquisition_required',
+        })}
+        companyId="c1"
+      />,
+    );
+    await screen.findByText('研究资料不足');
+
+    // 选择 PDF 文件（antd Upload 隐藏 input）。
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['pdf-bytes'], 'annual.pdf', { type: 'application/pdf' });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await userEvent.click(screen.getByRole('combobox', { name: '来源机构' }));
+    await screen.findByText('上海证券交易所（sse）');
+    await userEvent.click(screen.getByText('上海证券交易所（sse）'));
+    await userEvent.type(screen.getByLabelText('标题'), '贵州茅台 2025 年报');
+
+    // 选择文件后提交按钮才可用。
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '上传并保存' })).toBeEnabled(),
+    );
+    await userEvent.click(screen.getByRole('button', { name: '上传并保存' }));
+
+    expect(await screen.findByText('文件过大：单个 PDF 不能超过 100MB')).toBeInTheDocument();
   });
 });

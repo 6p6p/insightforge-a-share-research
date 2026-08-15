@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   getEvidenceCitation: vi.fn(),
   getClaimCitation: vi.fn(),
   getCurrentOrchestration: vi.fn(),
+  createOrchestration: vi.fn(),
   useTaskEvents: vi.fn(),
 }));
 
@@ -64,10 +65,7 @@ vi.mock('../api/orchestrations', () => ({
     detail: (id: string) => ['orchestrations', 'detail', id],
   },
   getCurrentOrchestration: mocks.getCurrentOrchestration,
-}));
-
-vi.mock('../features/workflow-progress/StartResearchPanel', () => ({
-  StartResearchPanel: () => <div data-testid="start-research-panel" />,
+  createOrchestration: mocks.createOrchestration,
 }));
 
 vi.mock('../features/workflow-progress/WorkflowProgressPanel', () => ({
@@ -126,6 +124,7 @@ beforeEach(() => {
   mocks.getEvidenceCitation.mockReset();
   mocks.getClaimCitation.mockReset();
   mocks.getCurrentOrchestration.mockReset();
+  mocks.createOrchestration.mockReset();
   mocks.useTaskEvents.mockReset();
   mocks.useTaskEvents.mockReturnValue({
     events: [],
@@ -148,6 +147,20 @@ describe('TaskWorkspacePage artifact tabs（Stage 6B.1）', () => {
     expect(mocks.getTaskAnalysis).not.toHaveBeenCalled();
     expect(mocks.getTaskReport).not.toHaveBeenCalled();
     expect(mocks.getTaskReviews).not.toHaveBeenCalled();
+  });
+
+  it('无编排且无进行中的研究 → 「重新启动研究」调用 createOrchestration 并刷新', async () => {
+    mocks.createOrchestration.mockResolvedValue({ orchestration_id: 'orch-1' });
+    renderPage();
+    await screen.findByText('任务概要');
+
+    const restartButton = screen.getByRole('button', { name: '重新启动研究' });
+    expect(restartButton).toBeInTheDocument();
+    fireEvent.click(restartButton);
+
+    await waitFor(() => expect(mocks.createOrchestration).toHaveBeenCalledWith('task-1'));
+    // 成功后刷新 workspace。
+    await waitFor(() => expect(mocks.getTaskWorkspace).toHaveBeenCalledWith('task-1'));
   });
 
   it('切到「来源」tab → 触发 getTaskSources 并渲染来源表格', async () => {

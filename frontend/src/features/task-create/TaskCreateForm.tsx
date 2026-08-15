@@ -1,14 +1,12 @@
 /** Task Create 表单（V1.1 产品语义）。
 
-V1.1 产品冻结：一次研究任务 = 一个核心研究问题。
+V1.1 产品冻结：一次研究任务 = 一个核心研究问题；研究方案由系统自动规划，
+不再提供手动指定研究方案（executeTask / work plan 入口已从正常用户流程移除）。
 
 两阶段提交语义（P2-1 孤儿任务收口）：
 1. 创建任务（POST /tasks）——成功即任务存在（带 task_id）；
 2. 尝试自动开始研究（POST /tasks/{id}/orchestrations）——失败**不误报
    「创建失败」**，任务已创建；提供「重新启动研究」与「查看任务」。
-
-高级「手动指定研究方案」（显式 work plan，引用已入库证据 ID）仍保留：
-开启时优先于自动研究。
  */
 
 import { useState } from 'react';
@@ -28,11 +26,9 @@ import {
 import type { Dayjs } from 'dayjs';
 
 import { createOrchestration } from '../../api/orchestrations';
-import { createTask, executeTask } from '../../api/tasks';
+import { createTask } from '../../api/tasks';
 import { ApiError } from '../../types/api';
 import { type ResearchModule, type TaskCreateRequest } from '../../types/task';
-import type { AnalysisWorkItem } from '../../types/workspace';
-import { WorkPlanEditor } from './WorkPlanEditor';
 
 const { Text } = Typography;
 
@@ -50,7 +46,6 @@ interface FormValues {
   research_dates: [Dayjs, Dayjs];
   modules: ResearchModule[];
   questions: string;
-  include_relative_valuation: boolean;
 }
 
 interface Props {
@@ -59,8 +54,6 @@ interface Props {
 
 export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
   const [form] = Form.useForm<FormValues>();
-  const [workItems, setWorkItems] = useState<AnalysisWorkItem[]>([]);
-  const [enableExecute, setEnableExecute] = useState(false);
   const [autoStart, setAutoStart] = useState(true);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
@@ -74,7 +67,6 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
         research_end_date: end.format('YYYY-MM-DD'),
         modules: values.modules,
         questions: values.questions?.trim() ? [values.questions.trim()] : [],
-        include_relative_valuation: values.include_relative_valuation,
         require_plan_approval: false,
       };
       return await createTask(payload);
@@ -82,18 +74,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
   });
 
   const startMutation = useMutation({
-    mutationFn: async (args: { taskId: string; values: FormValues }) => {
-      const { taskId: id, values } = args;
-      // 显式研究方案优先；否则默认自动研究（一键入口）。
-      if (enableExecute && workItems.length > 0) {
-        await executeTask(id, { analysis_work_items: workItems });
-        return;
-      }
-      if (autoStart) {
-        await createOrchestration(id);
-      }
-      void values;
-    },
+    mutationFn: (id: string) => createOrchestration(id),
     onSuccess: () => {
       if (taskId) {
         onCreated(taskId);
@@ -106,14 +87,13 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
     },
   });
 
-  /** 两阶段提交：先创建任务，再尝试自动启动研究。 */
+  /** 两阶段提交：先创建任务，再按 autoStart 尝试自动启动研究。 */
   const submit = async (values: FormValues): Promise<void> => {
     setStartError(null);
     const task = await createMutation.mutateAsync(values);
     setTaskId(task.task_id);
-    const willStart = (enableExecute && workItems.length > 0) || autoStart;
-    if (willStart) {
-      startMutation.mutate({ taskId: task.task_id, values });
+    if (autoStart) {
+      startMutation.mutate(task.task_id);
     } else {
       onCreated(task.task_id);
     }
@@ -122,7 +102,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
   const retryStart = (): void => {
     if (taskId) {
       setStartError(null);
-      startMutation.mutate({ taskId, values: form.getFieldsValue() });
+      startMutation.mutate(taskId);
     }
   };
 
@@ -131,8 +111,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
       ? createMutation.error.message
       : createMutation.error?.message;
 
-  const willExecute = enableExecute && workItems.length > 0;
-  const submitLabel = willExecute ? '创建并执行研究' : autoStart ? '创建并自动开始研究' : '创建任务';
+  const submitLabel = autoStart ? '创建并自动开始研究' : '创建任务';
   const starting = createMutation.isPending || startMutation.isPending;
 
   return (
@@ -141,7 +120,6 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
         form={form}
         layout="vertical"
         onFinish={(values) => void submit(values)}
-        initialValues={{ include_relative_valuation: false }}
         requiredMark
       >
         <Form.Item
@@ -181,10 +159,6 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
           <Input placeholder="例如：宁德时代近三年的盈利能力和增长驱动发生了什么变化？" maxLength={500} />
         </Form.Item>
 
-        <Form.Item name="include_relative_valuation" label="包含相对估值" valuePropName="checked">
-          <Switch />
-        </Form.Item>
-
         <Form.Item label="自动研究">
           <Switch
             checked={autoStart}
@@ -193,28 +167,6 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
             unCheckedChildren="仅创建任务"
             aria-label="是否自动开始研究"
           />
-        </Form.Item>
-
-        <Form.Item label="手动指定研究方案（高级，可选）">
-          <Space direction="vertical" style={{ width: '100%' }}>
-            <Switch
-              checked={enableExecute}
-              onChange={setEnableExecute}
-              checkedChildren="使用手动研究方案"
-              unCheckedChildren="不使用手动研究方案"
-              aria-label="是否使用手动研究方案"
-            />
-            {enableExecute ? (
-              <>
-                <Alert
-                  type="info"
-                  showIcon
-                  message="手动研究方案需要引用已入库的真实证据 / 计算 / 对比 ID；开启后优先于自动研究。"
-                />
-                <WorkPlanEditor value={workItems} onChange={setWorkItems} />
-              </>
-            ) : null}
-          </Space>
         </Form.Item>
 
         {errorMessage ? (
@@ -243,12 +195,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
           />
         ) : null}
 
-        <Button
-          type="primary"
-          htmlType="submit"
-          loading={starting}
-          disabled={enableExecute && workItems.length === 0}
-        >
+        <Button type="primary" htmlType="submit" loading={starting}>
           {submitLabel}
         </Button>
       </Form>

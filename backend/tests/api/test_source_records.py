@@ -168,6 +168,15 @@ def test_upload_optional_dates_parsed(ingestion_client, fake_ingestion) -> None:
     assert captured["external_document_id"] == "ext-1"
 
 
+def test_upload_without_source_url_allowed(ingestion_client, fake_ingestion) -> None:
+    """V1.1 closure：本地上传允许无官方 URL（不伪造 source_url）。"""
+    data = _upload_data()
+    del data["source_url"]
+    response = ingestion_client.post("/api/v1/source-records/upload", data=data, files=_pdf_file())
+    assert response.status_code == 201
+    assert fake_ingestion.captured["source_url"] is None
+
+
 # --------------------------------------------------------------- import-url
 
 

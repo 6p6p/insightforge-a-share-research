@@ -81,10 +81,11 @@ def resolve_macro_indicator(topic: str | None) -> str | None:
     term = topic.strip().lower().replace(" ", "")
     if term in _MACRO_INDICATOR_MAP:
         return _MACRO_INDICATOR_MAP[term]
-    # 宽松后缀匹配（如「GDP增长率（%）」）：term 以映射 key 开头/结尾。
-    for key, indicator in _MACRO_INDICATOR_MAP.items():
+    # 宽松前缀/后缀匹配（如「GDP增长率（%）」）：key 从长到短，避免
+    # 「gdp」前缀先于「gdp增长率」命中。
+    for key in sorted(_MACRO_INDICATOR_MAP, key=len, reverse=True):
         if term.startswith(key) or term.endswith(key):
-            return indicator
+            return _MACRO_INDICATOR_MAP[key]
     return None
 
 

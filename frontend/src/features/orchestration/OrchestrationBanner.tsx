@@ -26,6 +26,7 @@ import {
   Typography,
   Upload,
 } from 'antd';
+import type { FormInstance } from 'antd';
 import { UploadOutlined } from '@ant-design/icons';
 
 import {
@@ -33,7 +34,13 @@ import {
   orchestrationKeys,
   resumeSourceAcquisition,
 } from '../../api/orchestrations';
-import { importUrlSource, listSourceProviders, sourceKeys, uploadSourceFile } from '../../api/sources';
+import {
+  importUrlSource,
+  listSourceProviders,
+  resolveProvider,
+  sourceKeys,
+  uploadSourceFile,
+} from '../../api/sources';
 import { taskKeys } from '../../api/tasks';
 import { ApiError } from '../../types/api';
 import {
@@ -43,7 +50,12 @@ import {
   RESUME_MANUAL_REASONS,
   STRUCTURED_DATA_REFRESH_REASON,
 } from '../../types/orchestration';
-import { CONTROLLED_DOCUMENT_TYPES, type SourceDocumentType } from '../../types/source';
+import {
+  CONTROLLED_DOCUMENT_TYPES,
+  SOURCE_DOCUMENT_TYPE_LABELS,
+  type SourceDocumentType,
+} from '../../types/source';
+import { needCodeLabel } from '../../utils/needCode';
 
 const { Text } = Typography;
 
@@ -87,16 +99,13 @@ function reasonLabel(reason: string | null | undefined): string {
   return MANUAL_REASON_LABELS[reason] ?? '需要人工确认';
 }
 
-const DOCUMENT_TYPE_LABELS: Record<SourceDocumentType, string> = {
-  annual_report: '年报',
-  semiannual_report: '半年报',
-  quarterly_report: '季报',
-  company_announcement: '公司公告',
-  issuer_ir_material: '发行人信披材料',
-  prospectus: '招股书',
-  news_article: '新闻文章',
-  other: '其他',
-};
+/** 缺失需求：产品术语为主文本，原始 need code 附在括号内（技术详情行）。 */
+function missingNeedsText(codes: string[]): string {
+  if (codes.length === 0) {
+    return '';
+  }
+  return `缺失需求：${codes.map(needCodeLabel).join('、')}（原始代码：${codes.join('、')}）`;
+}
 
 const STAGE5_ACTIONS: {
   action: OrchestrationAction;
@@ -218,8 +227,8 @@ export function OrchestrationBanner({
                       children: (
                         <Text type="secondary">
                           原因：{reasonLabel(orchestration.manual_reason)}
-                          {orchestration.missing_need_codes.length > 0
-                            ? `；缺失需求：${orchestration.missing_need_codes.join('、')}`
+                          {missingNeedsText(orchestration.missing_need_codes)
+                            ? `；${missingNeedsText(orchestration.missing_need_codes)}`
                             : ''}
                         </Text>
                       ),
@@ -310,6 +319,77 @@ interface ImportFormValues {
   source_url: string;
 }
 
+interface SourceUrlFieldProps {
+  form: FormInstance;
+  label: string;
+  placeholder?: string;
+  /** 必填（受控 URL 导入）；上传表单 URL 可选。 */
+  required?: boolean;
+  companyId: string;
+  providerOptions: { value: string; label: string }[];
+}
+
+/** 原始链接输入 + 「自动识别来源」：解析成功自动填入来源机构（可继续手动改）。 */
+function SourceUrlField({
+  form,
+  label,
+  placeholder,
+  required = false,
+  companyId,
+  providerOptions,
+}: SourceUrlFieldProps): React.JSX.Element {
+  const url = Form.useWatch('source_url', form);
+  const [hint, setHint] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  const resolve = async (): Promise<void> => {
+    const trimmed = (url ?? '').trim();
+    if (!trimmed) {
+      setHint({ tone: 'error', text: '请先输入原始链接' });
+      return;
+    }
+    setResolving(true);
+    setHint(null);
+    try {
+      const result = await resolveProvider(companyId, trimmed);
+      if (providerOptions.some((option) => option.value === result.provider_key)) {
+        form.setFieldValue('provider_key', result.provider_key);
+        setHint({ tone: 'success', text: `已识别来源：${result.display_name}（自动匹配）` });
+      } else {
+        setHint({ tone: 'error', text: '未能自动识别来源，请手动选择来源机构' });
+      }
+    } catch {
+      setHint({ tone: 'error', text: '未能自动识别来源，请手动选择来源机构' });
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  return (
+    <>
+      <Form.Item
+        name="source_url"
+        label={label}
+        rules={required ? [{ required: true, message: '请输入原始链接' }] : undefined}
+      >
+        <Input maxLength={2000} placeholder={placeholder} />
+      </Form.Item>
+      <Space size="small" style={{ marginBottom: 24 }}>
+        <Button size="small" loading={resolving} onClick={() => void resolve()}>
+          自动识别来源
+        </Button>
+        {hint ? (
+          hint.tone === 'success' ? (
+            <Text type="success" style={{ fontSize: 12 }}>{hint.text}</Text>
+          ) : (
+            <Text type="warning" style={{ fontSize: 12 }}>{hint.text}</Text>
+          )
+        ) : null}
+      </Space>
+    </>
+  );
+}
+
 /** 资料不足面板：原因 + 上传 PDF / 受控 URL 导入 → 继续研究。 */
 function SourceAcquisitionPanel({
   orchestration,
@@ -339,7 +419,7 @@ function SourceAcquisitionPanel({
         provider_key: values.provider_key,
         document_type: values.document_type,
         title: values.title.trim(),
-        source_url: values.source_url.trim(),
+        source_url: values.source_url?.trim() || null,
         file: file!,
       }),
     onSuccess: () => {
@@ -375,7 +455,12 @@ function SourceAcquisitionPanel({
 
   const mutationError =
     uploadMutation.error ?? importMutation.error ?? resumeMutation.error;
-  const errorMessage = mutationError instanceof ApiError ? mutationError.message : null;
+  const errorMessage =
+    mutationError instanceof ApiError
+      ? mutationError.status === 413
+        ? '文件过大：单个 PDF 不能超过 100MB'
+        : mutationError.message
+      : null;
 
   const providerOptions =
     providersQuery.data?.items.map((provider) => ({
@@ -385,7 +470,7 @@ function SourceAcquisitionPanel({
 
   const documentOptions = CONTROLLED_DOCUMENT_TYPES.map((type) => ({
     value: type,
-    label: DOCUMENT_TYPE_LABELS[type],
+    label: SOURCE_DOCUMENT_TYPE_LABELS[type],
   }));
 
   if (!companyId) {
@@ -420,7 +505,7 @@ function SourceAcquisitionPanel({
                       label: '技术详情',
                       children: (
                         <Text type="secondary">
-                          缺失需求：{orchestration.missing_need_codes.join('、')}
+                          {missingNeedsText(orchestration.missing_need_codes)}
                         </Text>
                       ),
                     },
@@ -489,13 +574,13 @@ function SourceAcquisitionPanel({
                     >
                       <Input maxLength={500} placeholder="例如：宁德时代 2023 年年度报告" />
                     </Form.Item>
-                    <Form.Item
-                      name="source_url"
-                      label="原始链接（必须在所选来源机构的受控域名内）"
-                      rules={[{ required: true, message: '请输入原始链接' }]}
-                    >
-                      <Input maxLength={2000} placeholder="https://static.szse.cn/…" />
-                    </Form.Item>
+                    <SourceUrlField
+                      form={uploadForm}
+                      label="原始链接（可选，官方披露链接）"
+                      placeholder="https://static.szse.cn/…"
+                      companyId={companyId}
+                      providerOptions={providerOptions}
+                    />
                     <Button
                       type="primary"
                       htmlType="submit"
@@ -544,13 +629,14 @@ function SourceAcquisitionPanel({
                     >
                       <Input maxLength={500} placeholder="例如：宁德时代 2023 年年度报告" />
                     </Form.Item>
-                    <Form.Item
-                      name="source_url"
+                    <SourceUrlField
+                      form={importForm}
                       label="官方 PDF 链接（受控域名）"
-                      rules={[{ required: true, message: '请输入官方 PDF 链接' }]}
-                    >
-                      <Input maxLength={2000} placeholder="https://static.szse.cn/…/annual.pdf" />
-                    </Form.Item>
+                      placeholder="https://static.szse.cn/…/annual.pdf"
+                      required
+                      companyId={companyId}
+                      providerOptions={providerOptions}
+                    />
                     <Button type="primary" htmlType="submit" loading={importMutation.isPending}>
                       导入并保存
                     </Button>
