@@ -79,7 +79,15 @@ from app.repositories.financial_metric_observation_repository import (
 )
 
 _ORIGIN_DOCUMENT_CHUNK = "document_chunk"
+_ORIGIN_USER_SUPPLIED = "user_supplied"
 _EVIDENCE_TYPE_METRIC = "metric"
+
+# 财务观察允许的 EvidenceCard origin：
+# - document_chunk：自动提取的文档证据（quote = 程序切片原文）；
+# - user_supplied：用户转录的官方报告证据（quote = 用户粘贴的原文引文，
+#   含精确数字 token，供 _resolve_source_value 确定性解析；Tier-4 来源，
+#   critical_claim_eligible=False，见 UserSuppliedEvidenceService）。
+_ALLOWED_FINANCIAL_ORIGINS = frozenset((_ORIGIN_DOCUMENT_CHUNK, _ORIGIN_USER_SUPPLIED))
 
 # 只允许 consolidated 口径的母公司指标（结构化口径语义政策）。
 # net_profit_parent / net_profit_parent_excl_nonrecurring / equity_parent
@@ -155,15 +163,19 @@ class FinancialMetricService:
     ) -> EvidenceCardModel:
         """从真实 PG 加载 EvidenceCard 并校验（缺失 / origin / type / company）。
 
-        - v1 只允许 origin_type=document_chunk 且 evidence_type=metric；
+        - 允许 origin_type ∈ {document_chunk, user_supplied} 且
+          evidence_type=metric（user_supplied 卡自带含数字 token 的引文，
+          供确定性解析；可信级别仍由卡上的 Tier-4 快照表达）；
         - evidence.company_id 必须 == draft.company_id（跨公司拒绝）；
         - 任何不匹配 → FinancialMetricEvidenceMismatch（不自动修复）。
         """
         card = await EvidenceCardRepository(session).get_by_id(draft.source_evidence_card_id)
         if card is None:
             raise FinancialMetricEvidenceMismatch("evidence card not found")
-        if card.origin_type != _ORIGIN_DOCUMENT_CHUNK:
-            raise FinancialMetricEvidenceMismatch("origin_type 必须是 document_chunk")
+        if card.origin_type not in _ALLOWED_FINANCIAL_ORIGINS:
+            raise FinancialMetricEvidenceMismatch(
+                "origin_type 必须是 document_chunk 或 user_supplied"
+            )
         if card.evidence_type != _EVIDENCE_TYPE_METRIC:
             raise FinancialMetricEvidenceMismatch("evidence_type 必须是 metric")
         if card.company_id != draft.company_id:

@@ -29,6 +29,7 @@ from app.domain.source_records import (
     SourceDocumentType,
     SourceRecordStatus,
 )
+from app.domain.sources import AcquisitionMethod
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.raw_artifact_repository import RawArtifactRepository
 from app.repositories.source_provider_repository import SourceProviderRepository
@@ -73,12 +74,18 @@ class SourceIngestionService:
         provider_key: str,
         document_type: SourceDocumentType,
         title: str,
-        source_url: str,
+        source_url: str | None,
         published_at: datetime | None,
         reporting_period_end: date | None,
         external_document_id: str | None,
         stream: BinaryIO,
     ) -> IngestionResult:
+        """用户上传 PDF 落库。
+
+        V1.1 closure：`source_url` 允许 None（本地 PDF 无官方 URL 时不伪造
+        URL；provider 能力/启用校验保留，URL allowlist 校验仅在提供 URL 时
+        执行）。acquisition_method=user_upload。
+        """
         self._ensure_not_news_article(document_type)
         provider = await self._load_company_and_provider(company_id, provider_key, source_url)
         stored = self._raw_store.put_pdf_stream(stream)
@@ -129,7 +136,49 @@ class SourceIngestionService:
             reporting_period_end=reporting_period_end,
             external_document_id=external_document_id,
             stored=stored,
-            acquisition_method="user_provided_url",
+            acquisition_method=AcquisitionMethod.USER_PROVIDED_URL.value,
+            provider=provider,
+        )
+
+    async def ingest_discovered(
+        self,
+        *,
+        company_id: UUID,
+        provider_key: str,
+        document_type: SourceDocumentType,
+        title: str,
+        source_url: str,
+        published_at: datetime | None,
+        reporting_period_end: date | None,
+        external_document_id: str | None,
+    ) -> IngestionResult:
+        """自动发现来源落库（V1.1 closure）：acquisition_method=automatic_discovery。
+
+        与 ingest_url 同一安全边界（provider allowlist + SafePdfFetcher）；仅
+        acquisition_method 不同（来源方式诚实记录为受控自动发现）。
+        """
+        self._ensure_not_news_article(document_type)
+        provider = await self._load_company_and_provider(company_id, provider_key, source_url)
+        pdf = await self._fetcher.fetch(
+            source_url,
+            provider.allowed_domains,
+            self._max_bytes,
+        )
+        try:
+            stored = self._raw_store.put_pdf_stream(pdf.content_stream)
+        finally:
+            pdf.close()
+        return await self._persist(
+            company_id=company_id,
+            provider_key=provider_key,
+            document_type=document_type,
+            title=title,
+            source_url=source_url,
+            published_at=published_at,
+            reporting_period_end=reporting_period_end,
+            external_document_id=external_document_id,
+            stored=stored,
+            acquisition_method=AcquisitionMethod.AUTOMATIC_DISCOVERY.value,
             provider=provider,
         )
 
@@ -189,9 +238,13 @@ class SourceIngestionService:
         self,
         company_id: UUID,
         provider_key: str,
-        source_url: str,
+        source_url: str | None,
     ) -> SourceProviderModel:
-        """短会话只读 Company/Provider；不跨网络 I/O 持有 AsyncSession。"""
+        """短会话只读 Company/Provider；不跨网络 I/O 持有 AsyncSession。
+
+        source_url=None（本地上传无官方 URL）时跳过 allowlist 校验（DB CHECK
+        已允许 NULL）；provider 存在/启用/能力校验始终执行。
+        """
         async with self._sessionmaker() as session:
             company = await CompanyRepository(session).get_by_id(company_id)
             if company is None:
@@ -203,7 +256,7 @@ class SourceIngestionService:
             raise SourceProviderDisabled()
         if not set(provider.capabilities) & _COMPANY_CAPABILITIES:
             raise SourceCapabilityNotAllowed()
-        if not is_url_allowed(source_url, provider.allowed_domains):
+        if source_url is not None and not is_url_allowed(source_url, provider.allowed_domains):
             raise SourceUrlNotAllowed()
         return provider
 

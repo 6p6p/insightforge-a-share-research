@@ -56,6 +56,10 @@ from app.research_planning.errors import (
     ResearchPlanLegacyExecutionUnsupported,
     ResearchPlanNotFound,
 )
+from app.research_planning.plan_scope import (
+    allowed_planner_modules,
+    apply_selected_modules,
+)
 from app.research_planning.planner import (
     PLANNER_NAME,
     PLANNER_VERSION,
@@ -231,6 +235,7 @@ class ResearchPlanningService:
             company=snapshot.company_identity(),
             research_question=research_question,
             analysis_as_of=analysis_as_of,
+            module_constraint=sorted(allowed_planner_modules(task.modules)),
         )
         input_fingerprint = compute_planner_input_fingerprint_v2(
             plan_schema_version=RESEARCH_PLAN_SCHEMA_VERSION,
@@ -251,6 +256,12 @@ class ResearchPlanningService:
                 return self._to_result(existing, replayed=True)
 
         payload = await self._planner_model.generate(request)
+        # 确定性强制用户模块范围（planner 输出过滤；空交集 → ScopeMismatch）。
+        payload = apply_selected_modules(
+            payload,
+            task.modules,
+            include_relative_valuation=task.include_relative_valuation,
+        )
         plan_fingerprint = compute_plan_fingerprint(
             planner_input_fingerprint=input_fingerprint,
             payload=payload.normalized_payload(),

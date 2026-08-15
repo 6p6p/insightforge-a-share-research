@@ -44,3 +44,5 @@ class AcquisitionMethod(StrEnum):
     WEB_SEARCH_DISCOVERY = "web_search_discovery"
     MODEL_WEB_SEARCH_DISCOVERY = "model_web_search_discovery"
     PUBLIC_HTML = "public_html"
+    AUTOMATIC_DISCOVERY = "automatic_discovery"
+    USER_SUPPLIED = "user_supplied"

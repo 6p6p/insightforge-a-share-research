@@ -5,7 +5,7 @@ import time
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
@@ -20,6 +20,7 @@ from app.api.dependencies import (
 from app.core.errors import InvalidIdempotencyKey
 from app.domain.tasks import TaskStatus
 from app.report_export.service import ReportExportService
+from app.repositories.research_task_repository import ResearchTaskRepository
 from app.schemas.artifact import (
     AnalysisArtifactResponse,
     EvidenceArtifactListResponse,
@@ -32,6 +33,10 @@ from app.schemas.export import (
     ExportCreateRequest,
     ExportCreateResponse,
     ExportMetadataResponse,
+)
+from app.schemas.financial_observation import (
+    UserSuppliedFinancialObservationRequest,
+    UserSuppliedFinancialObservationResponse,
 )
 from app.schemas.research_execution import (
     ResearchExecutionRequest,
@@ -293,6 +298,99 @@ async def execute_research(
     ResearchExecutionService 从 ResearchTask 派生。返回 Stage 4 run（202）。
     """
     return await execution.start(task_id, payload)
+
+
+@router.post(
+    "/{task_id}/financial-observations",
+    response_model=UserSuppliedFinancialObservationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_user_supplied_financial_observation(
+    task_id: UUID,
+    payload: UserSuppliedFinancialObservationRequest,
+    request: Request,
+) -> UserSuppliedFinancialObservationResponse:
+    """用户转录财务数值（V1.1 closure）：user_supplied 证据卡 + metric observation。
+
+    流程（全部确定性，**0 LLM / 0 编造**）：
+    1. task → CompanyIdentityService 解析 company；
+    2. UserSuppliedEvidenceService.create_card（Tier-4 快照，quote = 用户粘贴
+       原文引文）；
+    3. FinancialMetricService.create_observation（source_value_text 必须是
+       quote_text 的唯一完整数字 token）。
+    失败（引文不含数字 / 数字不唯一 / period 规则违反等）→ 422 稳定错误码。
+    """
+    resources = getattr(request.app.state, "resources", None)
+    if resources is None or resources.database is None:
+        raise RuntimeError("application resources are not initialized")
+    sessionmaker = resources.database.session_factory()
+
+    task_service = TaskService(ResearchTaskRepository(sessionmaker))
+    task = await task_service.get_task(task_id)
+
+    from app.services.company_identity_service import CompanyIdentityService
+
+    company_resolution = await CompanyIdentityService(sessionmaker).resolve(task.company_query)
+    company_id = company_resolution.company.company_id
+
+    questions = list(task.questions or [])
+    research_question = questions[0] if questions else None
+    if not research_question:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "financial_observation_requires_question",
+                "message": "任务没有研究问题，无法登记财务证据",
+            },
+        )
+
+    from app.evidence.contracts import EvidenceType, UserSuppliedEvidenceDraft
+    from app.financial.contracts import FinancialMetricDraft
+    from app.financial.errors import FinancialMetricError
+    from app.financial.service import FinancialMetricService
+    from app.services.user_supplied_evidence_service import (
+        UserSuppliedEvidenceService,
+    )
+
+    card_result = await UserSuppliedEvidenceService(sessionmaker).create_card(
+        UserSuppliedEvidenceDraft(
+            company_id=company_id,
+            research_question=research_question,
+            evidence_statement=payload.evidence_statement,
+            evidence_type=EvidenceType.METRIC,
+            quote_text=payload.quote_text,
+            source_title=payload.source_title,
+            document_type=payload.document_type,
+            source_url=payload.source_url,
+            reporting_period_end=payload.period_end,
+        )
+    )
+    try:
+        observation = await FinancialMetricService(sessionmaker).create_observation(
+            FinancialMetricDraft(
+                company_id=company_id,
+                source_evidence_card_id=card_result.evidence_card_id,
+                metric_code=payload.metric_code,
+                statement_scope=payload.statement_scope,
+                period_start=payload.period_start,
+                period_end=payload.period_end,
+                source_value_text=payload.source_value_text,
+                raw_unit=payload.raw_unit,
+            )
+        )
+    except FinancialMetricError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": getattr(exc, "code", "financial_metric_error"), "message": str(exc)},
+        ) from exc
+
+    return UserSuppliedFinancialObservationResponse(
+        evidence_card_id=card_result.evidence_card_id,
+        source_id=card_result.source_id,
+        metric_observation_id=observation.metric_observation_id,
+        metric_fingerprint=observation.metric_fingerprint,
+        replayed=observation.replayed,
+    )
 
 
 @router.get("/{task_id}/events")

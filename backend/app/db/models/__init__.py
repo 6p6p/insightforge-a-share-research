@@ -36,6 +36,8 @@ from app.db.models.financial_calculation import (
 )
 from app.db.models.financial_metric_observation import FinancialMetricObservationModel
 from app.db.models.human_action import HumanActionModel
+from app.db.models.issuer_domain import IssuerDomainModel
+from app.db.models.issuer_domain_snapshot import IssuerDomainSnapshotRow
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
@@ -110,6 +112,8 @@ __all__ = [
     "FinancialCalculationModel",
     "FinancialMetricObservationModel",
     "HumanActionModel",
+    "IssuerDomainModel",
+    "IssuerDomainSnapshotRow",
     "MacroDatasetSnapshotModel",
     "MacroObservationModel",
     "MacroSeriesModel",

@@ -204,6 +204,10 @@ class ResearchPlannerRequest(BaseModel):
     company: CompanyIdentitySnapshot
     research_question: str
     analysis_as_of: date
+    # 用户选择的模块约束（planner AnalysisModule 值，如 business_event /
+    # financial / macro / risk；空 = 不约束）。planner 只在约束内生成计划；
+    # 生成后仍由 plan_scope.apply_selected_modules 确定性强制（V1.1 closure）。
+    module_constraint: list[str] = Field(default_factory=list)
 
     @field_validator("research_question", mode="before")
     @classmethod

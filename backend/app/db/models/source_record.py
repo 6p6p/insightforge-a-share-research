@@ -28,7 +28,8 @@ _DOCUMENT_TYPE_CHECK = (
     "'company_announcement','issuer_ir_material','prospectus','news_article','other')"
 )
 _ACQUISITION_METHOD_CHECK = (
-    "acquisition_method IN ('user_upload','user_provided_url','public_html')"
+    "acquisition_method IN ('user_upload','user_provided_url','public_html',"
+    "'automatic_discovery','user_supplied')"
 )
 _STATUS_CHECK = "status IN ('available')"
 
@@ -58,15 +59,15 @@ class SourceRecordModel(Base):
             name="ck_source_records_title_not_blank",
         ),
         CheckConstraint(
-            "source_url ~ '^https://'",
+            "source_url IS NULL OR source_url ~ '^https://'",
             name="ck_source_records_url_https",
         ),
         CheckConstraint(
-            "source_url !~ '://[^/]*@'",
+            "source_url IS NULL OR source_url !~ '://[^/]*@'",
             name="ck_source_records_url_no_userinfo",
         ),
         CheckConstraint(
-            "position('#' in source_url) = 0",
+            "source_url IS NULL OR position('#' in source_url) = 0",
             name="ck_source_records_url_no_fragment",
         ),
         UniqueConstraint(
@@ -104,7 +105,7 @@ class SourceRecordModel(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reporting_period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
-    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     acquisition_method: Mapped[str] = mapped_column(String(64), nullable=False)
     external_document_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     authority_tier_snapshot: Mapped[int] = mapped_column(SmallInteger, nullable=False)

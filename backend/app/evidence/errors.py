@@ -77,3 +77,14 @@ class EvidencePersistenceFailed(EvidenceError):
 
     code = "evidence_persistence_failed"
     message = "evidence card persistence failed"
+
+
+class EvidenceProviderNotRegisteredError(EvidenceError):
+    """user_supplied provider 未在 source_providers 登记（服务端配置问题）。
+
+    user_supplied Evidence 的 authority_tier / critical_claim_eligible 必须
+    复制自真实 provider 行；provider 缺失时拒绝登记（不硬编码可信级别）。
+    """
+
+    code = "evidence_provider_not_registered"
+    message = "user_supplied provider is not registered"

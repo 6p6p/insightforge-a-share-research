@@ -55,13 +55,23 @@ def _macro_available(snapshot: MacroDatasetSnapshotModel, analysis_as_of: date) 
 
 
 class MacroNeedExecutor:
-    """macro need 自动补证据：可用 MacroObservation → create_macro_card → 重跑。"""
+    """macro need 自动补证据：可用 MacroObservation → create_macro_card → 重跑。
+
+    V1.1 closure：`auto_fetch`（MacroAutoFetchService）注入后，无可用观测时
+    先尝试**有界自动获取**（确定性 topic→World Bank indicator 映射 → 真实
+    获取落库）→ 重查；获取失败保持 MACRO_DATA_UNAVAILABLE（human fallback
+    兜底，绝不编造宏观数字）。
+    """
 
     def __init__(
-        self, sessionmaker: async_sessionmaker, macro_service: MacroEvidenceService | None = None
+        self,
+        sessionmaker: async_sessionmaker,
+        macro_service: MacroEvidenceService | None = None,
+        auto_fetch=None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._macro_service = macro_service or MacroEvidenceService(sessionmaker)
+        self._auto_fetch = auto_fetch
 
     # ------------------------------------------------------------ 主入口
 
@@ -81,6 +91,16 @@ class MacroNeedExecutor:
             )
         topic, geo = self._match_terms(context, need)
         rows = await self._load_available_observations(context, need, topic, geo)
+        if not rows and self._auto_fetch is not None:
+            # 有界自动获取（V1.1 closure）：映射命中才执行；失败保持原语义。
+            try:
+                result = await self._auto_fetch.fetch_for_need(
+                    topic=topic, geo=geo, as_of=context.analysis_as_of
+                )
+            except Exception:  # noqa: BLE001 - 获取失败 → 保持 MACRO_DATA_UNAVAILABLE
+                result = None
+            if result is not None and result.persisted:
+                rows = await self._load_available_observations(context, need, topic, geo)
         if not rows:
             return self._attempt(
                 need,

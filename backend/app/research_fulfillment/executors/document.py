@@ -138,7 +138,13 @@ class _RecordingCardService:
 
 
 class DocumentNeedExecutor:
-    """document / event need 自动补证据（Retrieval → EvidenceExtraction → create/replay）。"""
+    """document / event need 自动补证据（Retrieval → EvidenceExtraction → create/replay）。
+
+    V1.1 closure：`auto_acquisition`（AnnouncementDiscoveryService）注入后，
+    document need 无 eligible source 时先尝试受控自动发现（East Money 年度/
+    半年度/季度报告，no-lookahead）→ 落库 → 重查 sources；失败保持原
+    SOURCE_NOT_FOUND 语义（human fallback 兜底）。
+    """
 
     def __init__(
         self,
@@ -146,11 +152,13 @@ class DocumentNeedExecutor:
         retrieval_service: RetrievalService,
         extractor_model: EvidenceExtractionModel,
         index_builder: IndexBuilder | None = None,
+        auto_acquisition=None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._retrieval = retrieval_service
         self._extractor_model = extractor_model
         self._index_builder = index_builder
+        self._auto_acquisition = auto_acquisition
 
     # ------------------------------------------------------------ 主入口
 
@@ -201,6 +209,13 @@ class DocumentNeedExecutor:
                 error_code=FulfillmentErrorCode.UNSUPPORTED_NEED,
             )
         sources = await self._eligible_sources(context, doc_need, entry)
+        if not sources and self._auto_acquisition is not None:
+            # 受控自动发现（V1.1 closure）：无 eligible source 时尝试自动获取
+            # 年度/半年度/季度报告；成功 → 重查（发现失败保持 SOURCE_NOT_FOUND，
+            # human fallback 兜底，不冒充来源）。
+            acquired = await self._try_auto_acquire(context, doc_need)
+            if acquired:
+                sources = await self._eligible_sources(context, doc_need, entry)
         if not sources:
             return self._attempt(
                 need,
@@ -334,6 +349,42 @@ class DocumentNeedExecutor:
             status=FulfillmentStatus.UNRESOLVED,
             error_code=FulfillmentErrorCode.EVIDENCE_NOT_EXTRACTED,
         )
+
+    # ------------------------------------------------------------ acquisition
+
+    async def _try_auto_acquire(
+        self,
+        context: FulfillmentContext,
+        doc_need: DocumentNeed,
+    ) -> bool:
+        """受控自动发现 + 落库（AnnouncementDiscoveryService；确定性、no-lookahead）。
+
+        任何失败（发现/下载/落库）→ False（不泄漏异常，保持 SOURCE_NOT_FOUND，
+        human fallback 兜底）。
+        """
+        try:
+            company = await self._load_company(context.company_id)
+        except Exception:  # noqa: BLE001
+            return False
+        if company is None:
+            return False
+        try:
+            result = await self._auto_acquisition.acquire_report(
+                company_id=str(context.company_id),
+                security_code=company.security_code,
+                source_type=doc_need.source_type.value,
+                period=doc_need.period,
+                as_of=context.analysis_as_of,
+            )
+        except Exception:  # noqa: BLE001 - 发现失败 → 保持 SOURCE_NOT_FOUND
+            return False
+        return result is not None
+
+    async def _load_company(self, company_id: UUID):
+        from app.db.models.company import CompanyModel
+
+        async with self._sessionmaker() as session:
+            return await session.get(CompanyModel, company_id)
 
     # ------------------------------------------------------------ queries
 

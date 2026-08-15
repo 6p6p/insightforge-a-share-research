@@ -47,7 +47,7 @@ from app.db.base import Base
 _SHA256_CHECK = "~ '^[0-9a-f]{64}$'"
 _EVIDENCE_TYPE_CHECK = "evidence_type IN ('fact','metric','event','statement','context')"
 _CONFIDENCE_CHECK = "extractor_confidence IN ('low','medium','high')"
-_ORIGIN_TYPE_CHECK = "origin_type IN ('document_chunk','macro_observation')"
+_ORIGIN_TYPE_CHECK = "origin_type IN ('document_chunk','macro_observation','user_supplied')"
 _ORIGIN_CONSISTENCY_CHECK = """
 (
   (origin_type = 'document_chunk' AND
@@ -64,6 +64,12 @@ _ORIGIN_CONSISTENCY_CHECK = """
      chunk_set_id IS NULL AND chunk_id IS NULL AND
      quote_start IS NULL AND quote_end IS NULL AND
      quote_text IS NULL AND quote_sha256 IS NULL)
+  OR
+  (origin_type = 'user_supplied' AND
+     source_id IS NOT NULL AND quote_text IS NOT NULL AND quote_sha256 IS NOT NULL AND
+     parsed_source_id IS NULL AND chunk_set_id IS NULL AND chunk_id IS NULL AND
+     quote_start IS NULL AND quote_end IS NULL AND
+     macro_observation_id IS NULL AND macro_snapshot_id IS NULL AND macro_series_id IS NULL)
 )
 """
 
@@ -144,7 +150,7 @@ class EvidenceCardModel(Base):
             name="ck_evidence_cards_locator_refs_array",
         ),
         CheckConstraint(
-            "jsonb_array_length(locator_refs) > 0",
+            "origin_type = 'user_supplied' OR jsonb_array_length(locator_refs) > 0",
             name="ck_evidence_cards_locator_refs_nonempty",
         ),
         UniqueConstraint(

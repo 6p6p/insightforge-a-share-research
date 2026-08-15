@@ -1,4 +1,4 @@
-"""Source provider registry endpoints (read-only)."""
+"""Source provider registry endpoints (read-only + URL 自动解析)."""
 
 from typing import Annotated
 
@@ -8,6 +8,8 @@ from app.api.dependencies import get_source_registry_service
 from app.domain.companies import ExchangeCode
 from app.domain.sources import AcquisitionMethod, SourceAuthorityTier, SourceCapability
 from app.schemas.source_provider import (
+    ResolveProviderRequest,
+    ResolveProviderResponse,
     SourceProviderListResponse,
     SourceProviderResponse,
 )
@@ -43,3 +45,27 @@ async def get_provider(
 ) -> SourceProviderResponse:
     provider = await service.get_provider(provider_key)
     return SourceProviderResponse.model_validate(provider)
+
+
+@router.post(
+    "/source-providers/resolve",
+    response_model=ResolveProviderResponse,
+    summary="URL 自动解析来源平台",
+)
+async def resolve_provider(
+    payload: ResolveProviderRequest,
+    service: Annotated[SourceRegistryService, Depends(get_source_registry_service)],
+) -> ResolveProviderResponse:
+    """URL → provider 自动解析（V1.1 closure）。
+
+    优先匹配该公司登记的官网域名（issuer_official），再匹配 provider
+    allowlist；都不匹配 → 422 SourceUrlNotAllowed（前端提示手动选择）。
+    """
+    resolved = await service.resolve_provider_for_url(payload.company_id, payload.url)
+    return ResolveProviderResponse(
+        provider_key=resolved.provider_key,
+        display_name=resolved.display_name,
+        authority_tier=resolved.authority_tier,
+        critical_claim_eligible=resolved.critical_claim_eligible,
+        matched_by=resolved.matched_by,
+    )

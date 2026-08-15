@@ -34,6 +34,18 @@ def _provider(**kwargs: object) -> SourceProviderDefinition:
     return definition
 
 
+def _special_provider(**kwargs: object) -> SourceProviderDefinition:
+    """不经过 validate_provider_definition 的特殊定义。
+
+    仅用于 allowed_domains 为空的 provider（域名由运行时 registry 动态决定，
+    不属于固定 allowlist）：
+    - issuer_official：域名来自 issuer_domains registry（公司官网域名）；
+    - user_supplied：用户转录来源，source_url 只是 provenance 文本且服务端
+      从不抓取（SSRF 面为零），不做域名 allowlist 校验。
+    """
+    return SourceProviderDefinition.model_validate(kwargs)
+
+
 DEFAULT_PROVIDERS: list[SourceProviderDefinition] = [
     _provider(
         provider_key="sse",
@@ -213,6 +225,66 @@ DEFAULT_PROVIDERS: list[SourceProviderDefinition] = [
         capabilities=[SourceCapability.NEWS_ARTICLE],
         acquisition_methods=[AcquisitionMethod.PUBLIC_HTML],
         exchange_scope=[],
+        critical_claim_eligible=False,
+    ),
+    # East Money 公告 API（V1.1 closure）：CNINFO WAF 不可用时的受控 Tier-3
+    # 后备（同 BSE 后备先例）。API 主机 np-anotice-stock.eastmoney.com /
+    # np-cnotice-stock.eastmoney.com ∈ eastmoney.com；PDF 主机 pdf.dfcfw.com
+    # ∈ dfcfw.com。只用于**自动发现**与文件下载，critical_claim_eligible=False
+    # （Tier-3 平台，不直接支撑关键主张）。
+    _provider(
+        provider_key="eastmoney",
+        display_name="东方财富（公告数据中心）",
+        provider_type=SourceProviderType.PROFESSIONAL_MEDIA,
+        authority_tier=SourceAuthorityTier.TIER_3,
+        homepage_url="https://www.eastmoney.com",
+        allowed_domains=["eastmoney.com", "dfcfw.com"],
+        capabilities=[
+            SourceCapability.COMPANY_ANNOUNCEMENT,
+            SourceCapability.DOCUMENT_DOWNLOAD,
+        ],
+        acquisition_methods=[
+            AcquisitionMethod.AUTOMATIC_DISCOVERY,
+            AcquisitionMethod.OFFICIAL_FILE_DOWNLOAD,
+        ],
+        exchange_scope=["SSE", "SZSE", "BSE"],
+        critical_claim_eligible=False,
+    ),
+    # 上市公司官网（issuer_official）：域名由 issuer_domains registry 动态
+    # 决定（公司官网域名，company_id 绑定 + 真实验证 URL），不属于固定
+    # allowlist → 特殊 seed。Tier-2（公司官方披露，但未经交易所/监管核验）。
+    _special_provider(
+        provider_key="issuer_official",
+        display_name="上市公司官方网站",
+        provider_type=SourceProviderType.ISSUER,
+        authority_tier=SourceAuthorityTier.TIER_2,
+        # 占位主页：本 provider 无单一 homepage，域名验证走 issuer_domains。
+        homepage_url="https://example.com",
+        allowed_domains=[],
+        capabilities=[
+            SourceCapability.ISSUER_IR,
+            SourceCapability.DOCUMENT_DOWNLOAD,
+        ],
+        acquisition_methods=[
+            AcquisitionMethod.OFFICIAL_WEB_PAGE,
+            AcquisitionMethod.OFFICIAL_FILE_DOWNLOAD,
+        ],
+        exchange_scope=["SSE", "SZSE", "BSE"],
+        critical_claim_eligible=True,
+    ),
+    # 用户转录（user_supplied）：用户从官方报告/官网人工转录的财务数值
+    # 证据来源（V1.1 closure）。Tier-4、critical_claim_eligible=False；
+    # source_url 只是 provenance 文本（服务端从不抓取，无 SSRF 面）。
+    _special_provider(
+        provider_key="user_supplied",
+        display_name="用户转录（官方报告）",
+        provider_type=SourceProviderType.GENERAL_WEB,
+        authority_tier=SourceAuthorityTier.TIER_4,
+        homepage_url="https://example.com",
+        allowed_domains=[],
+        capabilities=[],
+        acquisition_methods=[AcquisitionMethod.USER_SUPPLIED],
+        exchange_scope=["SSE", "SZSE", "BSE"],
         critical_claim_eligible=False,
     ),
 ]

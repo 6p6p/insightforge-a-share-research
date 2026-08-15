@@ -34,6 +34,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
+from app.domain.source_records import SourceDocumentType
 from app.evidence.errors import (
     EvidenceCardDraftError,
     EvidenceLocatorIntegrityError,
@@ -83,12 +84,16 @@ class EvidenceConfidence(StrEnum):
 
 class EvidenceOrigin(StrEnum):
     """EvidenceCard 的 origin 模型（stage 3C.3A）：**同一 evidence_card_id
-    namespace 下的双 origin，不拆表**。
+    namespace 下的多 origin，不拆表**。
 
     - DOCUMENT_CHUNK：经 DocumentChunk → ParsedSource → SourceRecord 链，
       带精确 quote（默认 / 既有 v1 行回填值）；
     - MACRO_OBSERVATION：经 MacroObservation → MacroDatasetSnapshot →
-      MacroSeries → SourceProvider → RawArtifact 链，不带 quote。
+      MacroSeries → SourceProvider → RawArtifact 链，不带 quote；
+    - USER_SUPPLIED：用户从官方报告转录（V1.1 final closure）——quote =
+      用户粘贴的原文引文（含数字 token，供确定性财务解析），source =
+      user_supplied 来源记录；**可信级别 Tier-4 / critical_claim_eligible
+      False，绝不伪装成官方自动提取**。
 
     **不是** Macro → fake DocumentChunk：macro Evidence 不经过
     DocumentChunk / ParsedSource / Chroma / quote resolver。
@@ -96,6 +101,7 @@ class EvidenceOrigin(StrEnum):
 
     DOCUMENT_CHUNK = "document_chunk"
     MACRO_OBSERVATION = "macro_observation"
+    USER_SUPPLIED = "user_supplied"
 
 
 def _sha256_hex(text: str) -> str:
@@ -508,6 +514,151 @@ def compute_macro_evidence_fingerprint(
         "authority_tier_snapshot": authority_tier_snapshot,
         "critical_claim_eligible_snapshot": critical_claim_eligible_snapshot,
         "locator_refs": locator_refs,
+        "extractor_name": extractor_name,
+        "extractor_version": extractor_version,
+        "extractor_model_id": extractor_model_id,
+        "extractor_confidence": extractor_confidence,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass(frozen=True)
+class UserSuppliedEvidenceDraft:
+    """USER_SUPPLIED Evidence 的语义输入（构造时校验，不可变；V1.1 closure）。
+
+    用户从官方报告 / 官网公告**人工转录**的 Evidence：
+    - company_id / research_question：当前研究上下文（调用方提供）；
+    - evidence_statement / evidence_type：用户陈述与类型；
+    - quote_text：用户粘贴的**原文引文**（trim 后非空；财务观察路径要求
+      引文包含精确数字 token，供确定性解析，见 FinancialMetricService）；
+    - source_title：来源名称（如“2023年年度报告”），用于创建 user_supplied
+      SourceRecord；
+    - source_url：官方来源 URL（可选；source_url 已允许 NULL）；
+    - source_published_at / reporting_period_end：来源发布/报告期（可选）。
+
+    **可信级别语义**：extractor 身份固定为 user_transcription v1、
+    confidence=low —— 用户转录未经任何自动提取校验；authority_tier_snapshot
+    由服务从 user_supplied provider（Tier-4）复制，critical_claim_eligible
+    = False。绝不伪装成官方自动提取。
+    """
+
+    company_id: UUID
+    research_question: str
+    evidence_statement: str
+    evidence_type: EvidenceType
+    quote_text: str
+    source_title: str
+    document_type: SourceDocumentType = SourceDocumentType.OTHER
+    source_url: str | None = None
+    source_published_at: datetime | None = None
+    reporting_period_end: date | None = None
+
+    def __post_init__(self) -> None:
+        question = self.research_question.strip()
+        if not question:
+            raise EvidenceCardDraftError("research_question 不能为空（trim 后）")
+        statement = self.evidence_statement.strip()
+        if not statement:
+            raise EvidenceCardDraftError("evidence_statement 不能为空（trim 后）")
+        quote = self.quote_text.strip()
+        if not quote:
+            raise EvidenceCardDraftError("quote_text 不能为空（trim 后）")
+        title = self.source_title.strip()
+        if not title:
+            raise EvidenceCardDraftError("source_title 不能为空（trim 后）")
+        if isinstance(self.company_id, bool) or not isinstance(self.company_id, UUID):
+            raise EvidenceCardDraftError("company_id 必须是 UUID")
+        if not isinstance(self.evidence_type, EvidenceType):
+            raise EvidenceCardDraftError("evidence_type 必须是 EvidenceType")
+        if not isinstance(self.document_type, SourceDocumentType):
+            raise EvidenceCardDraftError("document_type 必须是 SourceDocumentType")
+        url = self.source_url
+        if url is not None:
+            url = url.strip()
+            if not url:
+                url = None
+        object.__setattr__(self, "research_question", question)
+        object.__setattr__(self, "evidence_statement", statement)
+        object.__setattr__(self, "quote_text", quote)
+        object.__setattr__(self, "source_title", title)
+        object.__setattr__(self, "source_url", url)
+
+
+def build_user_supplied_locator(*, source_id: UUID, source_url: str | None) -> list[dict]:
+    """user_supplied EvidenceCard 的 deterministic structured locator。
+
+    locator_refs 契约：user_supplied origin 允许空数组，但这里保存结构化
+    provenance 定位器（类型 + source identity + 用户提供的官方 URL），
+    **不造 fake 文本 / 不经过 Chroma**。
+    """
+    return [
+        {
+            "type": "user_supplied",
+            "source_id": str(source_id),
+            "source_url": source_url,
+        }
+    ]
+
+
+def compute_user_supplied_evidence_fingerprint(
+    *,
+    evidence_schema_version: int,
+    origin_type: str,
+    company_id: UUID,
+    source_id: UUID,
+    research_question: str,
+    evidence_statement: str,
+    evidence_type: str,
+    quote_text: str,
+    quote_sha256: str,
+    locator_refs: list[dict],
+    provider_key: str,
+    authority_tier_snapshot: int,
+    critical_claim_eligible_snapshot: bool,
+    source_url: str | None,
+    source_published_at: datetime | None,
+    reporting_period_end: date | None,
+    extractor_name: str,
+    extractor_version: int,
+    extractor_model_id: str | None,
+    extractor_confidence: str,
+) -> str:
+    """USER_SUPPLIED Evidence 的确定性 SHA-256 指纹（sort_keys + 固定 separators）。
+
+    至少覆盖：evidence_schema_version、origin_type、company/source ids、
+    research_question/evidence_statement/evidence_type、quote_text（原文，
+    不 normalize）/quote_sha256/locator_refs、provider_key/
+    authority_tier_snapshot/critical_claim_eligible_snapshot、source_url/
+    source_published_at/reporting_period_end、extractor 身份。
+
+    **不得包含** evidence_id / created_at。同一完全相同 user_supplied
+    Evidence → 同一指纹 → replay 同一卡；引文 / 陈述 / URL 任一变化 →
+    新指纹 → 新卡，旧卡保留。
+    """
+    payload = {
+        "evidence_schema_version": evidence_schema_version,
+        "origin_type": origin_type,
+        "company_id": str(company_id),
+        "source_id": str(source_id),
+        "research_question": research_question,
+        "evidence_statement": evidence_statement,
+        "evidence_type": evidence_type,
+        "quote_text": quote_text,
+        "quote_sha256": quote_sha256,
+        "locator_refs": locator_refs,
+        "provider_key": provider_key,
+        "authority_tier_snapshot": authority_tier_snapshot,
+        "critical_claim_eligible_snapshot": critical_claim_eligible_snapshot,
+        "source_url": source_url,
+        "source_published_at": (
+            source_published_at.isoformat() if source_published_at is not None else None
+        ),
+        "reporting_period_end": (
+            reporting_period_end.isoformat() if reporting_period_end is not None else None
+        ),
         "extractor_name": extractor_name,
         "extractor_version": extractor_version,
         "extractor_model_id": extractor_model_id,

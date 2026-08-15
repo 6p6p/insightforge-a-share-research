@@ -246,6 +246,28 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 error_type=type(exc).__name__,
                 error_code=getattr(exc, "code", None),
             )
+        # V1.1 closure：Issuer Domain registry（issuer_official 受控来源的域名
+        # 依据；空表 → 导入 bundled snapshot；非空 → skip）。
+        try:
+            from app.services.issuer_domain_service import IssuerDomainService
+
+            result = await IssuerDomainService(sessionmaker).bootstrap()
+            logger.info(
+                "issuer_domain_bootstrap_completed",
+                snapshot_version=result.snapshot_version,
+                imported_domains=result.imported_domains,
+                imported_companies=result.imported_companies,
+                skipped=result.skipped,
+                replayed=result.replayed,
+                repair=result.repair,
+                error_code=result.error_code,
+            )
+        except Exception as exc:
+            logger.warning(
+                "issuer_domain_bootstrap_failed",
+                error_type=type(exc).__name__,
+                error_code=getattr(exc, "code", None),
+            )
     try:
         yield
     finally:

@@ -109,7 +109,8 @@ def build_planner_messages(request: ResearchPlannerRequest) -> list[dict]:
     """构造 planner 模型消息（system + 只含语义输入 user）。
 
     不发送内部 UUID（task_id 是结果归属，不进入 prompt）、不发送 fingerprint /
-    storage metadata / prompt history。company 只发语义身份。
+    storage metadata / prompt history。company 只发语义身份。用户选择的模块
+    约束（module_constraint）进入 prompt——planner 只在约束内生成计划。
     """
     company = request.company
     company_lines = "\n".join(
@@ -121,10 +122,19 @@ def build_planner_messages(request: ResearchPlannerRequest) -> list[dict]:
         )
         + (tuple(f"- alias: {alias}" for alias in company.aliases) if company.aliases else ())
     )
+    constraint = request.module_constraint
+    constraint_lines = (
+        "（用户指定的分析模块："
+        + "、".join(sorted(dict.fromkeys(constraint)))
+        + "。analysis_modules / research_scope / 各 need 只能落在这些模块内）"
+        if constraint
+        else "（未指定模块约束）"
+    )
     user = (
         f"研究问题：{request.research_question}\n"
         f"分析基准日：{request.analysis_as_of.isoformat()}\n"
         f"公司身份：\n{company_lines}\n"
+        f"{constraint_lines}\n"
         "请给出研究计划。"
     )
     return [

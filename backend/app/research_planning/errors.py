@@ -85,3 +85,15 @@ class ResearchPlannerMalformedOutput(ResearchPlanningError):
     code = "research_planner_malformed_output"
     http_status = 422
     message = "研究计划模型输出无法解析"
+
+
+class ResearchPlanScopeMismatch(ResearchPlanningError):
+    """planner 输出完全落在用户选择模块之外（确定性失败）。
+
+    `apply_selected_modules` 过滤后 analysis_modules / research_scope 为空 →
+    拒绝持久化（planner 未尊重用户选择的模块），由上层重新生成计划。
+    """
+
+    code = "research_plan_scope_mismatch"
+    http_status = 409
+    message = "研究计划与用户选择的模块不符，请重新生成"

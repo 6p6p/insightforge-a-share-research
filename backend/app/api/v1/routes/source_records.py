@@ -51,8 +51,8 @@ async def upload_source(
     provider_key: Annotated[str, Form()],
     document_type: Annotated[SourceDocumentType, Form()],
     title: Annotated[str, Form()],
-    source_url: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
+    source_url: Annotated[str | None, Form()] = None,
     published_at: Annotated[datetime | None, Form()] = None,
     reporting_period_end: Annotated[date | None, Form()] = None,
     external_document_id: Annotated[str | None, Form()] = None,
@@ -62,6 +62,8 @@ async def upload_source(
     V1.1 P0-2：入库成功后自动后台执行 source preparation
     （parse → chunk → index），用户在 waiting_manual 补资料后点「继续研究」
     时不再因 INDEX_NOT_READY 卡死。
+    V1.1 closure：`source_url` 可选——本地 PDF 无官方 URL 时允许不提供
+    （不伪造 URL）；提供时仍走 provider allowlist 校验。
     """
     result = await service.ingest_upload(
         company_id=company_id,

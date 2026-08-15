@@ -83,12 +83,25 @@ def create_research_fulfillment_service(
         VectorIndexService(sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma),
         parsing_service=parsing_service,
     )
+    # V1.1 closure：受控公告自动发现（East Money Tier-3 后备）——无 eligible
+    # source 时自动获取年度/半年度/季度报告并落库（构造 0 network）。
+    from app.services.announcement_discovery_service import AnnouncementDiscoveryService
+
+    auto_acquisition = AnnouncementDiscoveryService(
+        sessionmaker=sessionmaker,
+        raw_store=raw_store,
+    )
     document_executor = DocumentNeedExecutor(
         sessionmaker,
         retrieval,
         create_evidence_extraction_model(settings, usage_observer=usage_observer),
         index_builder=index_builder,
+        auto_acquisition=auto_acquisition,
     )
+    # V1.1 closure：宏观有界自动获取（World Bank；确定性 topic→indicator）。
+    from app.services.macro_auto_fetch_service import MacroAutoFetchService
+
+    macro_auto_fetch = MacroAutoFetchService(sessionmaker, raw_store)
     return ResearchFulfillmentService(
         sessionmaker,
         plan_service,
@@ -96,6 +109,6 @@ def create_research_fulfillment_service(
         preparation,
         document_executor=document_executor,
         financial_executor=FinancialNeedExecutor(sessionmaker),
-        macro_executor=MacroNeedExecutor(sessionmaker),
+        macro_executor=MacroNeedExecutor(sessionmaker, auto_fetch=macro_auto_fetch),
         valuation_executor=ValuationNeedExecutor(),
     )
