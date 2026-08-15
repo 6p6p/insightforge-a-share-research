@@ -165,7 +165,12 @@ async def _seed_research_task(
     questions: list[str] | None = None,
     end_date: date = _AS_OF,
 ) -> UUID:
-    """seed 一个带研究问题的 ResearchTask（create_plan 要求恰好 1 个问题）。"""
+    """seed 一个带研究问题的 ResearchTask（create_plan 要求恰好 1 个问题）。
+
+    V1.1 closure：modules 覆盖全部 6 个用户模块 + include_relative_valuation=True，
+    使 fake planner 的完整 payload（business_event/risk/financial/macro/valuation）
+    不被 `apply_selected_modules` 过滤（模块范围强制不改变测试语义）。
+    """
     task_id = uuid4()
     async with sessionmaker() as session:
         await ResearchTaskRepository(session).create(
@@ -174,8 +179,16 @@ async def _seed_research_task(
                 company_query="600519",
                 research_start_date=date(2023, 1, 1),
                 research_end_date=end_date,
-                modules=["company_profile"],
+                modules=[
+                    "company_profile",
+                    "business",
+                    "financial",
+                    "events",
+                    "macro",
+                    "risk",
+                ],
                 questions=questions if questions is not None else [_QUESTION],
+                include_relative_valuation=True,
                 require_plan_approval=False,
             )
         )
@@ -754,8 +767,8 @@ async def test_plan_tamper_breaks_route_verify(env) -> None:
         await router.verify_research_plan_route_integrity(plan.research_plan_id)
 
 
-async def test_route_issuer_ir_provider_unavailable(env) -> None:
-    """ISSUER_IR 当前 registry 无 provider → provider_keys 为空（不伪造可用性）。"""
+async def test_route_issuer_ir_provider_available(env) -> None:
+    """ISSUER_IR → issuer_official provider（V1.1 closure：registry 已登记）。"""
     fake = FakeResearchPlannerModel(
         _plan_payload(
             document_needs=[
@@ -773,7 +786,7 @@ async def test_route_issuer_ir_provider_unavailable(env) -> None:
     routed = await router.route_research_plan(plan.research_plan_id)
     entry = next(e for e in routed.route_payload["entries"] if e["need_code"] == "ir_material")
     assert entry["route_type"] == SourceRouteType.ISSUER_IR.value
-    assert entry["provider_keys"] == []
+    assert entry["provider_keys"] == ["issuer_official"]
 
 
 # ================================================================ Preparation
@@ -948,7 +961,8 @@ async def test_prepare_critical_ineligible_not_boosted(env, monkeypatch) -> None
     assert result.ready_for_analysis is True  # critical 元数据不 gate readiness
 
 
-async def test_prepare_provider_unavailable_not_ready(env, monkeypatch) -> None:
+async def test_prepare_issuer_ir_source_not_found_not_ready(env, monkeypatch) -> None:
+    """issuer_ir 有 provider（issuer_official）但无来源 → NOT_FOUND（V1.1 closure）。"""
     await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(
         _plan_payload(
@@ -965,7 +979,7 @@ async def test_prepare_provider_unavailable_not_ready(env, monkeypatch) -> None:
     result = await preparation.prepare_research(plan_result.research_plan_id)
     assert result.ready_for_analysis is False
     missing = {n.need_code: n.reason_code for n in result.missing_needs}
-    assert missing["ir_material"] == MissingReasonCode.PROVIDER_UNAVAILABLE
+    assert missing["ir_material"] == MissingReasonCode.NOT_FOUND
 
 
 async def test_prepare_requires_route_before_resolution(env, monkeypatch) -> None:

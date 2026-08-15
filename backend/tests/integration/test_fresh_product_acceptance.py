@@ -322,6 +322,7 @@ async def _count(sessionmaker, table: str) -> int:
 
 
 async def _create_task(sessionmaker, *, question: str = _QUESTION) -> object:
+    """创建 fresh 任务（V1.1 closure：modules 覆盖 payload 的 business_event/risk）。"""
     async with sessionmaker() as session:
         task_service = TaskService(ResearchTaskRepository(session))
         result = await task_service.create_task(
@@ -329,7 +330,12 @@ async def _create_task(sessionmaker, *, question: str = _QUESTION) -> object:
                 company_query="宁德时代",
                 research_start_date=_START,
                 research_end_date=_AS_OF,
-                modules=[ResearchModule.COMPANY_PROFILE],
+                modules=[
+                    ResearchModule.COMPANY_PROFILE,
+                    ResearchModule.BUSINESS,
+                    ResearchModule.EVENTS,
+                    ResearchModule.RISK,
+                ],
                 questions=[question],
                 include_relative_valuation=False,
                 require_plan_approval=False,

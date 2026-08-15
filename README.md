@@ -91,10 +91,27 @@ python -m app        # 跨平台入口（Windows 需 SelectorEventLoop，见 app
 首次启动时应用自动（幂等、离线、可观测）完成：
 
 1. **Source Registry bootstrap**：写入内置默认来源机构（sse / szse / bse /
-   cninfo / csrc / nbs / fred / world_bank / xinhuanet / cnstock / cs_com_cn）；
+   cninfo / csrc / nbs / fred / world_bank / xinhuanet / cnstock / cs_com_cn /
+   eastmoney / issuer_official / user_supplied）；
 2. **Company Master bootstrap**：companies 表为空时导入 bundled A 股公司主数据
    snapshot（**5500+ 家上市公司**，SSE/SZSE 官方来源 + BSE 记录降级，含全称 /
-   简称 / 曾用名别名），无需任何手动 seed。
+   简称 / 曾用名别名），无需任何手动 seed；
+3. **Issuer Domain bootstrap**：导入 bundled 上市公司官网域名 registry
+   （**5400+ 家公司官网**，SZSE 官方名录 + East Money F10 降级）——`issuer_official`
+   受控来源的域名校验依据（如 `https://www.catl.com` 自动解析为「公司官网」）。
+
+V1.1 Closure 的产品供给链（生产路径，无 seed / 无编造数字）：
+- **URL 自动解析来源**：`POST /api/v1/source-providers/resolve`——官网域名 →
+  `issuer_official`；交易所/平台 allowlist 域名 → 对应机构；
+- **上传 PDF 无需伪造链接**：`source_url` 可选（本地文件直接上传，后台自动
+  parse → chunk → index）；
+- **报告自动发现**：年度/半年度/季度报告在资料不足时经 East Money 公告 API
+  受控自动获取（Tier-3 后备，no-lookahead）；
+- **宏观数据自动获取**：World Bank 指标按确定性 topic 映射有界抓取；
+- **财务数值人工转录**：财务数据 tab 从官方报告转录（引文必须含数字原文，
+  Tier-4 证据卡 + 确定性校验），供 Scenario B 财务研究使用；
+- **上传体积**：nginx `client_max_body_size 100m`（后端 `source_max_file_size_bytes`
+  同为 100 MiB），大 PDF 不再被 413 拦截。
 
 此后「贵州茅台」「600519」「600519.SH」「SSE:600519」「宁德时代」
 「300750」「300750.SZ」「SZSE:300750」均可直接识别。

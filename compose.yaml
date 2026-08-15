@@ -62,7 +62,7 @@ services:
         condition: service_healthy
       chroma:
         condition: service_started
-    # fresh volume 首次启动自动迁移（空库 → 0047 head）；迁移幂等，重复启动安全。
+    # fresh volume 首次启动自动迁移（空库 → head）；迁移幂等，重复启动安全。
     command:
       - sh
       - -c
