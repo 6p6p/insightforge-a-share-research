@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -67,10 +67,21 @@ class CompanyMasterImportResult:
     content_sha256: str
     imported_companies: int
     imported_aliases: int
-    skipped: bool  # bootstrap：companies 表非空未执行
-    replayed: bool  # 同一 snapshot 已登记过（0 写）
+    skipped: bool  # bootstrap：company master 数据已存在，未执行
+    replayed: bool  # marker 存在且实际数据完整（0 写）
+    repair: bool = False  # marker 存在但实际数据缺失 → 一致性恢复（重新 import）
     error_code: str | None = None
     error_message: str | None = None
+
+
+def master_data_missing(company_count: int, alias_count: int) -> bool:
+    """一致性判定（纯函数，可单元测试）：marker 存在时，实际 Company Master
+    数据为**空表**即视为缺失——不允许 replay 掩盖数据丢失。
+
+    非空（即使 count 与 snapshot 不完全一致）→ 尊重现有数据（Case D），
+    不 repair、不重灌、不覆盖。
+    """
+    return company_count == 0 or alias_count == 0
 
 
 class CompanyMasterBootstrapService:
@@ -82,20 +93,30 @@ class CompanyMasterBootstrapService:
     # ------------------------------------------------------------- bootstrap
 
     async def bootstrap(self) -> CompanyMasterImportResult:
-        """启动幂等导入：companies 非空 → skip；空 → 导入 bundled snapshot。"""
+        """启动幂等导入：company master 数据存在（companies 与 aliases 均非空）
+        → skip；否则导入 bundled snapshot（marker 存在但数据缺失时自动恢复）。
+
+        判定依据是**实际数据状态**，不是 marker 历史——marker 存在 + 空表
+        的 inconsistent state 会走一致性恢复而非 replay（见 import_snapshot）。
+        """
         async with self._sessionmaker() as session:
-            count = (await session.execute(select(CompanyModel.company_id).limit(1))).first()
-            if count is not None:
-                return CompanyMasterImportResult(
-                    snapshot_version="",
-                    content_sha256="",
-                    imported_companies=0,
-                    imported_aliases=0,
-                    skipped=True,
-                    replayed=False,
-                    error_code="company_master_skipped_nonempty",
-                    error_message="companies table already populated; skip bootstrap",
-                )
+            company_count = int(
+                (await session.execute(select(func.count(CompanyModel.company_id)))).scalar_one()
+            )
+            alias_count = int(
+                (await session.execute(select(func.count(CompanyAliasModel.alias_id)))).scalar_one()
+            )
+        if not master_data_missing(company_count, alias_count):
+            return CompanyMasterImportResult(
+                snapshot_version="",
+                content_sha256="",
+                imported_companies=0,
+                imported_aliases=0,
+                skipped=True,
+                replayed=False,
+                error_code="company_master_skipped_nonempty",
+                error_message="company master data already populated; skip bootstrap",
+            )
         loaded = load_bundled_snapshot()
         return await self.import_snapshot(loaded, insert_only=True)
 
@@ -107,7 +128,18 @@ class CompanyMasterBootstrapService:
         *,
         insert_only: bool = True,
     ) -> CompanyMasterImportResult:
-        """导入一份 validated snapshot（幂等）。insert_only=False 为 refresh upsert。"""
+        """导入一份 validated snapshot（幂等）。insert_only=False 为 refresh upsert。
+
+        一致性规则（marker 与实际数据状态联合判定）：
+        - **Case A**：marker 不存在 + 数据缺失 → 首次导入 → 记录 marker；
+        - **Case B**：marker 存在 + **实际数据完整** → replay（0 写）；
+        - **Case C**：marker 存在 + 实际数据缺失（空表）→ **一致性恢复**：
+          重新执行安全 import（insert-only），恢复到 snapshot 对应 master，
+          marker 不重复（ON CONFLICT DO NOTHING），结果 repair=True；
+        - **Case D**：数据非空（即使 count 与 snapshot 不一致）→ 尊重现有数据：
+          marker 存在 → replay；bootstrap → skip。**不 DELETE、不覆盖**已有
+          CompanyIdentity；ON CONFLICT DO NOTHING / upsert 语义保持不变。
+        """
         snapshot = loaded.snapshot
         await self._ensure_providers()
         async with self._sessionmaker() as session:
@@ -119,16 +151,35 @@ class CompanyMasterBootstrapService:
                     )
                 )
             ).first()
-            if recorded is not None:
-                return CompanyMasterImportResult(
-                    snapshot_version=snapshot.snapshot_version,
-                    content_sha256=loaded.content_sha256,
-                    imported_companies=0,
-                    imported_aliases=0,
-                    skipped=False,
-                    replayed=True,
-                )
-            company_rows = self._company_rows(snapshot)
+            company_count = int(
+                (await session.execute(select(func.count(CompanyModel.company_id)))).scalar_one()
+            )
+            alias_count = int(
+                (await session.execute(select(func.count(CompanyAliasModel.alias_id)))).scalar_one()
+            )
+        data_missing = master_data_missing(company_count, alias_count)
+        if recorded is not None and not data_missing:
+            # Case B：marker 存在且实际数据完整 → replay（0 写）。
+            return CompanyMasterImportResult(
+                snapshot_version=snapshot.snapshot_version,
+                content_sha256=loaded.content_sha256,
+                imported_companies=0,
+                imported_aliases=0,
+                skipped=False,
+                replayed=True,
+            )
+        repair = recorded is not None and data_missing
+        if repair:
+            # Case C：marker 存在但实际数据缺失 → 一致性恢复（不掩盖数据丢失）。
+            logger.warning(
+                "company_master_bootstrap_repair_started",
+                snapshot_version=snapshot.snapshot_version,
+                content_sha256=loaded.content_sha256[:16],
+                company_count=company_count,
+                alias_count=alias_count,
+            )
+        company_rows = self._company_rows(snapshot)
+        async with self._sessionmaker() as session:
             for batch_start in range(0, len(company_rows), _BATCH_SIZE):
                 batch = company_rows[batch_start : batch_start + _BATCH_SIZE]
                 stmt = pg_insert(CompanyModel).values(batch)
@@ -190,6 +241,7 @@ class CompanyMasterBootstrapService:
             imported_aliases=len(alias_rows),
             skipped=False,
             replayed=False,
+            repair=repair,
         )
 
     async def import_bundled(self, *, insert_only: bool = True) -> CompanyMasterImportResult:

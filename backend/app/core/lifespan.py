@@ -237,6 +237,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 imported_aliases=result.imported_aliases,
                 skipped=result.skipped,
                 replayed=result.replayed,
+                repair=result.repair,
                 error_code=result.error_code,
             )
         except Exception as exc:

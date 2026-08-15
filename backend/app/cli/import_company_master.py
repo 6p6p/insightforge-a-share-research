@@ -80,7 +80,7 @@ async def _main() -> int:
         print(
             f"company master import: version={result.snapshot_version} "
             f"companies={result.imported_companies} aliases={result.imported_aliases} "
-            f"skipped={result.skipped} replayed={result.replayed}"
+            f"skipped={result.skipped} replayed={result.replayed} repair={result.repair}"
         )
         return 0
     finally:
