@@ -24,7 +24,6 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -42,11 +41,12 @@ from app.companies.master.snapshot import (
     load_bundled_snapshot,
 )
 from app.companies.normalization import normalize_company_text
+from app.core.logging import get_logger
 from app.db.models.company import CompanyModel
 from app.db.models.company_alias import CompanyAliasModel
 from app.db.models.company_master_snapshot import CompanyMasterSnapshotRow
 
-logger = logging.getLogger("app.company_master")
+logger = get_logger("app.company_master")
 
 _BATCH_SIZE = 1000
 _PROVIDER_BY_EXCHANGE = {"SSE": "sse", "SZSE": "szse", "BSE": "bse"}
