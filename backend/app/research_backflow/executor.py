@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.claims.macro_policy import resolve_availability
 from app.db.models.source_record import SourceRecordModel
 from app.evidence.contracts import EvidenceOrigin
+from app.evidence.errors import EvidenceError
 from app.evidence.extractor.contracts import EvidenceExtractionModel
 from app.evidence.extractor.service import EvidenceExtractionService
 from app.rag.retrieval.contracts import RetrievalQuery
@@ -192,7 +193,12 @@ class ResearchBackflowExecutor:
                 self._sessionmaker, self._extractor_model, recorder
             )
             for hit in hits:
-                await extractor.extract_from_hit(research_question, hit)
+                try:
+                    await extractor.extract_from_hit(research_question, hit)
+                except EvidenceError:
+                    # 单 chunk 抽取失败 → 跳过（不崩溃 backflow；全部失败 →
+                    # manual_required / evidence_not_extracted 语义不变）。
+                    continue
 
         created = list(recorder.created)
         replayed = list(recorder.existing)

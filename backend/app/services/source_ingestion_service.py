@@ -182,6 +182,44 @@ class SourceIngestionService:
             provider=provider,
         )
 
+    async def ingest_discovered_bytes(
+        self,
+        *,
+        company_id: UUID,
+        provider_key: str,
+        document_type: SourceDocumentType,
+        title: str,
+        source_url: str,
+        published_at: datetime | None,
+        reporting_period_end: date | None,
+        external_document_id: str | None,
+        pdf_bytes: bytes,
+    ) -> IngestionResult:
+        """自动发现落库（字节路径，V1.1 closure）：反爬握手下载的 PDF 直接入库。
+
+        与 ingest_discovered 同一语义（acquisition_method=automatic_discovery）；
+        字节已由调用方完成 allowlist 校验与 %PDF 校验，这里仍走 raw_store 的
+        PDF 头校验（双重防线）。
+        """
+        self._ensure_not_news_article(document_type)
+        provider = await self._load_company_and_provider(company_id, provider_key, source_url)
+        import io
+
+        stored = self._raw_store.put_pdf_stream(io.BytesIO(pdf_bytes))
+        return await self._persist(
+            company_id=company_id,
+            provider_key=provider_key,
+            document_type=document_type,
+            title=title,
+            source_url=source_url,
+            published_at=published_at,
+            reporting_period_end=reporting_period_end,
+            external_document_id=external_document_id,
+            stored=stored,
+            acquisition_method=AcquisitionMethod.AUTOMATIC_DISCOVERY.value,
+            provider=provider,
+        )
+
     # ----------------------------------------------------------------- queries
 
     async def get_source(self, source_id: UUID) -> SourceRecordResponse:

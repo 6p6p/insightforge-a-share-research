@@ -50,6 +50,9 @@ services:
       LLM_TIMEOUT_SECONDS: "60"
       LLM_MAX_RETRIES: "1"
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # BGE 模型已固化进镜像（HF_HOME=/home/appuser/.cache/huggingface），
+      # 运行时离线加载（V1.1 closure：不依赖 huggingface.co 连通性）。
+      HF_HUB_OFFLINE: "1"
     volumes:
       - raw_data:/app/data/raw
       - export_data:/app/data/exports

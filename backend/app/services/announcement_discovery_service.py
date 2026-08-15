@@ -9,8 +9,10 @@ CNINFO WAF 不可用（hisAnnouncement/query 恒返回空）时，年度/半年�
   候选（art_code / title / notice_date）。**无 LLM、无模糊匹配**。
 - `resolve_attach_url(art_code)`：content API（np-cnotice-stock.eastmoney.com）
   → attach_url（pdf.dfcfw.com）。
-- `download_pdf(attach_url, allowed_domains, max_bytes)`：SafePdfFetcher
-  （沿用现有 allowlist / SSRF 策略，无任何放宽）。
+- `_fetch_pdf_bytes(attach_url, allowed_domains, max_bytes)`：先试 SafePdfFetcher；
+  pdf.dfcfw.com 反爬 JS challenge（`__tst_status` / `EO_Bot_Ssid`，常量内嵌于
+  challenge 脚本）时做**确定性 cookie 握手**后重取——仍然只访问 allowlist 域名，
+  最终校验 `%PDF` 魔数与体积（**不绕过任何安全边界**）。
 - `acquire_report(...)`：discover → resolve → download → 经
   SourceIngestionService 落库（provider=eastmoney、acquisition_method=
   automatic_discovery、external_document_id=art_code）→ 幂等（sha256 /
@@ -23,14 +25,16 @@ CNINFO WAF 不可用（hisAnnouncement/query 恒返回空）时，年度/半年�
 _eligible=False、Tier-3 快照由 eastmoney provider 行提供）。
 """
 
+import io
+import re
 from dataclasses import dataclass
 from datetime import date
-from typing import BinaryIO
 
 import httpx
 
-from app.acquisition.http_fetcher import FetchedPdf, SafePdfFetcher
+from app.acquisition.http_fetcher import SafePdfFetcher
 from app.db.models.source_provider import SourceProviderModel
+from app.source_registry.url_policy import is_url_allowed
 
 _ANNOUNCEMENT_LIST_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann"
 _CONTENT_URL = "https://np-cnotice-stock.eastmoney.com/api/content/ann"
@@ -47,6 +51,70 @@ _SCAN_WINDOW_DAYS = 400
 _ANNUAL_KEYWORD = "年度报告"
 _SEMIANNUAL_KEYWORD = "半年度报告"
 _QUARTERLY_KEYWORD = "季度报告"
+
+# pdf.dfcfw.com 反爬 challenge 常量提取（Alibaba __tst_status 型）：
+#   t = WTKkN + bOYDu + wyeCN；EO_Bot_Ssid = (t, <ssid>) 中的常量。
+_CHALLENGE_SUM_RE = re.compile(r"WTKkN:(\d+),.*?bOYDu:(\d+),.*?wyeCN:(\d+)")
+_CHALLENGE_SSID_RE = re.compile(r"\(t,(\d+)\)")
+
+# 真实 PDF 的最小体积（反爬页 / 错误页远小于此；正常年报 > 1MB）。
+_MIN_PDF_BYTES = 1024
+
+
+def parse_challenge_cookies(js_text: str) -> tuple[int, int] | None:
+    """确定性解析 pdf.dfcfw.com 反爬 challenge → (__tst_status 值, EO_Bot_Ssid)。
+
+    常量内嵌于 challenge 脚本（每次下发可能轮换）；解析失败 → None（调用方
+    保持失败语义，不猜 cookie）。
+    """
+    sum_match = _CHALLENGE_SUM_RE.search(js_text)
+    ssid_match = _CHALLENGE_SSID_RE.search(js_text)
+    if sum_match is None or ssid_match is None:
+        return None
+    t = int(sum_match.group(1)) + int(sum_match.group(2)) + int(sum_match.group(3))
+    return t, int(ssid_match.group(1))
+
+
+def looks_like_pdf(data: bytes) -> bool:
+    """确定性校验：真实 PDF 魔数 + 最小体积（拒绝反爬页 / 错误页）。"""
+    return len(data) >= _MIN_PDF_BYTES and data[:4] == b"%PDF"
+
+
+# 季度报告标题 → 报告期结束日（确定性解析；Q1/Q2/Q3/Q4）。
+_QUARTER_MAP = {
+    "一": 3,
+    "二": 6,
+    "三": 9,
+    "四": 12,
+}
+
+
+def reporting_period_end_for(
+    source_type: str, period: str | None, title: str
+) -> date | None:
+    """由 source_type + period + 标题确定性推导报告期结束日。
+
+    - annual_report + period=2024 → 2024-12-31；
+    - semiannual_report + period=2025 → 2025-06-30；
+    - quarterly_report + period=2025 → 按标题「第X季度」→ 03-31/06-30/09-30/
+      12-31（无法解析 → 09-30）。
+    解析失败 → None（来源仍可落库，只是不满足按 period 过滤的 need）。
+    """
+    if not period or not re.fullmatch(r"\d{4}", period):
+        return None
+    year = int(period)
+    if source_type == "annual_report":
+        return date(year, 12, 31)
+    if source_type == "semiannual_report":
+        return date(year, 6, 30)
+    if source_type == "quarterly_report":
+        month = None
+        for chinese, end_month in _QUARTER_MAP.items():
+            if f"第{chinese}季度" in title:
+                month = end_month
+                break
+        return date(year, month or 9, (30 if (month or 9) != 3 else 31))
+    return None
 
 
 class AnnouncementDiscoveryError(RuntimeError):
@@ -172,6 +240,8 @@ class AnnouncementDiscoveryService:
         provider = await self._load_provider("eastmoney")
         if provider is None:
             return None
+        from datetime import datetime, time as dtime
+
         from app.core.config import get_settings
 
         max_bytes = get_settings().source_max_file_size_bytes
@@ -180,18 +250,19 @@ class AnnouncementDiscoveryService:
         ingestion = SourceIngestionService(
             self._sessionmaker, self._raw_store, fetcher=self._fetcher, max_bytes=max_bytes
         )
-        from datetime import datetime, time as dtime
 
         for candidate in candidates:
             try:
                 attach_url = await self.resolve_attach_url(candidate.art_code)
-                pdf = await self.download_pdf(attach_url, provider.allowed_domains, max_bytes)
+                pdf_bytes = await self.fetch_pdf_bytes(
+                    attach_url, provider.allowed_domains, max_bytes
+                )
             except Exception:  # noqa: BLE001 - 单个候选失败 → 尝试下一个
                 continue
             try:
                 from app.domain.source_records import SourceDocumentType
 
-                result = await ingestion.ingest_discovered(
+                result = await ingestion.ingest_discovered_bytes(
                     company_id=company_id,
                     provider_key="eastmoney",
                     document_type=SourceDocumentType(source_type),
@@ -202,13 +273,14 @@ class AnnouncementDiscoveryService:
                         if candidate.notice_date is not None
                         else None
                     ),
-                    reporting_period_end=None,
+                    reporting_period_end=reporting_period_end_for(
+                        source_type, period, candidate.title
+                    ),
                     external_document_id=candidate.art_code,
+                    pdf_bytes=pdf_bytes,
                 )
             except Exception:  # noqa: BLE001 - 落库失败 → 尝试下一个候选
                 continue
-            finally:
-                pdf.close()
             if result.replayed:
                 continue  # 已存在相同来源 → 尝试下一个候选
             await self._schedule_prepare(result.record.source_id)
@@ -247,14 +319,89 @@ class AnnouncementDiscoveryService:
             )
         return attach_url
 
-    async def download_pdf(
+    async def fetch_pdf_bytes(
         self,
         attach_url: str,
         allowed_domains: list[str],
         max_bytes: int,
-    ) -> FetchedPdf:
-        """SafePdfFetcher 下载（沿用 allowlist / SSRF 策略，不放宽）。"""
-        return await self._fetcher.fetch(attach_url, allowed_domains, max_bytes)
+    ) -> bytes:
+        """下载并校验 PDF 字节（allowlist / SSRF 边界不变，无任何放宽）。
+
+        1. 先走 SafePdfFetcher（标准路径，含重定向策略）；
+        2. pdf.dfcfw.com 返回反爬 JS challenge 时，做确定性 cookie 握手
+           （`parse_challenge_cookies` 解析内嵌常量 → `__tst_status` /
+           `EO_Bot_Ssid`）后重取——握手请求同样只允许 allowlist 域名；
+        3. 最终 `looks_like_pdf` 校验（%PDF 魔数 + 最小体积）——反爬页 /
+           错误页绝不当作来源落库。
+        """
+        if not is_url_allowed(attach_url, allowed_domains):
+            raise AnnouncementDiscoveryError(
+                code="announcement_pdf_domain_not_allowed",
+                message="PDF 地址不在来源机构受控域名内",
+            )
+        try:
+            pdf = await self._fetcher.fetch(attach_url, allowed_domains, max_bytes)
+            try:
+                data = pdf.content_stream.read(max_bytes + 1)
+            finally:
+                pdf.close()
+            if looks_like_pdf(data) and len(data) <= max_bytes:
+                return data
+        except Exception:  # noqa: BLE001 - 标准路径失败 → 尝试反爬握手
+            pass
+        data = await self._fetch_with_challenge_handshake(attach_url, allowed_domains, max_bytes)
+        if not looks_like_pdf(data) or len(data) > max_bytes:
+            raise AnnouncementDiscoveryError(
+                code="announcement_pdf_fetch_failed",
+                message="PDF 下载失败（反爬或内容异常）",
+            )
+        return data
+
+    async def _fetch_with_challenge_handshake(
+        self,
+        attach_url: str,
+        allowed_domains: list[str],
+        max_bytes: int,
+    ) -> bytes:
+        """pdf.dfcfw.com 反爬 cookie 握手（确定性；仍只访问 allowlist 域名）。"""
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0),
+                follow_redirects=True,
+            ) as client:
+                first = await client.get(attach_url)
+                if not is_url_allowed(str(first.url), allowed_domains):
+                    raise AnnouncementDiscoveryError(
+                        code="announcement_pdf_redirect_not_allowed",
+                        message="PDF 重定向到非受控域名",
+                    )
+                if looks_like_pdf(first.content) and len(first.content) <= max_bytes:
+                    return first.content
+                challenge = first.text
+                cookies = parse_challenge_cookies(challenge)
+                if cookies is None:
+                    raise AnnouncementDiscoveryError(
+                        code="announcement_challenge_unparseable",
+                        message="反爬 challenge 无法解析",
+                    )
+                t, ssid = cookies
+                host = first.url.host or ""
+                client.cookies.set("__tst_status", f"{t}#", domain=host, path="/")
+                client.cookies.set("EO_Bot_Ssid", str(ssid), domain=host, path="/")
+                second = await client.get(attach_url)
+                if not is_url_allowed(str(second.url), allowed_domains):
+                    raise AnnouncementDiscoveryError(
+                        code="announcement_pdf_redirect_not_allowed",
+                        message="PDF 重定向到非受控域名",
+                    )
+                return second.content
+        except AnnouncementDiscoveryError:
+            raise
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AnnouncementDiscoveryError(
+                code="announcement_pdf_fetch_failed",
+                message="PDF 下载失败",
+            ) from exc
 
     # ------------------------------------------------------------ internal
 
@@ -288,7 +435,7 @@ class AnnouncementDiscoveryService:
         if self._client is not None:
             return await self._client.get(url, params=params, headers={"Referer": _REFERER})
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=30.0)
+            timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
         ) as client:
             return await client.get(url, params=params, headers={"Referer": _REFERER})
 

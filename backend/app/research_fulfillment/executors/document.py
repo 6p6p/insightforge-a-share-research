@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.claims.macro_policy import resolve_availability
 from app.db.models.source_record import SourceRecordModel
 from app.evidence.contracts import EvidenceOrigin
+from app.evidence.errors import EvidenceError
 from app.evidence.extractor.contracts import EvidenceExtractionModel
 from app.evidence.extractor.service import EvidenceExtractionService
 from app.rag.retrieval.contracts import RetrievalQuery
@@ -57,8 +58,10 @@ from app.research_planning.router import SourceRouteEntry
 from app.services.chunking_service import ChunkingService
 from app.services.evidence_card_service import EvidenceCardService
 
-# 单次检索 top_k（固定，不随 LLM / 业务参数变化）。
-_TOP_K = 5
+# 单次检索 top_k（固定，不随 LLM / 业务参数变化）。整份年报 ~900 chunks，
+# top_k=5 易命中审计程序/募集资金等模板段落；20 保证覆盖经营情况讨论章节
+# （LLM 每 chunk 一次抽取调用，20 次/need 在编排预算内）。
+_TOP_K = 20
 
 
 def _source_available(source: SourceRecordModel, analysis_as_of: date) -> bool:
@@ -305,7 +308,14 @@ class DocumentNeedExecutor:
                 self._sessionmaker, self._extractor_model, recorder
             )
             for hit in hits:
-                await extractor.extract_from_hit(context.research_question, hit)
+                try:
+                    await extractor.extract_from_hit(context.research_question, hit)
+                except EvidenceError:
+                    # 单 chunk 抽取失败（quote 未命中 / 模型输出非法 / stale /
+                    # provider 异常）→ 跳过该 chunk，**不崩溃整个编排**：本 need
+                    # 若有其他 hit 成功仍 RESOLVED；全部失败 → EVIDENCE_NOT_EXTRACTED
+                    # （unresolved，human fallback 兜底）。证据完整性不变（不创建卡）。
+                    continue
         return recorder.created, recorder.existing, not_indexable
 
     async def _ensure_indexed(self, source_id: UUID) -> bool:

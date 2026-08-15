@@ -43,4 +43,27 @@ RUN mkdir -p /app/data/raw /app/data/exports && chown -R appuser:appuser /app/da
 
 USER appuser
 
+# BGE 模型预下载（V1.1 closure）：镜像内固化 immutable revision 的模型缓存
+# （BAAI/bge-small-zh-v1.5 @ 7999e1d3...），运行时以 HF_HUB_OFFLINE=1 离线加载，
+# 不再依赖 huggingface.co 连通性（CN 网络间歇不可达会导致检索/索引超时）。
+# 构建期下载失败 → 构建失败（重试构建即可），不产生半成品镜像。
+ENV HF_HOME=/home/appuser/.cache/huggingface
+RUN python - <<'PY'
+import time
+from sentence_transformers import SentenceTransformer
+last = None
+for attempt in range(5):
+    try:
+        SentenceTransformer(
+            "BAAI/bge-small-zh-v1.5",
+            revision="7999e1d3359715c523056ef9478215996d62a620",
+        )
+        break
+    except Exception as exc:  # noqa: BLE001 - 网络抖动重试
+        last = exc
+        time.sleep(10 * (attempt + 1))
+else:
+    raise SystemExit(f"BGE model download failed: {last!r}")
+PY
+
 EXPOSE 8000
