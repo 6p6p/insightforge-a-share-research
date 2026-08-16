@@ -52,6 +52,7 @@ from app.analysis.macro.contracts import (
 )
 from app.analysis.macro.errors import (
     MacroAnalysisClaimKindPolicy,
+    MacroAnalysisError,
     MacroAnalysisEvidenceCompanyMismatch,
     MacroAnalysisEvidenceCorrupted,
     MacroAnalysisEvidenceNotFound,
@@ -80,6 +81,7 @@ from app.claims.macro_contracts import (
     MacroTimeAlignment,
 )
 from app.claims.macro_policy import driver_evidence_eligible, resolve_availability
+from app.core.logging import get_logger
 from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
@@ -101,6 +103,7 @@ class MacroAnalysisService:
     def __init__(self, sessionmaker: async_sessionmaker, model: MacroAnalysisModel) -> None:
         self._sessionmaker = sessionmaker
         self._model = model
+        self._logger = get_logger("app.macro_analysis")
 
     async def analyze(self, request: MacroAnalysisRequest) -> MacroAnalysisResult:
         # 1. 防御性 request 校验（构造已校验，服务层再兜底）。
@@ -115,28 +118,43 @@ class MacroAnalysisService:
         driver_pack = build_macro_driver_pack(loaded.macro_driver_sources)
         company_pack = build_company_evidence_pack(loaded.company_evidence_sources)
 
-        # 4-5. 调模型（结构化决策；LLM 调用期间不持有 DB transaction）。
+        # 4-7. 调模型（结构化决策；LLM 调用期间不持有 DB transaction）。
+        # 有界重试：生产实测 DeepSeek 瞬时 5xx/超时/偶发输出违规（numeric
+        # literal）——重试 2 次仍失败才抛（0 写；orchestration 可 retry）。
         context = MacroAnalysisContext(
             research_question=request.research_question,
             analysis_as_of=request.analysis_as_of,
             strategy=MACRO_ANALYST_FOCUS,
         )
-        decision = await self._call_model(context, driver_pack, company_pack)
-
-        # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
-        if not decision.relevant:
-            return MacroAnalysisResult(
-                relevant=False,
-                claim_ids=[],
-                created_count=0,
-                replayed_count=0,
-                reason_code=decision.reason_code,
-            )
-
-        # 7. macro numeric-literal guard v1（任一 Claim 含数字/百分比/中文定量表达
-        #    → 整次失败 0 写；不自动删数字 / 不改写 / 不让第二个 LLM 修正）。
-        for candidate in decision.claims:
-            assert_macro_statement_has_no_numeric_literals(candidate.statement)
+        decision = None
+        for attempt in range(3):
+            try:
+                decision = await self._call_model(context, driver_pack, company_pack)
+                # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
+                if not decision.relevant:
+                    return MacroAnalysisResult(
+                        relevant=False,
+                        claim_ids=[],
+                        created_count=0,
+                        replayed_count=0,
+                        reason_code=decision.reason_code,
+                    )
+                # 7. macro numeric-literal guard v1（任一 Claim 含数字/百分比/
+                #    中文定量表达 → 整次失败 0 写；不自动删数字 / 不改写 /
+                #    不让第二个 LLM 修正——重试是让模型重新生成合规输出）。
+                for candidate in decision.claims:
+                    assert_macro_statement_has_no_numeric_literals(candidate.statement)
+                break
+            except MacroAnalysisError as exc:
+                if attempt < 2:
+                    self._logger.warning(
+                        "macro_analysis_model_retry",
+                        attempt=attempt,
+                        error_type=type(exc).__name__,
+                    )
+                    decision = None
+                    continue
+                raise
 
         # 8. M/E ref resolution（全部 candidate 先完成，任一失败 → 整次 0 写）。
         resolved = resolve_decision_refs(decision, driver_pack, company_pack)

@@ -47,9 +47,24 @@ _METRIC_PATTERNS: list[tuple[str, MetricCode, StatementScope]] = [
         MetricCode.NET_PROFIT_PARENT_EXCL_NONRECURRING,
         StatementScope.CONSOLIDATED,
     ),
+    (
+        # 宁德时代 2025 年报实测变体：跨行拆分为
+        # "归属于上市公司股东" / "的扣除非经常性损益 64,507,864 ..." /
+        # "的净利润"（无"后"字）。
+        "归属于上市公司股东的扣除非经常性损益的净利润",
+        MetricCode.NET_PROFIT_PARENT_EXCL_NONRECURRING,
+        StatementScope.CONSOLIDATED,
+    ),
     ("归属于上市公司股东的净利润", MetricCode.NET_PROFIT_PARENT, StatementScope.CONSOLIDATED),
     ("归属于母公司所有者的净利润", MetricCode.NET_PROFIT_PARENT, StatementScope.CONSOLIDATED),
     ("归属于母公司股东的净利润", MetricCode.NET_PROFIT_PARENT, StatementScope.CONSOLIDATED),
+    # 银行变体（P7 行业差异）：招商银行等上市银行用"归属于本行股东的净利润"。
+    ("归属于本行股东的净利润", MetricCode.NET_PROFIT_PARENT, StatementScope.CONSOLIDATED),
+    (
+        "扣除非经常性损益后归属于本行股东的净利润",
+        MetricCode.NET_PROFIT_PARENT_EXCL_NONRECURRING,
+        StatementScope.CONSOLIDATED,
+    ),
     (
         "经营活动产生的现金流量净额",
         MetricCode.OPERATING_CASH_FLOW_NET,
@@ -65,6 +80,9 @@ _METRIC_PATTERNS: list[tuple[str, MetricCode, StatementScope]] = [
     ("负债合计", MetricCode.TOTAL_LIABILITIES, StatementScope.CONSOLIDATED),
     ("归属于上市公司股东的权益", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),
     ("归属于母公司所有者权益合计", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),
+    # 银行变体（P7 行业差异）：招商银行等上市银行资产负债表用
+    # "归属于本行股东权益"（主要指标摘要行）。
+    ("归属于本行股东权益", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),
 ]
 
 # 排除行（程序性 / 摘要 / 附注）：命中任一子串 → 不提取。
@@ -182,6 +200,31 @@ def _fragment_metric(head_text: str, tail_text: str) -> tuple[MetricCode, Statem
     "的净利润" = "归属于上市公司股东的净利润"）。
     """
     combined = (head_text + tail_text).replace(" ", "").replace("\u3000", "")
+    for label, metric, scope in _METRIC_PATTERNS:
+        if label in combined:
+            return metric, scope
+    return None
+
+
+def _strip_number_tokens(text: str) -> str:
+    """去掉文本中的全部数字 token（保留文字片段；跨行重构用）。"""
+    result = text
+    for token in find_financial_number_tokens(text):
+        result = result.replace(token.text, "")
+    return result
+
+
+def _fragment_metric3(
+    head_text: str, middle_text: str, tail_text: str
+) -> tuple[MetricCode, StatementScope] | None:
+    """三段式标签碎片（头 + 中间带数字 + 尾）组合 → (metric, scope)。
+
+    宁德时代 2025 年报实测：科目行拆为
+    "归属于上市公司股东" / "的扣除非经常性损益 64,507,864 ..." /
+    "的净利润"——数字夹在中间碎片。合并 = head + 中间文字 + tail。
+    """
+    middle = _strip_number_tokens(middle_text)
+    combined = (head_text + middle + tail_text).replace(" ", "").replace("\u3000", "")
     for label, metric, scope in _METRIC_PATTERNS:
         if label in combined:
             return metric, scope
@@ -310,6 +353,31 @@ class StatementLineExtractionProvider:
                         )
                     )
                     continue
+            # 模式 3：三段式（head / 中间含数字 / tail 都是碎片块）——
+            # "归属于上市公司股东" / "的扣除非经常性损益 64,507,864 ..." /
+            # "的净利润"（宁德时代 2025 年报实测）。
+            if (
+                prev_text
+                and next_text
+                and _is_fragment_line(prev_text)
+                and _is_fragment_line(next_text)
+                and _non_percent_tokens(text)
+                and not text[:1].isdigit()
+            ):
+                matched = _fragment_metric3(prev_text, text, next_text)
+                if matched is not None:
+                    metric_code, scope = matched
+                    observations.extend(
+                        self._make_observations(
+                            request,
+                            block,
+                            text,
+                            page_units,
+                            metric_code,
+                            scope,
+                        )
+                    )
+                    continue
             matched = _match_metric(text)
             if matched is None:
                 continue
@@ -349,6 +417,14 @@ class StatementLineExtractionProvider:
             period_start, period_end = _period_for(
                 metric_code, request.reporting_period_end, prior=token_index == 1
             )
+            # P7 quote 唯一化：FinancialMetricService 要求 source_value 在
+            # quote_text 中是**唯一**数字 token（FinancialMetricValueAmbiguous
+            # 防混淆）。真实年报行中上期值可能与其它列重复（如同比列出现
+            # 相同数值）→ 将 quote 截到所选 token 结束（原文前缀，仍是逐字
+            # 切片），保证该值在 quote 内唯一；未重复则保留完整行文本。
+            quote_text = text
+            if text.count(token.text) > 1:
+                quote_text = text[: text.find(token.text) + len(token.text)]
             made.append(
                 ExtractedFinancialObservation(
                     company_id=request.company_id,
@@ -362,9 +438,9 @@ class StatementLineExtractionProvider:
                     value_end=token.end,
                     raw_unit=unit,
                     quote_block_id=block.block_id,
-                    quote_start=_text_start(block, text),
-                    quote_end=_text_start(block, text) + len(text),
-                    quote_text=text,
+                    quote_start=_text_start(block, quote_text),
+                    quote_end=_text_start(block, quote_text) + len(quote_text),
+                    quote_text=quote_text,
                 )
             )
         return made

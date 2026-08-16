@@ -126,10 +126,13 @@ class EvidenceProvenanceService:
         IN 查询，避免 N+1。
         """
         provenance: dict[UUID, bool] = {}
+        # document_chunk 与 financial_extraction 都沿 source_id → artifact →
+        # RawArtifact 链（financial_extraction 卡无 chunk，但 source 链相同）。
         doc_source_by_card: dict[UUID, UUID] = {
             cid: card.source_id
             for cid, card in cards.items()
-            if card.origin_type == EvidenceOrigin.DOCUMENT_CHUNK.value
+            if card.origin_type
+            in (EvidenceOrigin.DOCUMENT_CHUNK.value, EvidenceOrigin.FINANCIAL_EXTRACTION.value)
             and card.source_id is not None
         }
         macro_obs_by_card: dict[UUID, UUID] = {

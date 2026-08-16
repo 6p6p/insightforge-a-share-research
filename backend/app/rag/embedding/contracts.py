@@ -45,7 +45,12 @@ EmbeddingVector = list[float]
 
 @dataclass(frozen=True)
 class EmbeddingModelSpec:
-    """冻结的 embedding 模型配置（不可变，作为 provider 的 model_info）。"""
+    """冻结的 embedding 模型配置（不可变，作为 provider 的 model_info）。
+
+    local_path 非空时从本地目录加载（sentence-transformers 本地加载，
+    0 网络）——HF 不可达环境的离线部署用；model_id / revision 仍是
+    模型身份（provenance 语义），加载路径与身份分离。
+    """
 
     model_id: str
     dimension: int
@@ -53,6 +58,7 @@ class EmbeddingModelSpec:
     query_instruction: str | None
     max_input_tokens: int
     revision: str | None
+    local_path: str | None = None
 
 
 BGE_SMALL_ZH_V1_5 = EmbeddingModelSpec(

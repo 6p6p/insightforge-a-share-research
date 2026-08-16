@@ -63,6 +63,7 @@ from app.analysis.synthesis.errors import (
 )
 from app.analysis.synthesis.model import SynthesisAnalysisModel
 from app.analysis.synthesis.packs import SynthesisClaimPack, build_claim_pack
+from app.core.logging import get_logger
 from app.db.models.claim_synthesis_result import ClaimSynthesisResultModel
 from app.db.models.company import CompanyModel
 from app.repositories.claim_synthesis_result_repository import (
@@ -97,6 +98,7 @@ class SynthesisAnalysisService:
         self._sessionmaker = sessionmaker
         self._model = model
         # read-side integrity（Gate 0）委托 SynthesisService 公共 API，不复制规则。
+        self._logger = get_logger("app.synthesis.analysis")
         self._synthesis = SynthesisService(sessionmaker)
 
     async def analyze(self, request: SynthesisAnalysisRequest) -> SynthesisAnalysisResult:
@@ -121,12 +123,26 @@ class SynthesisAnalysisService:
             strategy=SYNTHESIS_ANALYST_FOCUS,
         )
 
-        # 5. 调模型（结构化综合；LLM 调用期间不持有 DB transaction）。
-        output = await self._call_model(context, claim_pack)
-
-        # 6. strict validation（no-cherry-picking 硬边界；LLM 调用结束后执行）。
+        # 5-6. 调模型（结构化综合）+ strict validation（no-cherry-picking
+        # 硬边界；LLM 调用期间不持有 DB transaction）。有界重试：生产实测
+        # DeepSeek 瞬时 5xx/超时/偶发违规输出——重试 2 次（校验违规与模型
+        # 不可用都重试）仍失败才抛（orchestration 可 retry；不写任何行）。
         claim_refs = list(claim_pack.alias_map().keys())
-        validate_synthesis_output(output, claim_refs)
+        output = None
+        for attempt in range(3):
+            try:
+                output = await self._call_model(context, claim_pack)
+                validate_synthesis_output(output, claim_refs)
+                break
+            except Exception as exc:  # noqa: BLE001 - 模型/校验瞬时失败
+                if attempt < 2:
+                    self._logger.warning(
+                        "synthesis_model_retry",
+                        attempt=attempt,
+                        error_type=type(exc).__name__,
+                    )
+                    continue
+                raise SynthesisAnalysisModelUnavailable() from exc
 
         # 7. 确定性指纹（result_schema_version + run fingerprint + analyst + output）。
         fingerprint = compute_synthesis_result_fingerprint(

@@ -353,6 +353,20 @@ def validate_synthesis_output(
     for conflict in output.conflicts:
         _check_known(conflict.claim_refs, "conflicts")
 
+    # theme 覆盖硬边界（与 ReportOutline derive 一致）：每条 input claim 必须
+    # 被某 theme 分组或被 duplicates 吸收——否则 outline 无法为它分配 section，
+    # 在 synthesis 阶段即失败（有界重试重新生成），而不是 stage5 才暴露。
+    covered: set[str] = set()
+    for theme in output.themes:
+        covered.update(theme.claim_refs)
+    for duplicate in output.duplicates:
+        covered.update(duplicate.claim_refs)
+    uncovered = [ref for ref in claim_refs if ref not in covered]
+    if uncovered:
+        raise SynthesisAnalysisNoCherryPicking(
+            f"themes/duplicates 未覆盖 {len(uncovered)} 条 input claim: {uncovered}"
+        )
+
 
 def compute_synthesis_result_fingerprint(
     *,

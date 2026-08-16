@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # P3：Company Website/IR Discovery 开关（默认开启 = AUTO 模式；公司官网
     # 有界爬取 issuer_ir_material，失败安全降级 exhausted）。
     ir_discovery_enabled: bool = True
+    # Embedding 本地模型目录（离线部署；空 → 走 HuggingFace 在线加载）。
+    # 设置后 BGEProvider 从本地目录加载（0 网络），model_id/revision 身份不变。
+    embedding_local_model_path: str | None = None
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 1
     deepseek_api_key: SecretStr | None = None

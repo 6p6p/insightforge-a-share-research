@@ -78,7 +78,18 @@ def create_research_fulfillment_service(
         ssl=settings.chroma_ssl,
         timeout_seconds=settings.chroma_timeout_seconds,
     )
-    embedding = BGEProvider()
+    # 离线部署：embedding_local_model_path 非空 → 本地模型加载（HF 不可达
+    # 环境）；为空走默认在线路径。model_id/revision 身份不变。
+    from dataclasses import replace
+
+    from app.rag.embedding.contracts import BGE_SMALL_ZH_V1_5
+
+    embedding_spec = (
+        replace(BGE_SMALL_ZH_V1_5, local_path=settings.embedding_local_model_path)
+        if settings.embedding_local_model_path
+        else BGE_SMALL_ZH_V1_5
+    )
+    embedding = BGEProvider(embedding_spec)
     retrieval = RetrievalService(
         sessionmaker=sessionmaker, embedding_provider=embedding, chroma=chroma
     )

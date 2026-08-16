@@ -104,6 +104,8 @@ class ResearchOrchestrationExecutionManager:
                 "research_orchestration_task_failed",
                 orchestration_id=str(orchestration_id),
                 error_type=type(exc).__name__,
+                error=str(exc)[:400],
+                exc_info=True,
             )
 
     def _on_task_done(self, task: asyncio.Task) -> None:

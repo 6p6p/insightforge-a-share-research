@@ -54,6 +54,7 @@ from app.analysis.financial.errors import (
     FinancialAnalysisCalculationCorrupted,
     FinancialAnalysisCalculationNotFound,
     FinancialAnalysisClaimKindPolicy,
+    FinancialAnalysisError,
     FinancialAnalysisEvidenceCompanyMismatch,
     FinancialAnalysisInputError,
     FinancialAnalysisMalformedOutput,
@@ -71,6 +72,7 @@ from app.claims.financial_contracts import (
     FinancialClaimDraft,
     FinancialClaimImportance,
 )
+from app.core.logging import get_logger
 from app.db.models.evidence_card import EvidenceCardModel
 from app.financial.calculations.errors import FinancialCalculationError
 from app.financial.calculations.service import FinancialCalculationService
@@ -87,6 +89,7 @@ class FinancialAnalysisService:
     def __init__(self, sessionmaker: async_sessionmaker, model: FinancialAnalysisModel) -> None:
         self._sessionmaker = sessionmaker
         self._model = model
+        self._logger = get_logger("app.financial_analysis")
 
     async def analyze(self, request: FinancialAnalysisRequest) -> FinancialAnalysisResult:
         # 1. 防御性 request 校验（构造已校验，服务层再兜底）。
@@ -101,27 +104,42 @@ class FinancialAnalysisService:
         calculation_pack = build_calculation_pack(calculation_sources)
         evidence_pack = build_evidence_pack_allowing_empty(evidence_sources)
 
-        # 4-5. 调模型（结构化决策；LLM 调用期间不持有 DB transaction）。
+        # 4-7. 调模型（结构化决策；LLM 调用期间不持有 DB transaction）。
+        # 有界重试：生产实测 DeepSeek 瞬时 5xx/超时/偶发输出违规（numeric
+        # literal）——重试 2 次仍失败才抛（0 写；orchestration 可 retry）。
         context = FinancialAnalysisContext(
             research_question=request.research_question,
             strategy=FINANCIAL_ANALYST_FOCUS,
         )
-        decision = await self._call_model(context, calculation_pack, evidence_pack)
-
-        # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
-        if not decision.relevant:
-            return FinancialAnalysisResult(
-                relevant=False,
-                claim_ids=[],
-                created_count=0,
-                replayed_count=0,
-                reason_code=decision.reason_code,
-            )
-
-        # 7. numeric-literal guard（任一 Claim 含数字/百分比 → 整次失败 0 写；
-        #    不自动删数字 / 不改写 / 不让第二个 LLM 修正）。
-        for candidate in decision.claims:
-            assert_statement_has_no_numeric_literals(candidate.statement)
+        decision = None
+        for attempt in range(3):
+            try:
+                decision = await self._call_model(context, calculation_pack, evidence_pack)
+                # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
+                if not decision.relevant:
+                    return FinancialAnalysisResult(
+                        relevant=False,
+                        claim_ids=[],
+                        created_count=0,
+                        replayed_count=0,
+                        reason_code=decision.reason_code,
+                    )
+                # 7. numeric-literal guard（任一 Claim 含数字/百分比 → 整次失败
+                #    0 写；不自动删数字 / 不改写 / 不让第二个 LLM 修正——重试
+                #    是让模型重新生成合规输出）。
+                for candidate in decision.claims:
+                    assert_statement_has_no_numeric_literals(candidate.statement)
+                break
+            except FinancialAnalysisError as exc:
+                if attempt < 2:
+                    self._logger.warning(
+                        "financial_analysis_model_retry",
+                        attempt=attempt,
+                        error_type=type(exc).__name__,
+                    )
+                    decision = None
+                    continue
+                raise
 
         # 8. C/E ref resolution（全部 candidate 先完成，任一失败 → 整次 0 写）。
         resolved = resolve_decision_refs(decision, calculation_pack, evidence_pack)

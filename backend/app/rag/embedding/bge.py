@@ -41,17 +41,25 @@ class BGEProvider:
         """首次调用时加载 SentenceTransformer（lazy，不阻塞 startup）。"""
         if self._model is not None:
             return
-        if self._spec.revision is None:
-            raise EmbeddingModelNotConfigured(
-                f"model {self._spec.model_id} has no immutable revision configured; "
-                "real BGE acceptance pending (automated tests use FakeEmbeddingProvider)"
-            )
         with self._lock:
             if self._model is None:
                 # 延迟 import：模型不得在 app import/startup 时自动加载。
                 from sentence_transformers import SentenceTransformer
 
-                self._model = SentenceTransformer(self._spec.model_id, revision=self._spec.revision)
+                if self._spec.local_path:
+                    # 本地离线模型（HF 不可达环境的受控部署）：路径已 pinned，
+                    # 不再走网络检查。
+                    self._model = SentenceTransformer(self._spec.local_path)
+                else:
+                    if self._spec.revision is None:
+                        raise EmbeddingModelNotConfigured(
+                            f"model {self._spec.model_id} has no immutable revision "
+                            "configured; real BGE acceptance pending (automated tests "
+                            "use FakeEmbeddingProvider)"
+                        )
+                    self._model = SentenceTransformer(
+                        self._spec.model_id, revision=self._spec.revision
+                    )
                 self._tokenizer = self._model.tokenizer
 
     def token_count(self, text: str) -> int:

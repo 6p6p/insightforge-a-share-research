@@ -84,6 +84,7 @@ from app.audit.packs import (
 from app.audit.repository import ReportAuditRepository
 from app.audit.route import derive_route
 from app.audit.validate import validate_decision
+from app.core.logging import get_logger
 from app.db.models.claim import ClaimModel
 from app.db.models.claim_evidence_link import ClaimEvidenceLinkModel
 from app.db.models.evidence_card import EvidenceCardModel
@@ -121,6 +122,7 @@ class ReportAuditService:
         self._sessionmaker = sessionmaker
         self._model = model
         self._check_service = check_service
+        self._logger = get_logger("app.report_audit")
 
     async def create_or_get_audit(self, request: ReportAuditRequest) -> ReportAuditResult:
         """对 verified Report + verified CheckResult 执行 Evidence-bound 审计；
@@ -168,7 +170,32 @@ class ReportAuditService:
             return self._result(existing, replayed=True)
 
         # 6. 关闭 session → 调模型（structured output）。
-        decision = await self._call_model(pack)
+        # 有界重试：生产实测 DeepSeek 瞬时 5xx/超时——重试 2 次仍失败才
+        # 抛 ModelUnavailable（orchestration 可 retry；不写任何行）。
+        decision = None
+        for attempt in range(3):
+            try:
+                decision = await self._call_model(pack)
+                break
+            except (ReportAuditModelUnavailable, ReportAuditMalformedOutput) as exc:
+                if attempt < 2:
+                    self._logger.warning(
+                        "report_audit_model_retry",
+                        attempt=attempt,
+                        error_type=type(exc).__name__,
+                    )
+                    continue
+                raise
+            except ReportAuditError as exc:  # noqa: BLE001 - 校验违规（绑定/数字规则）
+                # 有界重试：生产实测模型偶发违反硬性校验，重试显著提高通过率。
+                if attempt < 2:
+                    self._logger.warning(
+                        "report_audit_validation_retry",
+                        attempt=attempt,
+                        reason=str(exc)[:200],
+                    )
+                    continue
+                raise
 
         # 7. hard validation → 解析为真实 ID → 按 spec R 排序确定 ordinal。
         resolved = validate_decision(pack, decision)

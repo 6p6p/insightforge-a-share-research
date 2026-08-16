@@ -205,12 +205,15 @@ class DraftSectionService:
 
         # 7. 关闭 session → 调模型（structured output）。
         # V1.1 closure（writer v4）：hard provenance validation 违规 → 带违规
-        # 摘要**有界重试一次**（生产实测 writer 对绑定/数字规则偶发违反，重试
-        # 显著提高通过率；仍违规才拒绝——0 写，不自动改写）。
-        decision = await self._call_model(pack)
+        # 摘要**有界重试两次**（生产实测 writer 对绑定/数字规则偶发违反，带
+        # correction hint 重试显著提高通过率；仍违规才拒绝——0 写，不自动
+        # 改写）。
+        decision = None
         correction_hint: str | None = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
+                if decision is None:
+                    decision = await self._call_model(pack, correction_hint=correction_hint)
                 # 8. hard provenance validation → 解析为 persisted payload。
                 validate_decision(
                     pack=pack,
@@ -220,12 +223,25 @@ class DraftSectionService:
                 correction_hint = None
                 break
             except DraftSectionError as exc:
-                if attempt == 0:
+                if attempt < 2:
                     correction_hint = str(exc)
                     logger.warning("draft_section_validation_retry", reason=correction_hint)
-                    decision = await self._call_model(pack, correction_hint=correction_hint)
+                    decision = None
                     continue
                 raise
+            except Exception as exc:  # noqa: BLE001 - 模型瞬时不可用/网络错误
+                # 有界重试（生产实测 DeepSeek 瞬时 5xx/超时；重试显著提高
+                # 真实运行通过率）；仍失败 → DraftSectionModelUnavailable
+                # （orchestration 可 retry，不写任何行）。
+                if attempt < 2:
+                    logger.warning(
+                        "draft_section_model_retry",
+                        attempt=attempt,
+                        error_type=type(exc).__name__,
+                    )
+                    decision = None
+                    continue
+                raise DraftSectionModelUnavailable() from exc
         payload = resolve_decision(pack, decision)
 
         # 9. 草稿不可变指纹（writer_input_fingerprint + normalized payload）。
