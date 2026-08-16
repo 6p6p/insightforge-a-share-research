@@ -154,7 +154,8 @@ def reporting_period_end_for(source_type: str, period: str | None, title: str) -
     if source_type == "quarterly_report":
         month = None
         for chinese, end_month in _QUARTER_MAP.items():
-            if f"第{chinese}季度" in title:
+            # 兼容 "第X季度" 与 "X季度"（无"第"字，如 "2026年一季度报告"）。
+            if f"第{chinese}季度" in title or f"{chinese}季度" in title:
                 month = end_month
                 break
         return date(year, month or 9, (30 if (month or 9) != 3 else 31))

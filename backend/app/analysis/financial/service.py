@@ -28,6 +28,9 @@
 不计算任何财务指标、不修改公式结果、不做宏观因果 / 估值。
 """
 
+from dataclasses import replace
+from uuid import UUID
+
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -64,7 +67,10 @@ from app.analysis.financial.packs import (
     build_evidence_pack_allowing_empty,
     resolve_decision_refs,
 )
-from app.claims.financial_contracts import FinancialClaimDraft
+from app.claims.financial_contracts import (
+    FinancialClaimDraft,
+    FinancialClaimImportance,
+)
 from app.db.models.evidence_card import EvidenceCardModel
 from app.financial.calculations.errors import FinancialCalculationError
 from app.financial.calculations.service import FinancialCalculationService
@@ -119,6 +125,15 @@ class FinancialAnalysisService:
 
         # 8. C/E ref resolution（全部 candidate 先完成，任一失败 → 整次 0 写）。
         resolved = resolve_decision_refs(decision, calculation_pack, evidence_pack)
+
+        # 8.5 确定性 importance 降级（Final Autonomous Research）：critical
+        #     claim 的 supports Calculation 的 source Evidence 与 additional
+        #    supports 全部 non-eligible（如 Tier-3 自动获取来源）→ 降级 normal
+        #    （诚实反映来源 tier，不因来源级别让研究失败；绝不提升 authority）。
+        if any(claim.importance == FinancialClaimImportance.CRITICAL for claim in resolved):
+            calc_ids = {calc_id for claim in resolved for calc_id in claim.supports_calculations}
+            eligible_by_calc = await self._load_calculation_eligibility(request, calc_ids)
+            resolved = self._downgrade_importance(resolved, eligible_by_calc, evidence_sources)
 
         # 9. 构造全部 FinancialClaimDraft(v3) + claim_kind policy。
         drafts = self._build_drafts(request, resolved)
@@ -252,6 +267,70 @@ class FinancialAnalysisService:
                 )
             )
         return drafts
+
+    async def _load_calculation_eligibility(
+        self, request: FinancialAnalysisRequest, calc_ids: set
+    ) -> dict[UUID, bool]:
+        """calc_id -> 其 source Evidence 是否含 critical_claim_eligible。
+
+        加载 calc inputs → Observations → source evidence cards 的 eligible
+        快照（与 FinancialClaimService 的 critical policy 同一语义）。
+        """
+        if not calc_ids:
+            return {}
+        from app.repositories.financial_calculation_input_repository import (
+            FinancialCalculationInputRepository,
+        )
+        from app.repositories.financial_metric_observation_repository import (
+            FinancialMetricObservationRepository,
+        )
+
+        async with self._sessionmaker() as session:
+            input_repo = FinancialCalculationInputRepository(session)
+            obs_repo = FinancialMetricObservationRepository(session)
+            evidence_by_calc: dict[UUID, set[UUID]] = {}
+            all_cards: set[UUID] = set()
+            for calc_id in calc_ids:
+                rows = await input_repo.get_by_calculation_id(calc_id)
+                per_calc: set[UUID] = set()
+                for row in rows:
+                    obs = await obs_repo.get_by_id(row.metric_observation_id)
+                    if obs is not None and obs.company_id == request.company_id:
+                        per_calc.add(obs.source_evidence_card_id)
+                evidence_by_calc[calc_id] = per_calc
+                all_cards |= per_calc
+            eligible: set[UUID] = set()
+            if all_cards:
+                result = await session.execute(
+                    select(EvidenceCardModel.evidence_card_id).where(
+                        EvidenceCardModel.evidence_card_id.in_(all_cards),
+                        EvidenceCardModel.critical_claim_eligible_snapshot.is_(True),
+                    )
+                )
+                eligible = {row for row in result.scalars().all()}
+        return {calc_id: bool(evidence_by_calc[calc_id] & eligible) for calc_id in calc_ids}
+
+    def _downgrade_importance(
+        self,
+        resolved: list[ResolvedFinancialClaim],
+        eligible_by_calc: dict[UUID, bool],
+        evidence_sources: list[EvidencePackSource],
+    ) -> list[ResolvedFinancialClaim]:
+        """critical 无 eligible 证据 → 确定性降级 normal（不提升、不失败）。"""
+        eligible_additional = {
+            source.evidence_card_id for source in evidence_sources if source.critical_claim_eligible
+        }
+        downgraded: list[ResolvedFinancialClaim] = []
+        for claim in resolved:
+            if claim.importance == FinancialClaimImportance.CRITICAL:
+                calc_eligible = any(
+                    eligible_by_calc.get(calc_id, False) for calc_id in claim.supports_calculations
+                )
+                add_eligible = bool(eligible_additional & set(claim.additional_supports))
+                if not calc_eligible and not add_eligible:
+                    claim = replace(claim, importance=FinancialClaimImportance.NORMAL)
+            downgraded.append(claim)
+        return downgraded
 
     @staticmethod
     def _check_kind_policy(drafts: list[FinancialClaimDraft]) -> None:

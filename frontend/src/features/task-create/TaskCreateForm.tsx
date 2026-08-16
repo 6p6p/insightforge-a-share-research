@@ -9,7 +9,7 @@ V1.1 产品冻结：一次研究任务 = 一个核心研究问题；研究方案
    「创建失败」**，任务已创建；提供「重新启动研究」与「查看任务」。
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import {
   Alert,
@@ -23,7 +23,7 @@ import {
   Switch,
   Typography,
 } from 'antd';
-import type { Dayjs } from 'dayjs';
+import dayjs, { type Dayjs } from 'dayjs';
 
 import { createOrchestration } from '../../api/orchestrations';
 import { createTask } from '../../api/tasks';
@@ -41,6 +41,10 @@ const MODULE_OPTIONS: { value: ResearchModule; label: string }[] = [
   { value: 'risk', label: '风险' },
 ];
 
+/** AUTO 模式默认值：全部研究模块 + 默认分析窗口（近 3 年至今）。 */
+const DEFAULT_MODULES = MODULE_OPTIONS.map((option) => option.value);
+const DEFAULT_DATES: [Dayjs, Dayjs] = [dayjs().subtract(3, 'year'), dayjs()];
+
 interface FormValues {
   company_query: string;
   research_dates: [Dayjs, Dayjs];
@@ -57,6 +61,8 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
   const [autoStart, setAutoStart] = useState(true);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
+  // 防连发：同一时刻只允许一次提交（Enter 键 / 双击 / 重渲染均不重复创建任务）。
+  const submittingRef = useRef(false);
 
   const createMutation = useMutation({
     mutationFn: async (values: FormValues) => {
@@ -89,13 +95,21 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
 
   /** 两阶段提交：先创建任务，再按 autoStart 尝试自动启动研究。 */
   const submit = async (values: FormValues): Promise<void> => {
-    setStartError(null);
-    const task = await createMutation.mutateAsync(values);
-    setTaskId(task.task_id);
-    if (autoStart) {
-      startMutation.mutate(task.task_id);
-    } else {
-      onCreated(task.task_id);
+    if (submittingRef.current) {
+      return;
+    }
+    submittingRef.current = true;
+    try {
+      setStartError(null);
+      const task = await createMutation.mutateAsync(values);
+      setTaskId(task.task_id);
+      if (autoStart) {
+        startMutation.mutate(task.task_id);
+      } else {
+        onCreated(task.task_id);
+      }
+    } finally {
+      submittingRef.current = false;
     }
   };
 
@@ -121,6 +135,7 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
         layout="vertical"
         onFinish={(values) => void submit(values)}
         requiredMark
+        initialValues={{ modules: DEFAULT_MODULES, research_dates: DEFAULT_DATES }}
       >
         <Form.Item
           name="company_query"
@@ -152,11 +167,11 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
 
         <Form.Item
           name="questions"
-          label="核心研究问题"
-          tooltip="请填写本次研究希望回答的核心问题"
-          rules={[{ required: true, message: '请填写本次研究希望回答的核心问题' }]}
+          label="核心研究问题（可选）"
+          tooltip="可选。不填时系统将根据公司、模块与日期自动生成默认研究意图"
+          rules={[]}
         >
-          <Input placeholder="例如：宁德时代近三年的盈利能力和增长驱动发生了什么变化？" maxLength={500} />
+          <Input placeholder="可选：例如宁德时代近三年的盈利能力和增长驱动发生了什么变化？" maxLength={500} />
         </Form.Item>
 
         <Form.Item label="自动研究">

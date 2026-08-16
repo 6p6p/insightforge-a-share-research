@@ -275,11 +275,10 @@ class SynthesisService:
         """
         card_ids = {card_id for claim in verified for card_id in claim.evidence_card_ids}
         cards = await self._load_evidence_cards(session, card_ids)
-        source_ids = {
-            card.source_id
-            for card in cards.values()
-            if card.origin_type == _ORIGIN_DOCUMENT_CHUNK and card.source_id is not None
-        }
+        # 含 document_chunk / user_supplied / financial_extraction 等所有
+        # 绑定 SourceRecord 的 origin（F1：financial_extraction 卡 source 缺失
+        # 会导致 availability 无法解析 → 误判 TemporalEvidenceInsufficient）。
+        source_ids = {card.source_id for card in cards.values() if card.source_id is not None}
         snapshot_ids = {
             card.macro_snapshot_id
             for card in cards.values()

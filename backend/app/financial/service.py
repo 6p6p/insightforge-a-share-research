@@ -80,14 +80,19 @@ from app.repositories.financial_metric_observation_repository import (
 
 _ORIGIN_DOCUMENT_CHUNK = "document_chunk"
 _ORIGIN_USER_SUPPLIED = "user_supplied"
+_ORIGIN_FINANCIAL_EXTRACTION = "financial_extraction"
 _EVIDENCE_TYPE_METRIC = "metric"
 
 # 财务观察允许的 EvidenceCard origin：
 # - document_chunk：自动提取的文档证据（quote = 程序切片原文）；
 # - user_supplied：用户转录的官方报告证据（quote = 用户粘贴的原文引文，
 #   含精确数字 token，供 _resolve_source_value 确定性解析；Tier-4 来源，
-#   critical_claim_eligible=False，见 UserSuppliedEvidenceService）。
-_ALLOWED_FINANCIAL_ORIGINS = frozenset((_ORIGIN_DOCUMENT_CHUNK, _ORIGIN_USER_SUPPLIED))
+#   critical_claim_eligible=False，见 UserSuppliedEvidenceService）；
+# - financial_extraction：自动财务提取（deterministic，0 LLM）——quote =
+#   ParsedSourceBlock 逐字切片（含精确数字 token），tier 继承原始报告来源。
+_ALLOWED_FINANCIAL_ORIGINS = frozenset(
+    (_ORIGIN_DOCUMENT_CHUNK, _ORIGIN_USER_SUPPLIED, _ORIGIN_FINANCIAL_EXTRACTION)
+)
 
 # 只允许 consolidated 口径的母公司指标（结构化口径语义政策）。
 # net_profit_parent / net_profit_parent_excl_nonrecurring / equity_parent

@@ -38,6 +38,8 @@ _KNOWN_PRODUCTION_LLM_FILES = frozenset(
         "app/audit/adapters.py",
         "app/revision/adapters.py",
         "app/research_planning/planner.py",
+        "app/research_planning/intent.py",
+        "app/services/source_discovery/search_model.py",
     }
 )
 
@@ -65,6 +67,8 @@ def test_instrumented_components_match_audited_set() -> None:
         "audit",
         "revision_writer",
         "research_planner",
+        "intent_enhancement",
+        "search_discovery",
     )
 
 

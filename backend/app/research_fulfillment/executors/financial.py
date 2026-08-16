@@ -22,6 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.db.models.financial_metric_observation import FinancialMetricObservationModel
+from app.db.models.parsed_source import ParsedSourceModel
+from app.db.models.source_record import SourceRecordModel
 from app.financial.calculations.contracts import (
     CalculationCode,
     FinancialCalculationDraft,
@@ -31,6 +33,12 @@ from app.financial.calculations.contracts import (
 )
 from app.financial.calculations.errors import FinancialCalculationError
 from app.financial.calculations.service import FinancialCalculationService
+from app.financial.extraction.contracts import (
+    FinancialExtractionProvider,
+    FinancialExtractionRequest,
+)
+from app.financial.extraction.ingestion import FinancialExtractionIngestionService
+from app.financial.extraction.service import FinancialExtractionService
 from app.research_fulfillment.contracts import (
     FulfillmentAttempt,
     FulfillmentErrorCode,
@@ -54,10 +62,26 @@ class _FinancialError(Exception):
 
 
 class FinancialNeedExecutor:
-    """financial need 自动补证据：Observation → create_calculation → 重跑。"""
+    """financial need 自动补证据：Observation → create_calculation → 重跑。
 
-    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+    F1（Final Autonomous Research）：注入 `extraction`（FinancialExtraction-
+    IngestionService）后，缺失底层 Observation 时先尝试**自动财务提取**——
+    从公司 eligible 年报的 parsed blocks 确定性提取指标（0 LLM）→ 证据卡 +
+    observation 落库 → 重查；提取失败保持 MISSING_UNDERLYING_OBSERVATION
+    （human fallback，绝不编造数字）。
+    """
+
+    def __init__(
+        self,
+        sessionmaker: async_sessionmaker,
+        extraction: FinancialExtractionIngestionService | None = None,
+        extraction_service: FinancialExtractionService | None = None,
+        provider: FinancialExtractionProvider | None = None,
+    ) -> None:
         self._sessionmaker = sessionmaker
+        self._extraction = extraction
+        self._extraction_service = extraction_service
+        self._provider = provider
 
     # ------------------------------------------------------------ 主入口
 
@@ -106,18 +130,34 @@ class FinancialNeedExecutor:
             inputs = self._resolve_inputs(code, fin_need, by_metric)
         except _FinancialError as exc:
             if exc.kind == _FinancialError.MISSING_OBSERVATION:
+                # F1：底层 observation 缺失 → 先尝试自动财务提取（年报 parsed
+                # blocks → 指标 → 证据卡 + observation）；成功 → 重查重试一次。
+                if self._extraction is not None:
+                    await self._try_auto_extract(context)
+                    by_metric = await self._load_observations_by_metric(context.company_id)
+                    try:
+                        inputs = self._resolve_inputs(code, fin_need, by_metric)
+                    except _FinancialError:
+                        return self._attempt(
+                            need,
+                            entry,
+                            FulfillmentStatus.UNRESOLVED,
+                            error_code=FulfillmentErrorCode.MISSING_UNDERLYING_OBSERVATION,
+                        )
+                else:
+                    return self._attempt(
+                        need,
+                        entry,
+                        FulfillmentStatus.UNRESOLVED,
+                        error_code=FulfillmentErrorCode.MISSING_UNDERLYING_OBSERVATION,
+                    )
+            else:
                 return self._attempt(
                     need,
                     entry,
                     FulfillmentStatus.UNRESOLVED,
-                    error_code=FulfillmentErrorCode.MISSING_UNDERLYING_OBSERVATION,
+                    error_code=FulfillmentErrorCode.OBSERVATION_INSUFFICIENT,
                 )
-            return self._attempt(
-                need,
-                entry,
-                FulfillmentStatus.UNRESOLVED,
-                error_code=FulfillmentErrorCode.OBSERVATION_INSUFFICIENT,
-            )
 
         draft = FinancialCalculationDraft(
             company_id=context.company_id,
@@ -187,6 +227,8 @@ class FinancialNeedExecutor:
             year=baseline_year,
             period_kind=current.period_kind,
             statement_scope=current.statement_scope,
+            # 同期间长度优先（2026H1 对 2025H1，而非 2025 全年）
+            same_period_end=(current.period_end.month, current.period_end.day),
         )
         if baseline is None:
             raise _FinancialError(_FinancialError.MISSING_OBSERVATION)
@@ -202,6 +244,7 @@ class FinancialNeedExecutor:
         year: int | None,
         period_kind: str | None = None,
         statement_scope: str | None = None,
+        same_period_end: tuple[int, int] | None = None,
     ) -> FinancialMetricObservationModel | None:
         """确定性挑选：year 必配（不满足 → None）；period_kind / scope 软约束。
 
@@ -223,7 +266,89 @@ class FinancialNeedExecutor:
             same_scope = [obs for obs in pool if obs.statement_scope == statement_scope]
             if same_scope:
                 pool = same_scope
+        if same_period_end is not None:
+            month, day = same_period_end
+            same_end = [
+                obs for obs in pool if (obs.period_end.month, obs.period_end.day) == (month, day)
+            ]
+            if same_end:
+                pool = same_end
         return pool[-1]
+
+    # ------------------------------------------------------------ F1 自动提取
+
+    async def _try_auto_extract(self, context) -> None:
+        """从公司 eligible 年报自动提取财务指标（0 LLM；失败静默 → 原语义）。
+
+        - 只处理已 parse 的 annual_report source（no-lookahead 由 preparation
+          的 eligibility 语义承担——使用 analysis_as_of 之前的报告）；
+        - 每条 source：provider.extract → provenance 校验 → 证据卡 +
+          observation 落库（全部幂等）；单条失败不阻塞其它。
+        """
+        if self._extraction_service is None or self._provider is None:
+            return
+        sources = await self._eligible_annual_reports(context)
+        for source in sources:
+            parsed = await self._parsed_source(source.source_id)
+            if parsed is None or source.reporting_period_end is None:
+                continue
+            try:
+                request = FinancialExtractionRequest(
+                    company_id=context.company_id,
+                    parsed_source_id=parsed.parsed_source_id,
+                    reporting_period_end=source.reporting_period_end,
+                )
+                result = await self._extraction_service.extract(request)
+            except Exception:  # noqa: BLE001 - 单条 source 提取失败 → 下一个
+                continue
+            if result.accepted_count == 0:
+                continue
+            try:
+                await self._extraction.ingest(
+                    research_question=context.research_question,
+                    source_id=source.source_id,
+                    extraction=result,
+                )
+            except Exception:  # noqa: BLE001 - 落库失败不阻塞
+                continue
+
+    async def _eligible_annual_reports(self, context) -> list[SourceRecordModel]:
+        """公司 eligible 年报（document_type=annual_report；no-lookahead）。"""
+        from app.claims.macro_policy import resolve_availability
+        from app.evidence.contracts import EvidenceOrigin
+
+        stmt = select(SourceRecordModel).where(
+            SourceRecordModel.company_id == context.company_id,
+            SourceRecordModel.document_type.in_(
+                ("annual_report", "semiannual_report", "quarterly_report")
+            ),
+        )
+        async with self._sessionmaker() as session:
+            rows = await session.execute(stmt)
+            sources = list(rows.scalars().all())
+        eligible = []
+        for source in sources:
+            availability = resolve_availability(
+                origin_type=EvidenceOrigin.DOCUMENT_CHUNK.value,
+                snapshot_fetched_at=None,
+                source_published_at=source.published_at,
+                source_acquired_at=source.acquired_at,
+            )
+            if availability is not None and availability.date() <= context.analysis_as_of:
+                eligible.append(source)
+        return eligible
+
+    async def _parsed_source(self, source_id: UUID) -> ParsedSourceModel | None:
+        async with self._sessionmaker() as session:
+            return (
+                (
+                    await session.execute(
+                        select(ParsedSourceModel).where(ParsedSourceModel.source_id == source_id)
+                    )
+                )
+                .scalars()
+                .first()
+            )
 
     # ------------------------------------------------------------ 数据
 

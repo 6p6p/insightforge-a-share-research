@@ -57,6 +57,8 @@ from app.research_planning.preparation import MissingResearchNeed
 from app.research_planning.router import SourceRouteEntry
 from app.services.chunking_service import ChunkingService
 from app.services.evidence_card_service import EvidenceCardService
+from app.services.source_discovery.contracts import SourceDiscoveryRequest
+from app.services.source_discovery.service import SourceDiscoveryService
 
 # 单次检索 top_k（固定，不随 LLM / 业务参数变化）。整份年报 ~900 chunks，
 # top_k=5 易命中审计程序/募集资金等模板段落；20 保证覆盖经营情况讨论章节
@@ -156,12 +158,16 @@ class DocumentNeedExecutor:
         extractor_model: EvidenceExtractionModel,
         index_builder: IndexBuilder | None = None,
         auto_acquisition=None,
+        discovery: SourceDiscoveryService | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._retrieval = retrieval_service
         self._extractor_model = extractor_model
         self._index_builder = index_builder
+        # P1：统一 Source Discovery Layer（优先）；legacy auto_acquisition 保留
+        # 向后兼容（未注入 discovery 时回退）。
         self._auto_acquisition = auto_acquisition
+        self._discovery = discovery
 
     # ------------------------------------------------------------ 主入口
 
@@ -212,11 +218,12 @@ class DocumentNeedExecutor:
                 error_code=FulfillmentErrorCode.UNSUPPORTED_NEED,
             )
         sources = await self._eligible_sources(context, doc_need, entry)
-        if not sources and self._auto_acquisition is not None:
-            # 受控自动发现（V1.1 closure）：无 eligible source 时尝试自动获取
-            # 年度/半年度/季度报告；成功 → 重查（发现失败保持 SOURCE_NOT_FOUND，
-            # human fallback 兜底，不冒充来源）。
-            acquired = await self._try_auto_acquire(context, doc_need)
+        if not sources and self._can_discover():
+            # P1 Source Discovery Layer：无 eligible source 时先自动发现
+            # （announcement / search / news 按 provider 链），成功 → 重查；
+            # 全部 provider exhausted → 保持 SOURCE_NOT_FOUND（human fallback
+            # 兜底，不冒充来源）。
+            acquired = await self._try_discover(context, doc_need)
             if acquired:
                 sources = await self._eligible_sources(context, doc_need, entry)
         if not sources:
@@ -233,10 +240,10 @@ class DocumentNeedExecutor:
             sources,
             build_query=lambda source: self._document_query(context, doc_need, source),
         )
-        if not_indexable and not created and not existing and self._auto_acquisition is not None:
+        if not_indexable and not created and not existing and self._can_discover():
             # 现有来源全部不可索引（如扫描件 parse 失败）→ 获取替代来源后重试
             # （V1.1 closure：不因一条坏来源卡死整条 need）。
-            acquired = await self._try_auto_acquire(context, doc_need)
+            acquired = await self._try_discover(context, doc_need)
             if acquired:
                 sources = await self._eligible_sources(context, doc_need, entry)
                 more_created, more_existing, _ = await self._fulfill_sources(
@@ -270,6 +277,12 @@ class DocumentNeedExecutor:
                 error_code=FulfillmentErrorCode.UNSUPPORTED_NEED,
             )
         sources = await self._eligible_event_sources(context, entry)
+        if not sources and self._can_discover():
+            # P1：事件 need 先走统一发现层（news provider 为 P4 扩展点；
+            # 未启用 → exhausted → 保持 SOURCE_NOT_FOUND）。
+            acquired = await self._try_discover_event(context, ev_need)
+            if acquired:
+                sources = await self._eligible_event_sources(context, entry)
         if not sources:
             return self._attempt(
                 need,
@@ -377,12 +390,16 @@ class DocumentNeedExecutor:
 
     # ------------------------------------------------------------ acquisition
 
-    async def _try_auto_acquire(
+    def _can_discover(self) -> bool:
+        """是否具备自动发现能力（统一层优先，legacy auto_acquisition 回退）。"""
+        return self._discovery is not None or self._auto_acquisition is not None
+
+    async def _try_discover(
         self,
         context: FulfillmentContext,
         doc_need: DocumentNeed,
     ) -> bool:
-        """受控自动发现 + 落库（AnnouncementDiscoveryService；确定性、no-lookahead）。
+        """受控自动发现 + 落库（P1 Source Discovery Layer；确定性、no-lookahead）。
 
         任何失败（发现/下载/落库）→ False（不泄漏异常，保持 SOURCE_NOT_FOUND，
         human fallback 兜底）。
@@ -393,6 +410,22 @@ class DocumentNeedExecutor:
             return False
         if company is None:
             return False
+        if self._discovery is not None:
+            try:
+                outcome = await self._discovery.discover(
+                    SourceDiscoveryRequest(
+                        company_id=context.company_id,
+                        security_code=company.security_code,
+                        need_kind="document",
+                        source_type=doc_need.source_type.value,
+                        period=doc_need.period,
+                        as_of=context.analysis_as_of,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - 发现失败 → 保持 SOURCE_NOT_FOUND
+                return False
+            return outcome.acquired
+        # legacy 回退（AnnouncementDiscoveryService）。
         try:
             result = await self._auto_acquisition.acquire_report(
                 company_id=str(context.company_id),
@@ -404,6 +437,36 @@ class DocumentNeedExecutor:
         except Exception:  # noqa: BLE001 - 发现失败 → 保持 SOURCE_NOT_FOUND
             return False
         return result is not None
+
+    async def _try_discover_event(
+        self,
+        context: FulfillmentContext,
+        ev_need: EventNeed,
+    ) -> bool:
+        """事件 need 的统一发现（P1：news provider 为扩展点；未启用 → False）。"""
+        if self._discovery is None:
+            return False
+        try:
+            company = await self._load_company(context.company_id)
+        except Exception:  # noqa: BLE001
+            return False
+        if company is None:
+            return False
+        try:
+            outcome = await self._discovery.discover(
+                SourceDiscoveryRequest(
+                    company_id=context.company_id,
+                    security_code=company.security_code,
+                    need_kind="event",
+                    source_type="news_article",
+                    as_of=context.analysis_as_of,
+                    research_question=context.research_question,
+                    topic=ev_need.topic,
+                )
+            )
+        except Exception:  # noqa: BLE001 - 发现失败 → 保持 SOURCE_NOT_FOUND
+            return False
+        return outcome.acquired
 
     async def _load_company(self, company_id: UUID):
         from app.db.models.company import CompanyModel

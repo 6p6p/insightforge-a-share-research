@@ -59,13 +59,13 @@ import { needCodeLabel } from '../../utils/needCode';
 
 const { Text } = Typography;
 
-/** 阶段 → 产品语义（不暴露后端枚举）。 */
+/** 阶段 → 产品语义（不暴露后端枚举；Final AUTO 模式研究进度）。 */
 const PHASE_LABELS: Record<OrchestrationPhase, string> = {
-  planning: '正在规划研究',
-  routing: '正在规划分析路线',
+  planning: '正在解析公司并规划研究',
+  routing: '正在规划资料获取路线',
   preparing: '正在准备资料',
-  fulfilling: '正在补齐资料',
-  stage4: '正在分析',
+  fulfilling: '正在获取资料并提取财务数据',
+  stage4: '正在智能分析',
   stage5: '正在生成报告',
   research_backflow: '正在补充研究',
   waiting_manual: '等待补充资料',

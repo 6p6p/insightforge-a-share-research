@@ -86,12 +86,14 @@ _SYSTEM_RULES = """你是 InsightForge 的研究计划制定器。任务：为�
    quarterly_report / company_announcement / issuer_ir_material / prospectus /
    news_article / macro_dataset / other。
 9. financial_needs 只声明财务**派生计算**（calculation_code 只允许：
-   absolute_change_cny / yoy_growth_rate / qoq_growth_rate / gross_margin /
-   operating_margin / net_margin_parent / debt_to_assets_ratio）。growth 类
-   （absolute_change / yoy / qoq）必须同时指定目标 metric_code（revenue /
-   operating_cost / operating_profit / profit_before_tax / net_profit /
-   net_profit_parent / net_profit_parent_excl_nonrecurring /
-   operating_cash_flow_net / total_assets / total_liabilities / equity_parent）；
+   absolute_change_cny / yoy_growth_rate / gross_margin /
+   operating_margin / net_margin_parent / debt_to_assets_ratio；
+   **qoq_growth_rate 禁止**——当前数据模型只提供期间累计观测，
+   不支持单季拆分环比）。growth 类（absolute_change / yoy）必须同时指定
+   目标 metric_code（revenue / operating_cost / operating_profit /
+   profit_before_tax / net_profit / net_profit_parent /
+   net_profit_parent_excl_nonrecurring / operating_cash_flow_net /
+   total_assets / total_liabilities / equity_parent）；
    margin / ratio 类（gross_margin / operating_margin / net_margin_parent /
    debt_to_assets_ratio）不需要 metric_code。不输出 observation ID / metric ID。
 10. valuation_needs.metric_code 只允许：pe_ttm / pb_mrq / ps_ttm；

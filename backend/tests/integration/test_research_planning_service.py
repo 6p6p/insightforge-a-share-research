@@ -47,6 +47,7 @@ from app.research_planning.errors import (
     ResearchPlannerMalformedOutput,
     ResearchPlanRouteIntegrityError,
 )
+from app.research_planning.intent import DefaultResearchIntentGenerator
 from app.research_planning.preparation import (
     MissingReasonCode,
     ResearchPreparationService,
@@ -304,6 +305,63 @@ async def test_concurrent_create_single_row(env) -> None:
     # 并发无 Python 锁：多个 generate 可能发生，但 ON CONFLICT 保证 DB 最终 1 行。
     async with env["sessionmaker"]() as session:
         assert await ResearchPlanRepository(session).count() == 1
+
+
+# ---------------------------------------------------------------- P0: Company Only Research Flow
+
+
+async def test_create_plan_without_question_uses_intent_generator(env) -> None:
+    """无 research_question → DefaultResearchIntentGenerator 派生（template）。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = ResearchPlanningService(
+        env["sessionmaker"],
+        fake,
+        CompanyIdentityService(env["sessionmaker"]),
+        intent_generator=DefaultResearchIntentGenerator(),
+    )
+    task_id = await _seed_research_task(env["sessionmaker"], questions=[])
+    result = await service.create_plan(task_id)
+    assert result.replayed is False
+    assert len(fake.calls) == 1
+    request = fake.calls[0]
+    # template：公司语义身份 + 用户模块顺序 + 日期窗口（seed：600519 公司，
+    # modules=company_profile/business/financial/events/macro/risk）。
+    expected = (
+        "请研究公司600519（600519）在2023-01-01至2026-08-10期间的基本面情况，"
+        "包括：公司概况与主营业务、主营业务与竞争格局、财务表现与增长驱动、"
+        "重大事件及其影响、所处宏观环境、主要风险因素。"
+    )
+    assert request.research_question == expected
+    # 生成的 question 冻结进 snapshot → verify 通过（0 次额外 LLM）。
+    await service.verify_research_plan_integrity(result.research_plan_id)
+    assert len(fake.calls) == 1
+
+
+async def test_intent_generated_plan_replays_with_zero_extra_llm(env) -> None:
+    """无 question 的确定性 template → 同输入 replay 同一行（fingerprint 兼容）。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = ResearchPlanningService(
+        env["sessionmaker"],
+        fake,
+        CompanyIdentityService(env["sessionmaker"]),
+        intent_generator=DefaultResearchIntentGenerator(),
+    )
+    task_id = await _seed_research_task(env["sessionmaker"], questions=[])
+    first = await service.create_plan(task_id)
+    second = await service.create_plan(task_id)
+    assert second.replayed is True
+    assert second.research_plan_id == first.research_plan_id
+    assert second.planner_input_fingerprint == first.planner_input_fingerprint
+    assert len(fake.calls) == 1  # replay 命中 → 0 次额外 LLM
+
+
+async def test_missing_question_without_generator_raises(env) -> None:
+    """未注入 intent generator（测试构造 / 历史语义）→ MissingResearchQuestion 保留。"""
+    fake = FakeResearchPlannerModel(_plan_payload())
+    service = _planner(env["sessionmaker"], fake)
+    task_id = await _seed_research_task(env["sessionmaker"], questions=[])
+    with pytest.raises(MissingResearchQuestion):
+        await service.create_plan(task_id)
 
 
 async def test_tampered_payload_fails_integrity(env) -> None:

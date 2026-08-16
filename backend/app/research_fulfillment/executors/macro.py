@@ -34,7 +34,10 @@ from app.research_fulfillment.contracts import (
 from app.research_fulfillment.service import FulfillmentContext
 from app.research_planning.preparation import MissingResearchNeed
 from app.research_planning.router import SourceRouteEntry
+from app.services.macro_auto_fetch_service import MacroAutoFetchResult
 from app.services.macro_evidence_service import MacroEvidenceService
+from app.services.source_discovery.contracts import SourceDiscoveryRequest
+from app.services.source_discovery.service import SourceDiscoveryService
 
 # 单条 need 最多 replay 的宏观卡数（确定性强、足够驱动 macro analyst）。
 _MAX_MACRO_CARDS = 5
@@ -68,10 +71,13 @@ class MacroNeedExecutor:
         sessionmaker: async_sessionmaker,
         macro_service: MacroEvidenceService | None = None,
         auto_fetch=None,
+        discovery: SourceDiscoveryService | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._macro_service = macro_service or MacroEvidenceService(sessionmaker)
+        # P1：统一 Source Discovery Layer（优先）；legacy auto_fetch 回退。
         self._auto_fetch = auto_fetch
+        self._discovery = discovery
 
     # ------------------------------------------------------------ 主入口
 
@@ -91,12 +97,30 @@ class MacroNeedExecutor:
             )
         topic, geo = self._match_terms(context, need)
         rows = await self._load_available_observations(context, need, topic, geo)
-        if not rows and self._auto_fetch is not None:
-            # 有界自动获取（V1.1 closure）：映射命中才执行；失败保持原语义。
+        if not rows and (self._discovery is not None or self._auto_fetch is not None):
+            # P1 统一发现层优先（MacroDiscoveryProvider 包装有界自动获取）；
+            # legacy auto_fetch 回退。失败保持 MACRO_DATA_UNAVAILABLE 原语义。
             try:
-                result = await self._auto_fetch.fetch_for_need(
-                    topic=topic, geo=geo, as_of=context.analysis_as_of
-                )
+                if self._discovery is not None:
+                    outcome = await self._discovery.discover(
+                        SourceDiscoveryRequest(
+                            company_id=context.company_id,
+                            security_code="",
+                            need_kind="macro",
+                            as_of=context.analysis_as_of,
+                            topic=topic,
+                            geo=geo,
+                        )
+                    )
+                    result = (
+                        MacroAutoFetchResult(fetched=True, persisted=True)
+                        if outcome.acquired
+                        else None
+                    )
+                else:
+                    result = await self._auto_fetch.fetch_for_need(
+                        topic=topic, geo=geo, as_of=context.analysis_as_of
+                    )
             except Exception:  # noqa: BLE001 - 获取失败 → 保持 MACRO_DATA_UNAVAILABLE
                 result = None
             if result is not None and result.persisted:

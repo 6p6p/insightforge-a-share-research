@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     # 当前统一使用 deepseek-v4-flash。
     llm_provider: str = "deepseek"
     llm_model: str = "deepseek-v4-flash"
+    # P0：Default Research Intent Generator 的 optional LLM enhancement 开关
+    # （默认关闭 → 纯确定性 template，replay/fingerprint 兼容；开启后同输入
+    # 可能生成不同问题 → 新 plan 行，与 planner LLM 非确定性一致）。
+    intent_llm_enhancement: bool = False
+    # P2：Model Assisted Discovery Node 开关（默认开启 = AUTO 模式；无 API key
+    # / 网络失败时安全降级 exhausted）。LLM 生成候选 URL，仍须经 provider 域名
+    # allowlist + SafeFetcher 验证后才落库，绝不 bypass provenance。
+    search_discovery_llm_enabled: bool = True
+    # P4：News Discovery 开关（默认开启 = AUTO 模式；真实 GDELT 网络调用，
+    # 失败安全降级 exhausted）。
+    news_discovery_enabled: bool = True
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 1
     deepseek_api_key: SecretStr | None = None

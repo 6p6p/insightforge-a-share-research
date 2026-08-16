@@ -23,6 +23,12 @@ COMPONENT_DRAFT_SECTION_WRITER = "draft_section_writer"
 COMPONENT_AUDIT = "audit"
 COMPONENT_REVISION_WRITER = "revision_writer"
 COMPONENT_RESEARCH_PLANNER = "research_planner"
+# P0：Default Research Intent Generator 的 optional LLM enhancement（11 个
+# production adapter；`tests/llm/test_component_inventory.py` 冻结校验）。
+COMPONENT_INTENT_ENHANCEMENT = "intent_enhancement"
+# P2：Model Assisted Discovery Node——LLM 只做候选发现（12 个 production
+# adapter；`tests/llm/test_component_inventory.py` 冻结校验）。
+COMPONENT_SEARCH_DISCOVERY = "search_discovery"
 
 # eval-only component：single_rag variant 的一次 RAG 回答生成。**不**加入
 # `INSTRUMENTED_LLM_COMPONENTS`（那是 10-component production pipeline registry，
@@ -48,4 +54,6 @@ INSTRUMENTED_LLM_COMPONENTS: tuple[str, ...] = (
     COMPONENT_AUDIT,
     COMPONENT_REVISION_WRITER,
     COMPONENT_RESEARCH_PLANNER,
+    COMPONENT_INTENT_ENHANCEMENT,
+    COMPONENT_SEARCH_DISCOVERY,
 )

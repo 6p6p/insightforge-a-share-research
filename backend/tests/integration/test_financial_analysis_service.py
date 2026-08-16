@@ -19,8 +19,8 @@
 - malformed output → FinancialAnalysisMalformedOutput；provider 失败 →
   FinancialAnalysisModelUnavailable 透传；
 - replay：同决策再分析 → replayed_count=1，同 claim_id，无重复行；
-- critical Claim 缺 eligible source Evidence → FinancialClaimCriticalEvidenceInsufficient
-  （0 写）；
+- critical Claim 缺 eligible source Evidence → analyst 确定性降级 normal
+  （不失败、不提升）；FinancialClaimService 直接调用仍强制 critical policy；
 - 模型收到的 Calculation/Evidence Pack 是最小投影（无 UUID / fingerprint /
   observation UUID）；C alias 确定性。
 """
@@ -60,7 +60,6 @@ from app.claims.financial_contracts import (
     FinancialClaimDraft,
     FinancialClaimImportance,
 )
-from app.claims.financial_errors import FinancialClaimCriticalEvidenceInsufficient
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.repositories.claim_repository import ClaimRepository
@@ -547,20 +546,34 @@ async def test_analyze_model_unavailable_propagates(env) -> None:
     assert await _fin_claim_count(env["sessionmaker"]) == 0
 
 
-async def test_analyze_critical_claim_requires_eligible_source(env) -> None:
+async def test_analyze_critical_claim_downgraded_without_eligible_source(env) -> None:
+    """Final Autonomous Research：critical 无 eligible 证据 → 确定性降级 normal。
+
+    analyst 层不再失败（自动获取的 Tier-3 来源不阻塞研究）；FinancialClaimService
+    的 critical policy 仍保留（直接调用带 critical + 不 eligible 仍拒绝）。
+    """
     _, calc = await _seed_calc(env)
     request = FinancialAnalysisRequest(
         company_id=env["company_id"],
         research_question=_QUESTION,
         calculation_ids=[calc.calculation_id],
     )
-    # source card 默认 critical_claim_eligible=False → critical Claim 缺 eligible 支持。
+    # source card 默认 critical_claim_eligible=False → critical Claim 降级 normal。
     model = FakeFinancialAnalysisModel(
         decision=_decision(claims=[_candidate(importance=FinancialClaimImportance.CRITICAL)])
     )
-    with pytest.raises(FinancialClaimCriticalEvidenceInsufficient):
-        await FinancialAnalysisService(env["sessionmaker"], model).analyze(request)
-    assert await _fin_claim_count(env["sessionmaker"]) == 0
+    result = await FinancialAnalysisService(env["sessionmaker"], model).analyze(request)
+    assert result.created_count == 1
+    # 落库的 claim 是 normal（不提升、不失败）。
+    async with env["sessionmaker"]() as session:
+        row = (
+            await session.execute(
+                text("SELECT importance FROM claims WHERE claim_id = :cid").bindparams(
+                    cid=result.claim_ids[0]
+                )
+            )
+        ).scalar_one()
+    assert row == "normal"
 
 
 # ---------------------------------------------------------------- replay / 多 claims

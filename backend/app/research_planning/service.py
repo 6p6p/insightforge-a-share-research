@@ -56,6 +56,7 @@ from app.research_planning.errors import (
     ResearchPlanLegacyExecutionUnsupported,
     ResearchPlanNotFound,
 )
+from app.research_planning.intent import DefaultResearchIntentGenerator
 from app.research_planning.plan_scope import (
     allowed_planner_modules,
     apply_selected_modules,
@@ -192,10 +193,14 @@ class ResearchPlanningService:
         sessionmaker: async_sessionmaker,
         planner_model: ResearchPlannerModel,
         company_identity: CompanyIdentityService,
+        intent_generator: DefaultResearchIntentGenerator | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._planner_model = planner_model
         self._company_identity = company_identity
+        # P0：任务无 research_question 时派生默认研究意图（None → 保持
+        # MissingResearchQuestion 语义；production factory 注入）。
+        self._intent_generator = intent_generator
 
     @property
     def planner_model(self) -> ResearchPlannerModel:
@@ -217,15 +222,40 @@ class ResearchPlanningService:
         questions = list(task.questions or [])
         if len(questions) > 1:
             raise ResearchExecutionRequiresSingleQuestion()
-        research_question = questions[0] if questions else None
-        if not research_question:
-            raise MissingResearchQuestion()
         analysis_as_of = task.research_end_date
 
         resolution = await self._company_identity.resolve(task.company_query)
-        snapshot = await self._build_input_snapshot(
+        company, aliases = await self._load_company_identity(resolution.company.company_id)
+
+        research_question = questions[0] if questions else None
+        if not research_question:
+            # P0 Company Only Research Flow：无问题时由默认研究意图生成器派生
+            # （template 确定性；LLM enhancement 可选且失败降级）。生成的
+            # question 进入 creation-time snapshot → fingerprint，与用户输入的
+            # question 完全同一路径。
+            if self._intent_generator is None:
+                raise MissingResearchQuestion()
+            research_question = await self._intent_generator.generate(
+                company=CompanyIdentitySnapshot(
+                    security_code=company.security_code,
+                    official_name=company.official_name,
+                    exchange=company.exchange,
+                    board=company.board,
+                ),
+                modules=list(task.modules or []),
+                start_date=task.research_start_date,
+                end_date=task.research_end_date,
+            )
+
+        snapshot = ResearchPlannerInputSnapshot(
             task_id=task_id,
             company_id=resolution.company.company_id,
+            security_code=company.security_code,
+            official_name=company.official_name,
+            short_name=company.short_name,
+            exchange=company.exchange,
+            board=company.board,
+            aliases=aliases,
             research_question=research_question,
             analysis_as_of=analysis_as_of,
         )
@@ -306,18 +336,12 @@ class ResearchPlanningService:
             await session.commit()
             return self._to_result(row, replayed=not created)
 
-    async def _build_input_snapshot(
-        self,
-        *,
-        task_id: UUID,
-        company_id: UUID,
-        research_question: str,
-        analysis_as_of,
-    ) -> ResearchPlannerInputSnapshot:
-        """从真实 Company + aliases 构建 **creation-time** PlannerInputSnapshot。
+    async def _load_company_identity(self, company_id: UUID) -> tuple[CompanyModel, list[str]]:
+        """从真实 Company + aliases 加载语义身份（P0：intent 生成与 snapshot 共用）。
 
         aliases = CompanyAliasModel 的稳定排序字符串列表（不含 short_name；
-        short_name 单独存为可选字段）。
+        short_name 单独存为可选字段）。缺失 → IntegrityError（与旧
+        `_build_input_snapshot` 语义一致）。
         """
         async with self._sessionmaker() as session:
             company = await session.get(CompanyModel, company_id)
@@ -327,18 +351,7 @@ class ResearchPlanningService:
                 select(CompanyAliasModel).where(CompanyAliasModel.company_id == company_id)
             )
             alias_values = sorted({row.alias for row in result.scalars().all()})
-        return ResearchPlannerInputSnapshot(
-            task_id=task_id,
-            company_id=company_id,
-            security_code=company.security_code,
-            official_name=company.official_name,
-            short_name=company.short_name,
-            exchange=company.exchange,
-            board=company.board,
-            aliases=alias_values,
-            research_question=research_question,
-            analysis_as_of=analysis_as_of,
-        )
+        return company, alias_values
 
     def _assert_replay_matches(self, plan, input_fingerprint: str) -> None:
         """replay 命中时防御性确认 fingerprint 一致（数据损坏 → IntegrityError）。"""

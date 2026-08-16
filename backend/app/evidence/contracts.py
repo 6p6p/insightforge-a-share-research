@@ -102,6 +102,10 @@ class EvidenceOrigin(StrEnum):
     DOCUMENT_CHUNK = "document_chunk"
     MACRO_OBSERVATION = "macro_observation"
     USER_SUPPLIED = "user_supplied"
+    # 自动财务提取（deterministic，0 LLM）：quote = ParsedSourceBlock 文本的
+    # 逐字切片（含精确数字 token），source = 原始报告 SourceRecord（tier 快照
+    # 继承报告来源）。与 user_supplied 一样不经过 Chroma / chunk quote resolver。
+    FINANCIAL_EXTRACTION = "financial_extraction"
 
 
 def _sha256_hex(text: str) -> str:
@@ -656,6 +660,155 @@ def compute_user_supplied_evidence_fingerprint(
         "source_published_at": (
             source_published_at.isoformat() if source_published_at is not None else None
         ),
+        "reporting_period_end": (
+            reporting_period_end.isoformat() if reporting_period_end is not None else None
+        ),
+        "extractor_name": extractor_name,
+        "extractor_version": extractor_version,
+        "extractor_model_id": extractor_model_id,
+        "extractor_confidence": extractor_confidence,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass(frozen=True)
+class FinancialExtractionEvidenceDraft:
+    """FINANCIAL_EXTRACTION Evidence 的语义输入（Final Autonomous Research）。
+
+    自动财务提取（deterministic，0 LLM）产生的证据：
+    - company_id / research_question：研究上下文（调用方提供）；
+    - source_id：**原始报告 SourceRecord**（tier / critical 快照继承报告来源，
+      不硬编码）；
+    - parsed_source_id / quote_block_id / quote_start / quote_end：quote 在
+      ParsedSourceBlock 文本中的精确切片（逐字）；
+    - quote_text / evidence_statement / evidence_type（固定 metric）。
+
+    extractor 身份固定为 financial_extraction v1 / low（确定性提取，非 LLM）。
+    """
+
+    company_id: UUID
+    research_question: str
+    source_id: UUID
+    parsed_source_id: UUID
+    quote_block_id: UUID
+    quote_start: int
+    quote_end: int
+    quote_text: str
+    evidence_statement: str
+    evidence_type: EvidenceType = EvidenceType.METRIC
+
+    def __post_init__(self) -> None:
+        question = self.research_question.strip()
+        if not question:
+            raise EvidenceCardDraftError("research_question 不能为空（trim 后）")
+        statement = self.evidence_statement.strip()
+        if not statement:
+            raise EvidenceCardDraftError("evidence_statement 不能为空（trim 后）")
+        quote = self.quote_text.strip()
+        if not quote:
+            raise EvidenceCardDraftError("quote_text 不能为空（trim 后）")
+        if isinstance(self.company_id, bool) or not isinstance(self.company_id, UUID):
+            raise EvidenceCardDraftError("company_id 必须是 UUID")
+        if isinstance(self.source_id, bool) or not isinstance(self.source_id, UUID):
+            raise EvidenceCardDraftError("source_id 必须是 UUID")
+        if isinstance(self.parsed_source_id, bool) or not isinstance(self.parsed_source_id, UUID):
+            raise EvidenceCardDraftError("parsed_source_id 必须是 UUID")
+        if isinstance(self.quote_block_id, bool) or not isinstance(self.quote_block_id, UUID):
+            raise EvidenceCardDraftError("quote_block_id 必须是 UUID")
+        if not isinstance(self.evidence_type, EvidenceType):
+            raise EvidenceCardDraftError("evidence_type 必须是 EvidenceType")
+        if isinstance(self.quote_start, bool) or not isinstance(self.quote_start, int):
+            raise EvidenceCardDraftError("quote_start 必须是 int")
+        if isinstance(self.quote_end, bool) or not isinstance(self.quote_end, int):
+            raise EvidenceCardDraftError("quote_end 必须是 int")
+        if self.quote_start < 0 or self.quote_end <= self.quote_start:
+            raise EvidenceCardDraftError("quote_start/quote_end 区间非法")
+        object.__setattr__(self, "research_question", question)
+        object.__setattr__(self, "evidence_statement", statement)
+        object.__setattr__(self, "quote_text", quote)
+
+
+def build_financial_extraction_locator(
+    *,
+    source_id: UUID,
+    parsed_source_id: UUID,
+    block_id: UUID,
+    page_number: int | None = None,
+    line_index: int | None = None,
+) -> list[dict]:
+    """FINANCIAL_EXTRACTION EvidenceCard 的 deterministic structured locator。
+
+    locator_refs 契约（单元素 array）：保存结构化 provenance 定位器（block
+    身份 + page/line），**不经过 Chroma / quote resolver**。
+    """
+    return [
+        {
+            "type": "financial_extraction",
+            "source_id": str(source_id),
+            "parsed_source_id": str(parsed_source_id),
+            "block_id": str(block_id),
+            "page_number": page_number,
+            "line_index": line_index,
+        }
+    ]
+
+
+def compute_financial_extraction_evidence_fingerprint(
+    *,
+    evidence_schema_version: int,
+    origin_type: str,
+    company_id: UUID,
+    source_id: UUID,
+    parsed_source_id: UUID,
+    quote_block_id: UUID,
+    research_question: str,
+    evidence_statement: str,
+    evidence_type: str,
+    quote_text: str,
+    quote_sha256: str,
+    quote_start: int,
+    quote_end: int,
+    locator_refs: list[dict],
+    provider_key: str,
+    authority_tier_snapshot: int,
+    critical_claim_eligible_snapshot: bool,
+    reporting_period_end: date | None,
+    extractor_name: str,
+    extractor_version: int,
+    extractor_model_id: str | None,
+    extractor_confidence: str,
+) -> str:
+    """FINANCIAL_EXTRACTION Evidence 的确定性 SHA-256 指纹。
+
+    至少覆盖：schema version / origin_type / company / source / parsed_source /
+    block ids / research_question / evidence_statement / evidence_type /
+    quote（原文 + sha256 + start/end）/ locator_refs / provider_key /
+    authority tier / critical 快照 / reporting_period_end / extractor 身份。
+
+    **不得包含** evidence_id / created_at。同一完全相同 Evidence → replay
+    同一卡；quote / 陈述 / 上游报告任一变化 → 新指纹 → 新卡，旧卡保留。
+    """
+    payload = {
+        "evidence_schema_version": evidence_schema_version,
+        "origin_type": origin_type,
+        "company_id": str(company_id),
+        "source_id": str(source_id),
+        "parsed_source_id": str(parsed_source_id),
+        "quote_block_id": str(quote_block_id),
+        "research_question": research_question,
+        "evidence_statement": evidence_statement,
+        "evidence_type": evidence_type,
+        "quote_text": quote_text,
+        "quote_sha256": quote_sha256,
+        "quote_start": quote_start,
+        "quote_end": quote_end,
+        "locator_refs": locator_refs,
+        "provider_key": provider_key,
+        "authority_tier_snapshot": authority_tier_snapshot,
+        "critical_claim_eligible_snapshot": critical_claim_eligible_snapshot,
         "reporting_period_end": (
             reporting_period_end.isoformat() if reporting_period_end is not None else None
         ),
