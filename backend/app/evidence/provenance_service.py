@@ -31,6 +31,7 @@ from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
 from app.db.models.macro_snapshot_artifact import MacroSnapshotArtifactModel
 from app.db.models.parsed_source import ParsedSourceModel
+from app.db.models.parsed_source_block import ParsedSourceBlockModel
 from app.db.models.raw_artifact import RawArtifactModel
 from app.db.models.source_provider import SourceProviderModel
 from app.db.models.source_record import SourceRecordModel
@@ -40,6 +41,7 @@ from app.schemas.citation import (
     CitationLocator,
     DocumentProvenance,
     EvidenceProvenance,
+    FinancialExtractionProvenance,
     MacroArtifactLink,
     MacroProvenance,
 )
@@ -73,10 +75,15 @@ def context_window(
 
 
 def _build_locator(ref: dict) -> CitationLocator:
-    """EvidenceCard.locator_refs 的一条 ref → CitationLocator（原字段原样保留）。"""
+    """EvidenceCard.locator_refs 的一条 ref → CitationLocator（原字段原样保留）。
+
+    document_chunk ref 用嵌套 locator；financial_extraction ref 是顶层
+    type / block_id / page_number / line_index（P8 Evidence Locator）——两者
+    都读，缺省 None。
+    """
     locator = ref.get("locator") or {}
     return CitationLocator(
-        locator_type=str(locator.get("type") or ""),
+        locator_type=str(locator.get("type") or ref.get("type") or ""),
         block_ordinal=ref.get("block_ordinal"),
         char_start=ref.get("char_start"),
         char_end=ref.get("char_end"),
@@ -84,8 +91,8 @@ def _build_locator(ref: dict) -> CitationLocator:
         tag=locator.get("tag"),
         xpath=locator.get("xpath"),
         element_id=locator.get("element_id"),
-        page_number=locator.get("page_number"),
-        line_index=locator.get("line_index"),
+        page_number=locator.get("page_number", ref.get("page_number")),
+        line_index=locator.get("line_index", ref.get("line_index")),
         bbox=locator.get("bbox"),
         page_width=locator.get("page_width"),
         page_height=locator.get("page_height"),
@@ -271,6 +278,8 @@ class EvidenceProvenanceService:
             return await EvidenceProvenanceService.resolve_document(session, card)
         if card.origin_type == EvidenceOrigin.MACRO_OBSERVATION.value:
             return await EvidenceProvenanceService.resolve_macro(session, card)
+        if card.origin_type == EvidenceOrigin.FINANCIAL_EXTRACTION.value:
+            return await EvidenceProvenanceService.resolve_financial_extraction(session, card)
         raise EvidenceProvenanceIntegrityError()
 
     @staticmethod
@@ -384,6 +393,114 @@ class EvidenceProvenanceService:
             media_type=raw.media_type,
             parsed_source_id=parsed.parsed_source_id,
             chunk_id=chunk.chunk_id,
+            locator=_build_locator(refs[0]),
+            locator_refs=[_build_locator(ref) for ref in refs],
+            context_text=context,
+            quote_text=card.quote_text,
+        )
+
+    @staticmethod
+    async def resolve_financial_extraction(
+        session, card: EvidenceCardModel
+    ) -> FinancialExtractionProvenance:
+        """per-card financial_extraction provenance（P8 Evidence Locator）。
+
+        verified 链：EvidenceCard → ParsedSourceBlock（locator_refs 顶层
+        block_id）→ ParsedSource → SourceRecord → RawArtifact + SourceProvider；
+        quote 切片契约 block.text[quote_start:quote_end] == quote_text，任一
+        hop 断裂 → EvidenceProvenanceIntegrityError，不 repair。
+        """
+        if (
+            card.origin_type != EvidenceOrigin.FINANCIAL_EXTRACTION.value
+            or card.source_id is None
+            or card.parsed_source_id is None
+        ):
+            raise EvidenceProvenanceIntegrityError()
+        refs = list(card.locator_refs or [])
+        if not refs:
+            raise EvidenceProvenanceIntegrityError()
+        block_id = refs[0].get("block_id") if isinstance(refs[0], dict) else None
+        if not isinstance(block_id, str):
+            raise EvidenceProvenanceIntegrityError()
+
+        block = (
+            await session.execute(
+                select(ParsedSourceBlockModel).where(
+                    ParsedSourceBlockModel.block_id == UUID(block_id)
+                )
+            )
+        ).scalar_one_or_none()
+        if block is None or block.parsed_source_id != card.parsed_source_id:
+            raise EvidenceProvenanceIntegrityError()
+
+        parsed = (
+            await session.execute(
+                select(ParsedSourceModel).where(
+                    ParsedSourceModel.parsed_source_id == card.parsed_source_id
+                )
+            )
+        ).scalar_one_or_none()
+        if parsed is None or parsed.source_id != card.source_id:
+            raise EvidenceProvenanceIntegrityError()
+
+        source = (
+            await session.execute(
+                select(SourceRecordModel).where(SourceRecordModel.source_id == card.source_id)
+            )
+        ).scalar_one_or_none()
+        if source is None:
+            raise EvidenceProvenanceIntegrityError()
+
+        raw = (
+            await session.execute(
+                select(RawArtifactModel).where(RawArtifactModel.artifact_id == source.artifact_id)
+            )
+        ).scalar_one_or_none()
+        if raw is None:
+            raise EvidenceProvenanceIntegrityError()
+
+        provider = (
+            await session.execute(
+                select(SourceProviderModel).where(
+                    SourceProviderModel.provider_key == source.provider_key
+                )
+            )
+        ).scalar_one_or_none()
+        if provider is None:
+            raise EvidenceProvenanceIntegrityError()
+
+        # quote 切片契约：block.text[quote_start:quote_end] == quote_text。
+        if (
+            card.quote_text is not None
+            and card.quote_start is not None
+            and card.quote_end is not None
+        ):
+            block_text = block.text or ""
+            if block_text[card.quote_start : card.quote_end] != card.quote_text:
+                raise EvidenceProvenanceIntegrityError()
+        if card.quote_text is not None and card.quote_sha256 is not None:
+            if compute_quote_sha256(card.quote_text) != card.quote_sha256:
+                raise EvidenceProvenanceIntegrityError()
+
+        context = context_window(
+            chunk_text=block.text or "",
+            quote_start=card.quote_start or 0,
+            quote_end=card.quote_end or 0,
+        )
+        return FinancialExtractionProvenance(
+            origin_type=EvidenceOrigin.FINANCIAL_EXTRACTION.value,
+            source_id=source.source_id,
+            provider_key=source.provider_key,
+            provider_label=provider.display_name,
+            title=source.title,
+            source_url=source.source_url or "",
+            published_at=source.published_at,
+            authority_tier=source.authority_tier_snapshot,
+            document_type=source.document_type,
+            raw_artifact_id=raw.artifact_id,
+            media_type=raw.media_type,
+            parsed_source_id=parsed.parsed_source_id,
+            block_id=UUID(block_id),
             locator=_build_locator(refs[0]),
             locator_refs=[_build_locator(ref) for ref in refs],
             context_text=context,

@@ -83,6 +83,37 @@ class DocumentProvenance(BaseModel):
     quote_text: str | None = None
 
 
+# ------------------------------------------------------------------ financial extraction provenance
+
+
+class FinancialExtractionProvenance(BaseModel):
+    """financial_extraction 证据的 verified provenance（P8 Evidence Locator）。
+
+    financial_extraction 卡没有 Chunk——quote 直接切片自 ParsedSourceBlock 文本
+    （block 身份 + pdf_page page_number/line_index 来自真实解析链）。verified
+    链：EvidenceCard → ParsedSourceBlock → ParsedSource → SourceRecord →
+    RawArtifact；任一 hop 断裂 / quote 切片不符 → 409（不 repair）。
+    """
+
+    origin_type: Literal["financial_extraction"]
+    source_id: UUID
+    provider_key: str
+    provider_label: str
+    title: str
+    source_url: str
+    published_at: datetime | None = None
+    authority_tier: int
+    document_type: str | None = None
+    raw_artifact_id: UUID
+    media_type: str
+    parsed_source_id: UUID
+    block_id: UUID
+    locator: CitationLocator | None = None
+    locator_refs: list[CitationLocator] = []
+    context_text: str
+    quote_text: str | None = None
+
+
 # ------------------------------------------------------------------ macro provenance
 
 
@@ -126,7 +157,7 @@ class MacroProvenance(BaseModel):
 
 
 EvidenceProvenance = Annotated[
-    DocumentProvenance | MacroProvenance,
+    DocumentProvenance | FinancialExtractionProvenance | MacroProvenance,
     Field(discriminator="origin_type"),
 ]
 

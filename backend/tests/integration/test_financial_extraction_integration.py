@@ -178,6 +178,103 @@ async def test_full_extraction_to_observation_chain(env) -> None:
     assert all(row[2] == "eastmoney" for row in rows)
 
 
+async def test_extraction_locator_carries_page_number(env) -> None:
+    """P8 Evidence Locator：证据卡 locator_refs 含 block_id + 真实 page_number（PDF
+    解析链产生，非 LLM 猜测）。
+    """
+    import json
+
+    source_id, parsed_id = await _seed_annual_report_pdf(env)
+    provider, extraction_service, ingestion = _make_services(env)
+    result = await extraction_service.extract(
+        FinancialExtractionRequest(
+            company_id=env["company_id"],
+            parsed_source_id=parsed_id,
+            reporting_period_end=date(2024, 12, 31),
+        )
+    )
+    assert result.accepted_count > 0
+    summary = await ingestion.ingest(
+        research_question="分析公司财务表现",
+        source_id=source_id,
+        extraction=result,
+    )
+    assert summary.cards_created > 0
+    async with env["sessionmaker"]() as session:
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT locator_refs FROM evidence_cards "
+                        "WHERE origin_type='financial_extraction'",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows, "必须有 financial_extraction 证据卡"
+    locators = [json.loads(r) if isinstance(r, str) else r for r in rows]
+    for locator in locators:
+        assert isinstance(locator, list) and len(locator) == 1
+        entry = locator[0]
+        assert entry["type"] == "financial_extraction"
+        assert entry["block_id"]
+        # PDF 解析链真实页码（非 None）。
+        assert isinstance(entry["page_number"], int) and entry["page_number"] > 0
+
+
+async def test_financial_evidence_provenance_resolves_with_page(env) -> None:
+    """P8：financial_extraction 卡 verified provenance——block/page/line 真实；
+    quote 切片契约成立。
+    """
+    from app.evidence.provenance_service import EvidenceProvenanceService
+    from app.db.models.evidence_card import EvidenceCardModel
+    from sqlalchemy import select
+
+    source_id, parsed_id = await _seed_annual_report_pdf(env)
+    provider, extraction_service, ingestion = _make_services(env)
+    result = await extraction_service.extract(
+        FinancialExtractionRequest(
+            company_id=env["company_id"],
+            parsed_source_id=parsed_id,
+            reporting_period_end=date(2024, 12, 31),
+        )
+    )
+    summary = await ingestion.ingest(
+        research_question="分析公司财务表现",
+        source_id=source_id,
+        extraction=result,
+    )
+    assert summary.cards_created > 0
+    async with env["sessionmaker"]() as session:
+        card = (
+            (
+                await session.execute(
+                    select(EvidenceCardModel)
+                    .where(
+                        EvidenceCardModel.origin_type == "financial_extraction",
+                    )
+                    .limit(1),
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert card is not None
+        prov = await EvidenceProvenanceService.resolve(session, card)
+
+    assert prov.origin_type == "financial_extraction"
+    assert prov.source_id == source_id
+    assert prov.parsed_source_id == parsed_id
+    assert prov.block_id is not None
+    assert prov.locator is not None
+    # PDF 解析链真实页码 + 行号（非 None、非 LLM 猜测）。
+    assert isinstance(prov.locator.page_number, int) and prov.locator.page_number > 0
+    # context 必须含 quote。
+    assert prov.quote_text and prov.quote_text in prov.context_text
+    assert len(prov.context_text) <= 5000
+    assert prov.media_type == "application/pdf"
 async def test_extraction_chain_is_idempotent(env) -> None:
     """第二次 ingest → 全部 replay（0 新增写）。"""
     source_id, parsed_id = await _seed_annual_report_pdf(env)

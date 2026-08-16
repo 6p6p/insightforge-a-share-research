@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models.evidence_card import EvidenceCardModel
+from app.db.models.parsed_source_block import ParsedSourceBlockModel
 from app.db.models.source_record import SourceRecordModel
 from app.evidence.contracts import (
     EVIDENCE_SCHEMA_VERSION,
@@ -35,7 +36,9 @@ from app.evidence.errors import (
 from app.repositories.evidence_card_repository import EvidenceCardRepository
 
 FINANCIAL_EXTRACTION_EXTRACTOR_NAME = "financial_extraction"
-FINANCIAL_EXTRACTION_EXTRACTOR_VERSION = 1
+# v2：locator 从 block-only 升级为 block + page_number + line_index（P8
+# Evidence Locator）——fingerprint 覆盖 locator 差异，旧卡不复用。
+FINANCIAL_EXTRACTION_EXTRACTOR_VERSION = 2
 FINANCIAL_EXTRACTION_EXTRACTOR_CONFIDENCE = "low"
 
 
@@ -118,7 +121,17 @@ class FinancialExtractionEvidenceService:
         async with self._sessionmaker() as session:
             try:
                 record = await self._load_validate_source(session, draft)
-                derived = self._derive(record, draft)
+                # P8 Evidence Locator：从 ParsedSourceBlock 的真实 locator
+                # （pdf_page 解析产生 page_number / line_index）填充——不是
+                # LLM 猜测，是解析链的真实位置。
+                block = await session.get(ParsedSourceBlockModel, draft.quote_block_id)
+                page_number, line_index = self._block_page_line(block)
+                derived = self._derive(
+                    record,
+                    draft,
+                    page_number=page_number,
+                    line_index=line_index,
+                )
                 repo = EvidenceCardRepository(session)
                 existing = await repo.get_by_fingerprint(derived.evidence_fingerprint)
                 if existing is not None:
@@ -165,13 +178,34 @@ class FinancialExtractionEvidenceService:
         return record
 
     @staticmethod
-    def _derive(record: SourceRecordModel, draft: FinancialExtractionEvidenceDraft):
+    def _block_page_line(block) -> tuple[int | None, int | None]:
+        """block.locator（真实解析链）→ page_number / line_index（缺省 None）。"""
+        if block is None:
+            return None, None
+        locator = block.locator or {}
+        if not isinstance(locator, dict):
+            return None, None
+        page = locator.get("page_number")
+        line = locator.get("line_index")
+        return (
+            page if isinstance(page, int) and page > 0 else None,
+            line if isinstance(line, int) and line >= 0 else None,
+        )
+
+    @staticmethod
+    def _derive(
+        record: SourceRecordModel,
+        draft: FinancialExtractionEvidenceDraft,
+        *,
+        page_number: int | None = None,
+        line_index: int | None = None,
+    ):
         locator = build_financial_extraction_locator(
             source_id=draft.source_id,
             parsed_source_id=draft.parsed_source_id,
             block_id=draft.quote_block_id,
-            page_number=None,
-            line_index=None,
+            page_number=page_number,
+            line_index=line_index,
         )
         fingerprint = compute_financial_extraction_evidence_fingerprint(
             evidence_schema_version=EVIDENCE_SCHEMA_VERSION,

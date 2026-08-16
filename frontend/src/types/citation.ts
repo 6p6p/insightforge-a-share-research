@@ -83,7 +83,32 @@ export interface MacroProvenance {
   artifact_links: MacroArtifactLink[];
 }
 
-export type EvidenceProvenance = DocumentProvenance | MacroProvenance;
+// ------------------------------------------------------------------ financial extraction provenance
+
+export interface FinancialExtractionProvenance {
+  origin_type: 'financial_extraction';
+  source_id: string;
+  provider_key: string;
+  provider_label: string;
+  title: string;
+  source_url: string;
+  published_at: string | null;
+  authority_tier: number;
+  document_type: string | null;
+  raw_artifact_id: string;
+  media_type: string;
+  parsed_source_id: string;
+  block_id: string;
+  locator: CitationLocator | null;
+  locator_refs: CitationLocator[];
+  context_text: string;
+  quote_text: string | null;
+}
+
+export type EvidenceProvenance =
+  | DocumentProvenance
+  | FinancialExtractionProvenance
+  | MacroProvenance;
 
 // ------------------------------------------------------------------ evidence citation
 
