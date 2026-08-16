@@ -110,6 +110,25 @@ _NON_DOCUMENT_ROUTE: dict[str, SourceRouteType] = {
     "valuation": SourceRouteType.COMPANY_ANNOUNCEMENT,  # pe/pb/ps 来自财务披露
 }
 
+# context need（Final: Research Context Intelligence）→ route_type 映射。
+# regulatory_policy 优先监管能力（csrc 等官方来源）；行业/商品/地缘走
+# 新闻与搜索发现；公司 IR/ESG/投资者交流走 issuer IR 能力（官网 + eastmoney）。
+_CONTEXT_ROUTE: dict[str, tuple[SourceRouteType, str | None]] = {
+    "regulatory_policy": (SourceRouteType.REGULATION, None),
+    "geopolitical_trade": (SourceRouteType.NEWS_ARTICLE, "news_article"),
+    "industry_metric": (SourceRouteType.NEWS_ARTICLE, "news_article"),
+    "commodity_market": (SourceRouteType.NEWS_ARTICLE, "news_article"),
+    "macro_timeseries": (SourceRouteType.MACRO_DATA, None),
+    "company_ir": (SourceRouteType.ISSUER_IR, "issuer_ir_material"),
+    "esg": (SourceRouteType.ISSUER_IR, "issuer_ir_material"),
+    "investor_presentation": (SourceRouteType.ISSUER_IR, "issuer_ir_material"),
+}
+
+
+def route_context_need(context_type: str) -> tuple[SourceRouteType, str | None]:
+    """context need → (route_type, expected_document_type)（确定性）。"""
+    return _CONTEXT_ROUTE[context_type]
+
 
 def route_document_need(source_type: str) -> tuple[SourceRouteType, str | None]:
     """document need → (route_type, expected_document_type)（确定性）。"""
@@ -124,6 +143,8 @@ def route_need(need_kind: str, source_type: str | None) -> tuple[SourceRouteType
     """
     if need_kind == "document":
         return route_document_need(source_type)  # type: ignore[arg-type]
+    if need_kind == "context":
+        return route_context_need(source_type)  # type: ignore[arg-type]
     return _NON_DOCUMENT_ROUTE[need_kind], None
 
 
@@ -360,6 +381,17 @@ class ResearchSourceRouter:
                     provider_keys=provider_keys_by_type.get(route_type, []),
                 )
             )
+        for need in payload.context_needs:
+            route_type, doc_type = route_context_need(need.context_type.value)
+            entries.append(
+                SourceRouteEntry(
+                    need_code=need.need_code,
+                    need_kind="context",
+                    route_type=route_type,
+                    expected_document_type=doc_type,
+                    provider_keys=provider_keys_by_type.get(route_type, []),
+                )
+            )
         return entries
 
     @staticmethod
@@ -370,6 +402,9 @@ class ResearchSourceRouter:
             types.add(route_type)
         for kind in ("financial", "macro", "event", "valuation"):
             route_type, _ = route_need(kind, None)
+            types.add(route_type)
+        for need in payload.context_needs:
+            route_type, _ = route_context_need(need.context_type.value)
             types.add(route_type)
         return types
 

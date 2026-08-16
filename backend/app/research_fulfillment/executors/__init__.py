@@ -11,6 +11,7 @@
 executor **不抛**确定性错误：补证据失败 → attempt.status / error_code。
 """
 
+from app.research_fulfillment.executors.context import ContextNeedExecutor
 from app.research_fulfillment.executors.document import (
     DocumentNeedExecutor,
     SourceIndexBuilder,
@@ -20,6 +21,7 @@ from app.research_fulfillment.executors.macro import MacroNeedExecutor
 from app.research_fulfillment.executors.valuation import ValuationNeedExecutor
 
 __all__ = (
+    "ContextNeedExecutor",
     "DocumentNeedExecutor",
     "SourceIndexBuilder",
     "FinancialNeedExecutor",

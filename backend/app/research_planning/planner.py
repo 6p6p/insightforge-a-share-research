@@ -103,6 +103,20 @@ _SYSTEM_RULES = """你是 InsightForge 的研究计划制定器。任务：为�
     event_needs ≤ 6、valuation_needs ≤ 3、research_focus ≤ 5 条（每条 ≤ 40 字符）。
 13. 通用「全面分析基本面」问题时，至少考虑 business / risk / financial，
     并视行业与数据可得性选择 macro / valuation——不要为跑全部而列全部。
+14. **context_needs（公司外部环境研究需求）**：根据**该公司所处行业、业务
+    模式与研究问题**动态生成（context_type ∈ regulatory_policy /
+    geopolitical_trade / industry_metric / commodity_market /
+    macro_timeseries / company_ir / esg / investor_presentation）。
+    - **禁止机械套用**：不要对所有公司生成同一套宏观/政策/商品 needs；
+      只生成与该公司相关性明确的 context；
+    - 示例：动力电池公司 → 行业装机量、锂价、海外电池政策、欧美贸易限制；
+      白酒公司 → 高端白酒需求、渠道/批价、消费宏观、酒类监管；
+      银行 → LPR、存款利率、地产信用风险、银行业监管、信用周期；
+    - topic 受控短文本（如 "动力电池装机量"、"LPR"、"锂价"）；geography
+      可选（如 "美国"、"欧盟"）；period 可选 4 位年度；
+    - 每条 ≤ 80 字符；最多 10 条；**不输出数值 / 事实 / 内部 ID**；
+    - context 只是"需要研究什么"，不是事实断言；后续来源与事实必须进入
+      证据链（本计划不承担）。
 
 输出必须是完整的 ResearchPlanPayload JSON。"""
 

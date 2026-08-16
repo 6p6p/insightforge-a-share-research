@@ -117,6 +117,10 @@ def apply_selected_modules(
         }
     )
 
+    # context_needs 是 planner 按研究问题/行业动态生成的外部环境研究上下文
+    # （监管/地缘/行业指标/商品/宏观时序/公司 IR/ESG），不属于任何单一模块
+    # 的私属资料；且 context missing 从不阻塞 ready（证据缺口在报告/审计中
+    # 体现），保留不会卡死自动研究——与 research_focus 同属通用上下文，恒保留。
     return ResearchPlanPayload(
         research_scope=keep_scopes,
         document_needs=[
@@ -129,6 +133,7 @@ def apply_selected_modules(
         macro_needs=(payload.macro_needs if keep_macro else []),
         event_needs=(payload.event_needs if keep_events else []),
         valuation_needs=(payload.valuation_needs if keep_valuation else []),
+        context_needs=payload.context_needs,
         analysis_modules=keep_modules,
         research_focus=payload.research_focus,
     )

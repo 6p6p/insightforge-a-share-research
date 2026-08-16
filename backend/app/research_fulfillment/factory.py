@@ -24,6 +24,7 @@ from app.rag.embedding.bge import BGEProvider
 from app.rag.index.service import VectorIndexService
 from app.rag.retrieval.service import RetrievalService
 from app.research_fulfillment.executors import (
+    ContextNeedExecutor,
     DocumentNeedExecutor,
     FinancialNeedExecutor,
     MacroNeedExecutor,
@@ -183,4 +184,10 @@ def create_research_fulfillment_service(
             sessionmaker, auto_fetch=macro_auto_fetch, discovery=discovery
         ),
         valuation_executor=ValuationNeedExecutor(),
+        context_executor=ContextNeedExecutor(
+            sessionmaker,
+            document_executor,
+            MacroNeedExecutor(sessionmaker, auto_fetch=macro_auto_fetch, discovery=discovery),
+            discovery=discovery,
+        ),
     )

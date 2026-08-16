@@ -112,6 +112,7 @@ class ResearchFulfillmentService:
         financial_executor: ResearchNeedExecutor,
         macro_executor: ResearchNeedExecutor,
         valuation_executor: ResearchNeedExecutor,
+        context_executor: ResearchNeedExecutor | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._plan_service = plan_service
@@ -123,6 +124,8 @@ class ResearchFulfillmentService:
             "financial": financial_executor,
             "macro": macro_executor,
             "valuation": valuation_executor,
+            # Final: Research Context Intelligence——外部环境需求统一分发。
+            "context": context_executor,
         }
 
     # 只读复用（7A.2B.2 spec S）：production factory 复用同一批
@@ -217,4 +220,8 @@ class ResearchFulfillmentService:
                 doc_need.source_type == ResearchDocumentNeedType.MACRO_DATASET
             ):
                 return self._executors.get("macro")
+        if missing.need_kind == "context":
+            # context macro_timeseries 由 ContextNeedExecutor 内部路由（复用
+            # macro executor）；这里统一返回 context executor。
+            return self._executors.get("context")
         return self._executors.get(missing.need_kind)

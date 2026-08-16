@@ -133,6 +133,8 @@ MAX_FINANCIAL_NEEDS = 12
 MAX_MACRO_NEEDS = 6
 MAX_EVENT_NEEDS = 6
 MAX_VALUATION_NEEDS = 3  # pe / pb / ps 各一
+MAX_CONTEXT_NEEDS = 10
+
 MAX_FOCUS_ITEMS = 5
 MAX_SCOPE_ITEMS = 6
 MAX_ANALYSIS_MODULES = 5
@@ -433,6 +435,74 @@ class EventNeed(_NeedBase):
         return _reject_internal_ids(text)
 
 
+class ContextNeedType(StrEnum):
+    """公司外部研究 context 的受控类别（Final: Research Context Intelligence）。
+
+    全部为**研究什么**的语义声明（不输出事实 / 不假定数据存在）；后续
+    来源与事实仍必须进入现有 evidence pipeline。
+    """
+
+    REGULATORY_POLICY = "regulatory_policy"
+    GEOPOLITICAL_TRADE = "geopolitical_trade"
+    INDUSTRY_METRIC = "industry_metric"
+    COMMODITY_MARKET = "commodity_market"
+    MACRO_TIMESERIES = "macro_timeseries"
+    COMPANY_IR = "company_ir"
+    ESG = "esg"
+    INVESTOR_PRESENTATION = "investor_presentation"
+
+
+class ContextNeed(_NeedBase):
+    """context_needs：与公司/研究问题相关的**外部环境**研究需求（结构化）。
+
+    - context_type：受控类别（监管政策 / 地缘贸易 / 行业指标 / 商品市场 /
+      宏观时序 / 公司 IR / ESG / 投资者交流材料）；
+    - topic：受控短文本（如 "动力电池装机量"、"LPR"、"锂价"）；**不输出
+      数值 / 事实 / 内部 ID**；
+    - geography：可选受控地理（如 "美国"、"欧盟"）；period：可选 4 位年度。
+
+    设计约束：bounded vocabulary / stable need_code / replay safe /
+    no-lookahead 兼容（由下游 ingestion 的 available/published 语义承担）。
+    """
+
+    context_type: ContextNeedType
+    topic: str
+    geography: str | None = None
+    period: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def _valid_topic(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("context topic 不能为空（trim 后）")
+        if len(text) > _MAX_FREE_TEXT:
+            raise ValueError(f"context topic 最多 {_MAX_FREE_TEXT} 字符")
+        return _reject_internal_ids(text)
+
+    @field_validator("geography")
+    @classmethod
+    def _valid_geography(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if len(text) > _MAX_GEOGRAPHY_TEXT:
+            raise ValueError(f"geography 最多 {_MAX_GEOGRAPHY_TEXT} 字符")
+        return _reject_internal_ids(text)
+
+    @field_validator("period")
+    @classmethod
+    def _valid_period(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        period = value.strip()
+        if not _PERIOD_PATTERN.fullmatch(period):
+            raise ValueError("period 必须是 4 位年度（如 2023）或 None")
+        return period
+
+
 class ValuationNeed(BaseModel):
     """valuation_needs：需要哪个估值 metric 的相对比较（peer_median）。"""
 
@@ -469,6 +539,10 @@ class ResearchPlanPayload(BaseModel):
     macro_needs: list[MacroNeed] = Field(default_factory=list)
     event_needs: list[EventNeed] = Field(default_factory=list)
     valuation_needs: list[ValuationNeed] = Field(default_factory=list)
+    # Final: Research Context Intelligence——公司外部环境研究需求（监管政策 /
+    # 地缘贸易 / 行业指标 / 商品市场 / 宏观时序 / 公司 IR / ESG / 投资者交流）。
+    # **不阻塞 ready_for_analysis**：获取失败记录 evidence gap，研究继续。
+    context_needs: list[ContextNeed] = Field(default_factory=list)
     analysis_modules: list[AnalysisModule] = Field(default_factory=list)
     research_focus: list[str] = Field(default_factory=list)
 
@@ -488,6 +562,8 @@ class ResearchPlanPayload(BaseModel):
             raise ValueError(f"event_needs 最多 {MAX_EVENT_NEEDS} 条")
         if len(self.valuation_needs) > MAX_VALUATION_NEEDS:
             raise ValueError(f"valuation_needs 最多 {MAX_VALUATION_NEEDS} 条")
+        if len(self.context_needs) > MAX_CONTEXT_NEEDS:
+            raise ValueError(f"context_needs 最多 {MAX_CONTEXT_NEEDS} 条")
         if len(self.research_focus) > MAX_FOCUS_ITEMS:
             raise ValueError(f"research_focus 最多 {MAX_FOCUS_ITEMS} 条")
 
@@ -499,6 +575,7 @@ class ResearchPlanPayload(BaseModel):
             *(need.need_code for need in self.macro_needs),
             *(need.need_code for need in self.event_needs),
             *(need.need_code for need in self.valuation_needs),
+            *(need.need_code for need in self.context_needs),
         ):
             if code in seen:
                 raise ValueError(f"need_code 必须全局唯一: {code!r}")

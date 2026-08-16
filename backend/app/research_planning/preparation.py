@@ -66,6 +66,7 @@ from app.financial.calculations.contracts import (
 )
 from app.research_planning.contracts import (
     _GROWTH_CALCULATION_CODES,
+    ContextNeedType,
     ResearchDocumentNeedType,
     ResearchPlanPayload,
 )
@@ -382,6 +383,37 @@ class ResearchPreparationService:
             else:
                 missing.append(MissingResearchNeed(need.need_code, "valuation", reason, detail))
 
+        # --- context needs（Final: Research Context Intelligence）
+        # 外部环境需求（监管/地缘/行业/商品/宏观/IR/ESG/投资者交流）：
+        # resolved 证据进入对应池（macro 池 / business 文档池）；
+        # missing **不阻塞 ready_for_analysis**（记录为 evidence gap，研究继续）。
+        for need in payload.context_needs:
+            if need.context_type.value == ContextNeedType.MACRO_TIMESERIES.value:
+                cards, reason, detail = self._resolve_macro_driver(data, analysis_as_of)
+                if reason is None:
+                    macro_driver_pool.update(card.evidence_card_id for card in cards)
+                    resolved.append(
+                        self._resolved_need(
+                            need.need_code, "context", "macro_driver_evidence", cards
+                        )
+                    )
+                else:
+                    missing.append(MissingResearchNeed(need.need_code, "context", reason, detail))
+                continue
+            cards, reason, detail = self._resolve_context_documents(
+                data,
+                context_type=need.context_type.value,
+                analysis_as_of=analysis_as_of,
+                research_question_sha256=target_question_sha256,
+            )
+            if reason is None:
+                doc_evidence_pool.update(card.evidence_card_id for card in cards)
+                resolved.append(
+                    self._resolved_need(need.need_code, "context", "evidence_card", cards)
+                )
+            else:
+                missing.append(MissingResearchNeed(need.need_code, "context", reason, detail))
+
         # --- module inputs（只按 plan 声明的 modules 构造；空输入 → module missing）
         business_pool = _sorted_ids(doc_evidence_pool | event_evidence_pool)
         module_inputs = self._build_module_inputs(
@@ -400,7 +432,9 @@ class ResearchPreparationService:
                     )
                 )
 
-        ready = not missing
+        # context（外部环境）缺失不阻塞：只由核心 needs（document/financial/
+        # macro/event/valuation/module）判定 ready。
+        ready = not [item for item in missing if item.need_kind != "context"]
         stage4_request = self._build_stage4_request(ctx, module_inputs) if ready else None
         return ResearchPreparationResult(
             research_plan_id=ctx.research_plan_id,
@@ -419,6 +453,61 @@ class ResearchPreparationService:
         provider_keys_by_code: dict[str, list[str]],
     ) -> bool:
         return bool(provider_keys_by_code.get(need_code))
+
+    def _resolve_context_documents(
+        self,
+        data: _ResolutionData,
+        *,
+        context_type: str,
+        analysis_as_of: date,
+        research_question_sha256: str,
+    ) -> tuple[list[EvidenceCardModel], MissingReasonCode | None, str | None]:
+        """context 文档型 need：按 context_type 的期望来源类型解析证据卡。
+
+        - company_ir / esg / investor_presentation → issuer_ir_material；
+        - regulatory / geopolitical / industry / commodity → news_article
+          （行业/政策/地缘以新闻与搜索发现为主）；
+        - topic 相关性由 fulfill 的检索 query 保证（本层只做来源类型 +
+          question 一致 + no-lookahead 解析）。
+        """
+        if context_type in ("company_ir", "esg", "investor_presentation"):
+            source_types = ("issuer_ir_material",)
+        else:
+            source_types = ("news_article",)
+        candidates = [
+            source for source in data.source_by_id.values() if source.document_type in source_types
+        ]
+        if not candidates:
+            return [], MissingReasonCode.NOT_FOUND, f"无 {source_types} 类型 source"
+        available = [s for s in candidates if _source_available(s, analysis_as_of)]
+        if not available:
+            return (
+                [],
+                MissingReasonCode.INSUFFICIENT_EVIDENCE,
+                "无在基准日之前可得的 context source",
+            )
+        all_cards = [
+            card for source in available for card in data.cards_by_source.get(source.source_id, [])
+        ]
+        if not all_cards:
+            return (
+                [],
+                MissingReasonCode.INSUFFICIENT_EVIDENCE,
+                "context source 存在但无已提取 evidence",
+            )
+        cards = [
+            card
+            for card in all_cards
+            if research_question_sha256 is None
+            or card.research_question_sha256 == research_question_sha256
+        ]
+        if not cards:
+            return (
+                [],
+                MissingReasonCode.INSUFFICIENT_EVIDENCE,
+                "context 证据研究问题与当前任务不一致",
+            )
+        return cards, None, None
 
     def _resolve_document_evidence(
         self,
