@@ -19,7 +19,7 @@ class SourceRecordResponse(BaseModel):
     title: str
     published_at: datetime | None = None
     reporting_period_end: date | None = None
-    source_url: str
+    source_url: str | None = None
     acquisition_method: str
     external_document_id: str | None = None
     authority_tier_snapshot: int
