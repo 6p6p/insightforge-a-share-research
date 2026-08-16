@@ -130,7 +130,7 @@ def create_research_fulfillment_service(
         max_bytes=settings.source_max_file_size_bytes,
     )
     # P4：News Discovery（GDELT 候选 → 原创发布者验证链）——由
-    # news_discovery_enabled 开关控制（默认关闭，真实网络调用需显式启用）。
+    # news_discovery_enabled 开关控制（默认开启，真实网络调用失败安全降级）。
     from app.services.source_discovery.providers import NewsDiscoveryProvider
 
     news_provider = NewsDiscoveryProvider(
@@ -138,10 +138,21 @@ def create_research_fulfillment_service(
         raw_store=raw_store,
         enabled=settings.news_discovery_enabled,
     )
+    # P3：Company Website/IR Discovery——issuer_domains registry（公司官网
+    # 域名）→ 有界爬取 issuer_ir_material 落库（provider=issuer_official、
+    # Tier-2）。失败安全降级 exhausted，绝不伪造来源。
+    from app.services.source_discovery.providers import IrDiscoveryProvider
+
+    ir_provider = IrDiscoveryProvider(
+        sessionmaker=sessionmaker,
+        raw_store=raw_store,
+        enabled=settings.ir_discovery_enabled,
+    )
     discovery = SourceDiscoveryService(
         [
             AnnouncementDiscoveryProvider(auto_acquisition),
             MacroDiscoveryProvider(macro_auto_fetch),
+            ir_provider,
             search_provider,
             news_provider,
         ]
