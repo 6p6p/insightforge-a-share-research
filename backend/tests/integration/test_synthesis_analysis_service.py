@@ -447,7 +447,8 @@ async def test_boundary_no_stage5_service_holds_only_deps(env, monkeypatch) -> N
         env["sessionmaker"], FakeSynthesisAnalysisModel(output=_valid_output())
     )
     # read-side integrity 委托 SynthesisService，不复制 replay 规则。
-    assert list(vars(service).keys()) == ["_sessionmaker", "_model", "_synthesis"]
+    # _logger 是基础观测组件（非业务依赖），与既有 service 模式一致。
+    assert list(vars(service).keys()) == ["_sessionmaker", "_model", "_logger", "_synthesis"]
     # 无未来阶段（5E+）表（audits / report_sections）；Stage 5A-5D 表
     # （report_outlines / draft_sections / reports / report_check_results /
     # report_audits / review_issues，migration 0032-0035）允许存在。

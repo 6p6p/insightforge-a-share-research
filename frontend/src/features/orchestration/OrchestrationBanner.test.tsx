@@ -110,7 +110,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
         companyId="c1"
       />,
     );
-    expect(screen.getByText('自动研究进行中：正在分析')).toBeInTheDocument();
+    expect(screen.getByText('自动研究进行中：正在智能分析')).toBeInTheDocument();
     expect(screen.queryByText('需要人工确认')).not.toBeInTheDocument();
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
   });

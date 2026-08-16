@@ -33,6 +33,7 @@ from app.core.runtime import configure_asyncio_runtime
 from app.db.models.workflow_run import WorkflowRunModel
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.draft_section.errors import DraftSectionModelUnavailable
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.services.research_execution_recovery import ResearchExecutionRecoveryCoordinator
 from app.services.workflow_recovery_service import (
@@ -295,7 +296,9 @@ async def test_stage5_business_failure_not_auto_recovered(env, monkeypatch, conn
         )
         runner = Stage5WorkflowRunner(sessionmaker, manager, deps)
         run = await runner.create_stage5_run(request)
-        with pytest.raises(RuntimeError):
+        # writer 模型抛 RuntimeError → 有界重试后归一到 DraftSectionModelUnavailable
+        # （业务失败语义不变：run FAILED，不自动恢复）。
+        with pytest.raises(DraftSectionModelUnavailable):
             await runner.execute_stage5(run.run_id, request)
         row = await _run_row(sessionmaker, run.run_id)
         assert row["status"] == "failed"

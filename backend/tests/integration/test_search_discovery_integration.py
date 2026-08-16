@@ -229,9 +229,7 @@ async def test_iterative_rounds_bounded(env) -> None:
 
     model = FakeQueryModel(
         SearchDiscoveryOutput(
-            candidates=[
-                SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")
-            ],
+            candidates=[SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")],
             gap_remaining=True,
         )
     )
@@ -251,9 +249,7 @@ async def test_gap_closed_after_first_round(env) -> None:
 
     model = FakeQueryModel(
         SearchDiscoveryOutput(
-            candidates=[
-                SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")
-            ],
+            candidates=[SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")],
             gap_remaining=False,
         )
     )
@@ -264,6 +260,7 @@ async def test_gap_closed_after_first_round(env) -> None:
     assert outcome.acquired is False
     assert outcome.exhausted is True
     assert len(model.calls) == 1
+
 
 async def test_mixed_candidates_uses_allowlisted_one(env) -> None:
     """非法域名被跳过，合法域名候选落库。"""

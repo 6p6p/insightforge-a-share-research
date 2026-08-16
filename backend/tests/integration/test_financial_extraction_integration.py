@@ -228,9 +228,10 @@ async def test_financial_evidence_provenance_resolves_with_page(env) -> None:
     """P8：financial_extraction 卡 verified provenance——block/page/line 真实；
     quote 切片契约成立。
     """
-    from app.evidence.provenance_service import EvidenceProvenanceService
-    from app.db.models.evidence_card import EvidenceCardModel
     from sqlalchemy import select
+
+    from app.db.models.evidence_card import EvidenceCardModel
+    from app.evidence.provenance_service import EvidenceProvenanceService
 
     source_id, parsed_id = await _seed_annual_report_pdf(env)
     provider, extraction_service, ingestion = _make_services(env)
@@ -275,6 +276,8 @@ async def test_financial_evidence_provenance_resolves_with_page(env) -> None:
     assert prov.quote_text and prov.quote_text in prov.context_text
     assert len(prov.context_text) <= 5000
     assert prov.media_type == "application/pdf"
+
+
 async def test_extraction_chain_is_idempotent(env) -> None:
     """第二次 ingest → 全部 replay（0 新增写）。"""
     source_id, parsed_id = await _seed_annual_report_pdf(env)
