@@ -40,21 +40,38 @@ _PDF = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
 
 
 class FakeQueryModel:
-    """确定性 fake：固定输出 / 可注入失败 / 调用计数。"""
+    """确定性 fake：固定输出（或按轮序列）/ 可注入失败 / 调用计数。"""
 
-    def __init__(self, output: SearchDiscoveryOutput | None = None, fail_with=None) -> None:
+    def __init__(
+        self,
+        output: SearchDiscoveryOutput | None = None,
+        fail_with=None,
+        outputs_by_round: list[SearchDiscoveryOutput] | None = None,
+    ) -> None:
         self._output = output or SearchDiscoveryOutput(candidates=[])
         self._fail_with = fail_with
+        self._outputs_by_round = outputs_by_round
         self.calls: list[SourceDiscoveryRequest] = []
+        self.round_histories: list[str | None] = []
 
     @property
     def model_id(self) -> str:
         return "test:fake-search-query"
 
-    async def generate(self, request: SourceDiscoveryRequest) -> SearchDiscoveryOutput:
+    async def generate(
+        self,
+        request: SourceDiscoveryRequest,
+        round_history: str | None = None,
+    ) -> SearchDiscoveryOutput:
         self.calls.append(request)
+        self.round_histories.append(round_history)
         if self._fail_with is not None:
             raise self._fail_with
+        if self._outputs_by_round is not None:
+            index = len(self.calls) - 1
+            if index < len(self._outputs_by_round):
+                return self._outputs_by_round[index]
+            return SearchDiscoveryOutput(candidates=[], gap_remaining=False)
         return self._output
 
 
@@ -169,6 +186,84 @@ async def test_non_allowlisted_domain_rejected(env) -> None:
     assert outcome.reason == REASON_NO_CANDIDATES
     assert await _source_count(env) == 0
 
+
+async def test_iterative_rounds_until_acquired(env) -> None:
+    """P6：第一轮候选全被拒绝 + gap_remaining=True → 第二轮好候选 → acquired；
+    第二轮收到真实结果摘要回注。
+    """
+    from app.services.source_discovery.search_model import SearchCandidate
+
+    model = FakeQueryModel(
+        outputs_by_round=[
+            SearchDiscoveryOutput(
+                candidates=[
+                    SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")
+                ],
+                gap_remaining=True,
+                gap_reason="候选域名不在受控白名单，尝试官方公告域名",
+            ),
+            SearchDiscoveryOutput(
+                candidates=[
+                    SearchCandidate(url="https://www.sse.com.cn/2024/600519.pdf", title="公司年报")
+                ],
+            ),
+        ]
+    )
+    provider = _provider(env, model)
+
+    outcome = await provider.discover(_request(company_id=env["company_id"]))
+
+    assert outcome.acquired is True
+    assert len(outcome.source_ids) == 1
+    assert await _source_count(env) == 1
+    assert len(model.calls) == 2
+    # 第二轮收到真实结果摘要（allowlist 拒绝 1）。
+    assert model.round_histories[0] is None
+    assert model.round_histories[1] is not None
+    assert "allowlist 拒绝 1" in model.round_histories[1]
+
+
+async def test_iterative_rounds_bounded(env) -> None:
+    """P6：持续 gap_remaining=True + 候选被拒 → 轮数上限（3）后 exhausted。"""
+    from app.services.source_discovery.search_model import MAX_SEARCH_ROUNDS, SearchCandidate
+
+    model = FakeQueryModel(
+        SearchDiscoveryOutput(
+            candidates=[
+                SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")
+            ],
+            gap_remaining=True,
+        )
+    )
+    provider = _provider(env, model)
+
+    outcome = await provider.discover(_request(company_id=env["company_id"]))
+
+    assert outcome.acquired is False
+    assert outcome.exhausted is True
+    assert len(model.calls) == MAX_SEARCH_ROUNDS
+    assert await _source_count(env) == 0
+
+
+async def test_gap_closed_after_first_round(env) -> None:
+    """P6：第一轮无有效候选且 gap_remaining=False → 单轮即 exhausted。"""
+    from app.services.source_discovery.search_model import SearchCandidate
+
+    model = FakeQueryModel(
+        SearchDiscoveryOutput(
+            candidates=[
+                SearchCandidate(url="https://evil.example.com/leak.pdf", title="未知站点")
+            ],
+            gap_remaining=False,
+        )
+    )
+    provider = _provider(env, model)
+
+    outcome = await provider.discover(_request(company_id=env["company_id"]))
+
+    assert outcome.acquired is False
+    assert outcome.exhausted is True
+    assert len(model.calls) == 1
 
 async def test_mixed_candidates_uses_allowlisted_one(env) -> None:
     """非法域名被跳过，合法域名候选落库。"""

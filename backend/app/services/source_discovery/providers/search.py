@@ -32,6 +32,7 @@ from app.services.source_discovery.contracts import (
     SourceDiscoveryResult,
 )
 from app.services.source_discovery.search_model import (
+    MAX_SEARCH_ROUNDS,
     SearchDiscoveryUnavailable,
     SearchQueryModel,
 )
@@ -121,30 +122,6 @@ class SearchDiscoveryProvider:
                 exhausted=True,
             )
         try:
-            output = await self._query_model.generate(request)
-        except SearchDiscoveryUnavailable:
-            return SourceDiscoveryResult(
-                provider_key=self.provider_key,
-                acquired=False,
-                reason=REASON_SEARCH_NOT_CONFIGURED,
-                exhausted=True,
-            )
-        except Exception:  # noqa: BLE001 - 契约违反：不泄漏
-            return SourceDiscoveryResult(
-                provider_key=self.provider_key,
-                acquired=False,
-                reason=REASON_NO_CANDIDATES,
-                exhausted=True,
-            )
-        if not output.candidates:
-            return SourceDiscoveryResult(
-                provider_key=self.provider_key,
-                acquired=False,
-                reason=REASON_NO_CANDIDATES,
-                exhausted=True,
-            )
-
-        try:
             registry_domains = await self._load_registry_domains()
             issuer_domains = await self._load_issuer_domains(request.company_id)
             ingestion = self._ingestion or SourceIngestionService(
@@ -161,39 +138,78 @@ class SearchDiscoveryProvider:
                 exhausted=True,
             )
 
+        # P6 迭代发现：LLM 判断缺口（gap_remaining）→ 工具验证候选 → 真实
+        # 结果回注 → 再探索。有界：最多 MAX_SEARCH_ROUNDS 轮；每轮 ≤5 候选。
         document_type = self._document_type(request)
-        for candidate in output.candidates:
-            hostname = _hostname(candidate.url)
-            if hostname is None:
-                continue
-            provider_key = match_provider_domain(
-                hostname,
-                registry_domains=registry_domains,
-                issuer_domains=issuer_domains,
-            )
-            if provider_key is None:
-                # 域名不在受控 allowlist 内 → 拒绝（不抓取、不落库）。
-                continue
+        history: list[str] = []
+        for round_index in range(MAX_SEARCH_ROUNDS):
             try:
-                result = await ingestion.ingest_discovered(
-                    company_id=request.company_id,
-                    provider_key=provider_key,
-                    document_type=document_type,
-                    title=candidate.title[:500],
-                    source_url=candidate.url,
-                    published_at=None,
-                    reporting_period_end=None,
-                    external_document_id=None,
+                output = await self._query_model.generate(
+                    request, round_history="\n".join(history) if history else None
                 )
-            except Exception:  # noqa: BLE001 - 单个候选失败 → 尝试下一个
-                continue
-            if result.replayed:
-                continue  # 已存在相同来源 → 尝试下一个候选
-            return SourceDiscoveryResult(
-                provider_key=self.provider_key,
-                acquired=True,
-                source_ids=(result.record.source_id,),
+            except SearchDiscoveryUnavailable:
+                return SourceDiscoveryResult(
+                    provider_key=self.provider_key,
+                    acquired=False,
+                    reason=REASON_SEARCH_NOT_CONFIGURED,
+                    exhausted=True,
+                )
+            except Exception:  # noqa: BLE001 - 契约违反：不泄漏
+                return SourceDiscoveryResult(
+                    provider_key=self.provider_key,
+                    acquired=False,
+                    reason=REASON_NO_CANDIDATES,
+                    exhausted=True,
+                )
+            rejected = 0
+            failed = 0
+            replayed = 0
+            acquired_source_ids: list[UUID] = []
+            for candidate in output.candidates:
+                hostname = _hostname(candidate.url)
+                if hostname is None:
+                    continue
+                provider_key = match_provider_domain(
+                    hostname,
+                    registry_domains=registry_domains,
+                    issuer_domains=issuer_domains,
+                )
+                if provider_key is None:
+                    # 域名不在受控 allowlist 内 → 拒绝（不抓取、不落库）。
+                    rejected += 1
+                    continue
+                try:
+                    result = await ingestion.ingest_discovered(
+                        company_id=request.company_id,
+                        provider_key=provider_key,
+                        document_type=document_type,
+                        title=candidate.title[:500],
+                        source_url=candidate.url,
+                        published_at=None,
+                        reporting_period_end=None,
+                        external_document_id=None,
+                    )
+                except Exception:  # noqa: BLE001 - 单个候选失败 → 尝试下一个
+                    failed += 1
+                    continue
+                if result.replayed:
+                    replayed += 1
+                    continue  # 已存在相同来源 → 尝试下一个候选
+                acquired_source_ids.append(result.record.source_id)
+            if acquired_source_ids:
+                return SourceDiscoveryResult(
+                    provider_key=self.provider_key,
+                    acquired=True,
+                    source_ids=tuple(acquired_source_ids),
+                )
+            # 真实结果摘要回注（只含工具执行事实，无模型编造）。
+            history.append(
+                f"第 {round_index + 1} 轮：候选 {len(output.candidates)} 条；"
+                f"allowlist 拒绝 {rejected}；抓取/落库失败 {failed}；"
+                f"已存在 {replayed}；落库成功 0。"
             )
+            if not output.gap_remaining:
+                break
         return SourceDiscoveryResult(
             provider_key=self.provider_key,
             acquired=False,
