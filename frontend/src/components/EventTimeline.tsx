@@ -53,9 +53,6 @@ export function EventTimeline({ events, emptyText = '暂无事件' }: Props): Re
           </div>
           <div style={{ color: 'rgba(0,0,0,0.65)' }}>{event.message}</div>
           {event.node_name ? <div style={{ color: 'rgba(0,0,0,0.45)' }}>步骤：{event.node_name}</div> : null}
-          {event.progress !== null && event.progress !== undefined ? (
-            <div style={{ color: 'rgba(0,0,0,0.45)' }}>进度：{event.progress}%</div>
-          ) : null}
           <div style={{ color: 'rgba(0,0,0,0.45)', fontSize: 12 }}>{formatTime(event.created_at)}</div>
         </div>
       ),

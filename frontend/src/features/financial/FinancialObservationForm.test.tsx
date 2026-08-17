@@ -40,9 +40,9 @@ describe('FinancialObservationForm（手动录入财务数据）', () => {
     mocks.createUserSuppliedFinancialObservation.mockReset();
   });
 
-  it('公司未解析 → 提示暂无法录入', () => {
+  it('公司未解析 → 提示暂无法补充', () => {
     renderWithProviders(<FinancialObservationForm taskId="t1" companyId={null} />);
-    expect(screen.getByText('公司尚未解析，暂无法录入财务数据')).toBeInTheDocument();
+    expect(screen.getByText('公司尚未解析，暂无法补充财务数据')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '提交财务数据' })).toBeNull();
   });
 
@@ -53,16 +53,12 @@ describe('FinancialObservationForm（手动录入财务数据）', () => {
     await selectMetric('营业收入');
     await setDate('期间开始日', '2023-01-01');
     await setDate('期间结束日', '2023-12-31');
-    await userEvent.type(screen.getByLabelText('数值原文'), '4009.17');
+    await userEvent.type(screen.getByLabelText('数值'), '4009.17');
     await userEvent.type(
-      screen.getByLabelText('原文引文'),
+      screen.getByLabelText('原文引文（含该数字的句子）'),
       '报告期内，公司实现营业收入4009.17亿元。',
     );
-    await userEvent.type(
-      screen.getByLabelText('证据陈述'),
-      '2023 年度公司实现营业收入 4009.17 亿元',
-    );
-    await userEvent.type(screen.getByLabelText('来源标题'), '宁德时代2023年年度报告');
+    await userEvent.type(screen.getByLabelText('来源说明'), '宁德时代2023年年度报告');
 
     await userEvent.click(screen.getByRole('button', { name: '提交财务数据' }));
 
@@ -77,7 +73,8 @@ describe('FinancialObservationForm（手动录入财务数据）', () => {
       raw_unit: 'hundred_million_yuan',
       source_value_text: '4009.17',
       quote_text: '报告期内，公司实现营业收入4009.17亿元。',
-      evidence_statement: '2023 年度公司实现营业收入 4009.17 亿元',
+      // Part 5 简化：证据陈述由前端确定性派生（隐藏内部字段）。
+      evidence_statement: '营业收入（2023-12-31）的数值为 4009.17',
       source_title: '宁德时代2023年年度报告',
       source_url: null,
       document_type: 'annual_report',
@@ -94,10 +91,9 @@ describe('FinancialObservationForm（手动录入财务数据）', () => {
     expect(screen.queryByLabelText('期间开始日')).toBeNull();
 
     await setDate('期末日期', '2023-12-31');
-    await userEvent.type(screen.getByLabelText('数值原文'), '8000');
-    await userEvent.type(screen.getByLabelText('原文引文'), '公司总资产为8000亿元。');
-    await userEvent.type(screen.getByLabelText('证据陈述'), '期末总资产 8000 亿元');
-    await userEvent.type(screen.getByLabelText('来源标题'), '宁德时代2023年年度报告');
+    await userEvent.type(screen.getByLabelText('数值'), '8000');
+    await userEvent.type(screen.getByLabelText('原文引文（含该数字的句子）'), '公司总资产为8000亿元。');
+    await userEvent.type(screen.getByLabelText('来源说明'), '宁德时代2023年年度报告');
 
     await userEvent.click(screen.getByRole('button', { name: '提交财务数据' }));
 
@@ -122,10 +118,9 @@ describe('FinancialObservationForm（手动录入财务数据）', () => {
     await selectMetric('营业收入');
     await setDate('期间开始日', '2023-01-01');
     await setDate('期间结束日', '2023-12-31');
-    await userEvent.type(screen.getByLabelText('数值原文'), '4009.17');
-    await userEvent.type(screen.getByLabelText('原文引文'), '引文中没有这个数字。');
-    await userEvent.type(screen.getByLabelText('证据陈述'), 'x');
-    await userEvent.type(screen.getByLabelText('来源标题'), '宁德时代2023年年度报告');
+    await userEvent.type(screen.getByLabelText('数值'), '4009.17');
+    await userEvent.type(screen.getByLabelText('原文引文（含该数字的句子）'), '引文中没有这个数字。');
+    await userEvent.type(screen.getByLabelText('来源说明'), '宁德时代2023年年度报告');
 
     await userEvent.click(screen.getByRole('button', { name: '提交财务数据' }));
 

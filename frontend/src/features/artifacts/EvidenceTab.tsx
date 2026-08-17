@@ -12,6 +12,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { getTaskEvidence, taskKeys } from '../../api/tasks';
 import type { EvidenceArtifactResponse } from '../../types/artifacts';
 import type { CitationTarget } from '../../types/citation';
+import { EVIDENCE_ORIGIN_LABEL, EVIDENCE_TYPE_LABEL, displayLabel } from '../../utils/display';
 import { artifactErrorMessage } from './integrity';
 
 const { Text } = Typography;
@@ -51,7 +52,9 @@ export function EvidenceTab({ taskId, onOpenCitation }: Props): React.JSX.Elemen
       title: '类型',
       dataIndex: 'evidence_type',
       width: 140,
-      render: (v: string) => <Tag color={TYPE_COLOR[v] ?? 'default'}>{v}</Tag>,
+      render: (v: string) => (
+        <Tag color={TYPE_COLOR[v] ?? 'default'}>{displayLabel(EVIDENCE_TYPE_LABEL, v)}</Tag>
+      ),
     },
     {
       title: '引用观点',
@@ -73,7 +76,12 @@ export function EvidenceTab({ taskId, onOpenCitation }: Props): React.JSX.Elemen
       },
     },
     { title: '提取置信度', dataIndex: 'extractor_confidence', width: 120 },
-    { title: '来源类型', dataIndex: 'origin_type', width: 120 },
+    {
+      title: '来源类型',
+      dataIndex: 'origin_type',
+      width: 140,
+      render: (v: string) => displayLabel(EVIDENCE_ORIGIN_LABEL, v),
+    },
     {
       title: '宏观标识',
       width: 200,

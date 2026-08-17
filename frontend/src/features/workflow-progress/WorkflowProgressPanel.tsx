@@ -4,7 +4,7 @@
 错误信息。简单 Timeline/Steps，不做 DAG 编辑器。
  */
 
-import { Alert, Card, Descriptions, Empty, Progress, Space, Steps, Typography } from 'antd';
+import { Alert, Card, Descriptions, Empty, Space, Steps, Typography } from 'antd';
 
 import { EventTimeline } from '../../components/EventTimeline';
 import { StatusTag } from '../../components/StatusTag';
@@ -14,6 +14,24 @@ import { stageLabel } from '../../utils/status';
 import { HumanActionCard } from './HumanActionCard';
 
 const { Title } = Typography;
+
+/** Part 2 Hardening：研究进度不用百分比——普通用户只看状态（未开始/进行中/
+ * 已完成/等待确认/失败）。 */
+export function progressStatus(runStatus: string, latestProgress: number): string {
+  if (runStatus === 'completed') {
+    return '已完成';
+  }
+  if (runStatus === 'failed' || runStatus === 'cancelled') {
+    return '失败';
+  }
+  if (runStatus === 'waiting_human') {
+    return '等待确认';
+  }
+  if (latestProgress > 0) {
+    return '进行中';
+  }
+  return '未开始';
+}
 
 /** 待处理事项 → 产品语义。 */
 const PENDING_ACTION_LABELS: Record<string, string> = {
@@ -86,10 +104,8 @@ export function WorkflowProgressPanel({
           </Descriptions.Item>
           <Descriptions.Item label="当前阶段">{stageLabel(task.current_stage)}</Descriptions.Item>
           <Descriptions.Item label="待处理事项">{pendingLabel}</Descriptions.Item>
-          <Descriptions.Item label="任务进度">{latestProgress}%</Descriptions.Item>
+          <Descriptions.Item label="任务进度">{progressStatus(run.status, latestProgress)}</Descriptions.Item>
         </Descriptions>
-
-        <Progress percent={latestProgress} status={run.status === 'failed' ? 'exception' : undefined} />
 
         <Steps
           size="small"

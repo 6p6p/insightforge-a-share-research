@@ -9,6 +9,7 @@ import { listTasks, taskKeys } from '../api/tasks';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import type { TaskResponse } from '../types/task';
+import { progressStatus } from '../features/workflow-progress/WorkflowProgressPanel';
 import { stageLabel } from '../utils/status';
 
 export function TaskListPage(): React.JSX.Element {
@@ -33,7 +34,11 @@ export function TaskListPage(): React.JSX.Element {
       dataIndex: 'current_stage',
       render: (stage: TaskResponse['current_stage']) => stageLabel(stage),
     },
-    { title: '进度', dataIndex: 'progress', render: (value: number) => `${value}%` },
+    {
+      title: '进度',
+      dataIndex: 'progress',
+      render: (value: number, record) => progressStatus(record.status, value),
+    },
     { title: '分析周期', dataIndex: 'research_start_date', render: (_, record) => `${record.research_start_date} ~ ${record.research_end_date}` },
     { title: '创建时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false }) },
   ];

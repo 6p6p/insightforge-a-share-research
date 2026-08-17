@@ -11,6 +11,11 @@ import type { ColumnsType } from 'antd/es/table';
 
 import { getTaskSources, taskKeys } from '../../api/tasks';
 import type { SourceArtifactResponse } from '../../types/artifacts';
+import {
+  PROVIDER_LABEL,
+  SOURCE_TYPE_LABEL,
+  displayLabel,
+} from '../../utils/display';
 import { artifactErrorMessage } from './integrity';
 
 const STATUS_COLOR: Record<string, string> = {
@@ -60,9 +65,15 @@ export function SourcesTab({ taskId }: Props): React.JSX.Element {
     {
       title: '类型',
       width: 140,
-      render: (_, row) => row.source_type ?? row.document_type ?? '—',
+      render: (_, row) =>
+        displayLabel(SOURCE_TYPE_LABEL, row.source_type ?? row.document_type),
     },
-    { title: '提供方', dataIndex: 'provider_key', width: 110, render: (v: string | null) => v ?? '—' },
+    {
+      title: '提供方',
+      dataIndex: 'provider_key',
+      width: 110,
+      render: (v: string | null) => displayLabel(PROVIDER_LABEL, v),
+    },
     { title: '标签', dataIndex: 'label', width: 120, render: (v: string | null) => v ?? '—' },
     {
       title: '权威级别',

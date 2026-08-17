@@ -41,16 +41,13 @@ import {
 
 interface FormValues {
   metric_code: FinancialMetricCode;
-  statement_scope: FinancialStatementScope;
   period_start?: Dayjs;
   period_end: Dayjs;
   raw_unit: FinancialRawUnit;
   source_value_text: string;
   quote_text: string;
-  evidence_statement: string;
   source_title: string;
   source_url?: string;
-  document_type: SourceDocumentType;
 }
 
 interface Props {
@@ -67,9 +64,11 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
 
   const mutation = useMutation({
     mutationFn: (values: FormValues) => {
+      // Part 5 简化：内部字段（口径/文档类型/证据陈述）由前端确定性派生，
+      // 用户只填业务字段；provenance 校验（quote 含数字）由后端保留。
       const payload: FinancialObservationRequest = {
         metric_code: values.metric_code,
-        statement_scope: values.statement_scope,
+        statement_scope: 'consolidated' as FinancialStatementScope,
         period_start:
           isBalanceSheet || !values.period_start
             ? null
@@ -78,10 +77,10 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
         raw_unit: values.raw_unit,
         source_value_text: values.source_value_text.trim(),
         quote_text: values.quote_text.trim(),
-        evidence_statement: values.evidence_statement.trim(),
+        evidence_statement: `${FINANCIAL_METRIC_LABELS[values.metric_code]}（${values.period_end.format('YYYY-MM-DD')}）的数值为 ${values.source_value_text.trim()}`,
         source_title: values.source_title.trim(),
         source_url: values.source_url?.trim() || null,
-        document_type: values.document_type,
+        document_type: 'annual_report' as SourceDocumentType,
       };
       return createUserSuppliedFinancialObservation(taskId, payload);
     },
@@ -98,19 +97,19 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
 
   if (!companyId) {
     return (
-      <Card title="手动录入财务数据">
-        <Alert type="warning" showIcon message="公司尚未解析，暂无法录入财务数据" />
+      <Card title="补充财务数据（可选）">
+        <Alert type="warning" showIcon message="公司尚未解析，暂无法补充财务数据" />
       </Card>
     );
   }
 
   return (
-    <Card title="手动录入财务数据">
+    <Card title="补充财务数据（可选）">
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <Alert
           type="info"
           showIcon
-          message="从公司官方年报/半年报/季报转录财务数字；引文必须包含该数字的原文，系统会校验数字与引文一致。"
+          message="自动研究无法获取时，可在此补充公司官方年报中的财务数据；引文需包含该数字的原文，系统会校验数字与引文一致。"
         />
         <Form<FormValues>
           form={form}
@@ -118,9 +117,7 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
           onFinish={(values) => mutation.mutate(values)}
           disabled={mutation.isPending}
           initialValues={{
-            statement_scope: 'consolidated',
             raw_unit: 'hundred_million_yuan',
-            document_type: 'annual_report',
           }}
         >
           <Form.Item
@@ -133,19 +130,6 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
               options={FINANCIAL_METRIC_CODE.map((code) => ({
                 value: code,
                 label: FINANCIAL_METRIC_LABELS[code],
-              }))}
-            />
-          </Form.Item>
-
-          <Form.Item
-            name="statement_scope"
-            label="报表口径"
-            rules={[{ required: true, message: '请选择报表口径' }]}
-          >
-            <Select
-              options={FINANCIAL_STATEMENT_SCOPE.map((scope) => ({
-                value: scope,
-                label: FINANCIAL_STATEMENT_SCOPE_LABELS[scope],
               }))}
             />
           </Form.Item>
@@ -176,8 +160,8 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
 
           <Form.Item
             name="raw_unit"
-            label="数值单位"
-            rules={[{ required: true, message: '请选择数值单位' }]}
+            label="单位"
+            rules={[{ required: true, message: '请选择单位' }]}
           >
             <Select
               options={FINANCIAL_RAW_UNIT.map((unit) => ({
@@ -189,15 +173,15 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
 
           <Form.Item
             name="source_value_text"
-            label="数值原文"
-            rules={[{ required: true, message: '请输入数值原文' }]}
+            label="数值"
+            rules={[{ required: true, message: '请输入数值' }]}
           >
             <Input maxLength={100} placeholder="例如：4009.17" />
           </Form.Item>
 
           <Form.Item
             name="quote_text"
-            label="原文引文"
+            label="原文引文（含该数字的句子）"
             rules={[{ required: true, message: '请输入原文引文' }]}
           >
             <Input.TextArea
@@ -208,36 +192,15 @@ export function FinancialObservationForm({ taskId, companyId }: Props): React.JS
           </Form.Item>
 
           <Form.Item
-            name="evidence_statement"
-            label="证据陈述"
-            rules={[{ required: true, message: '请输入证据陈述' }]}
-          >
-            <Input maxLength={500} placeholder="例如：2023 年度公司实现营业收入 4009.17 亿元" />
-          </Form.Item>
-
-          <Form.Item
             name="source_title"
-            label="来源标题"
-            rules={[{ required: true, message: '请输入来源标题' }]}
+            label="来源说明"
+            rules={[{ required: true, message: '请输入来源说明' }]}
           >
             <Input maxLength={500} placeholder="例如：宁德时代2023年年度报告" />
           </Form.Item>
 
-          <Form.Item name="source_url" label="原始链接（可选，官方披露链接）">
+          <Form.Item name="source_url" label="原始链接（可选）">
             <Input maxLength={2000} placeholder="https://static.szse.cn/…" />
-          </Form.Item>
-
-          <Form.Item
-            name="document_type"
-            label="文档类型"
-            rules={[{ required: true, message: '请选择文档类型' }]}
-          >
-            <Select
-              options={SOURCE_DOCUMENT_TYPE.map((type) => ({
-                value: type,
-                label: SOURCE_DOCUMENT_TYPE_LABELS[type],
-              }))}
-            />
           </Form.Item>
 
           {errorMessage ? (
