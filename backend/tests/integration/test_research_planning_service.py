@@ -958,15 +958,21 @@ async def test_prepare_revenue_yoy_does_not_satisfy_gross_margin_need(env, monke
     assert not any(n.need_code == "gross_margin" for n in result.resolved)
 
 
-async def test_prepare_missing_macro_ready_false(env, monkeypatch) -> None:
+async def test_prepare_missing_macro_non_blocking(env, monkeypatch) -> None:
+    """P9：macro 数据不可得 → 非阻塞（ready 由核心 needs 判定）；缺口仍记录。"""
     await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(_plan_payload(macro_needs=[]))
     plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
     result = await preparation.prepare_research(plan_result.research_plan_id)
-    assert result.ready_for_analysis is False
-    # macro module 声明了但无 macro need → module:macro 输入为空（0 fake readiness）。
+    # 其它核心 need（document/financial）已满足 → ready True；macro 缺口保留。
+    assert result.ready_for_analysis is True
     missing = {n.need_code: n.reason_code for n in result.missing_needs}
     assert missing["module:macro"] == MissingReasonCode.INSUFFICIENT_EVIDENCE
+    # Stage4 请求不包含空 macro work item。
+    assert result.stage4_request is not None
+    assert not any(
+        item.analysis_type == "macro" for item in result.stage4_request.analysis_work_items
+    )
 
 
 async def test_prepare_missing_valuation_ready_false(env, monkeypatch) -> None:
@@ -1019,8 +1025,8 @@ async def test_prepare_critical_ineligible_not_boosted(env, monkeypatch) -> None
     assert result.ready_for_analysis is True  # critical 元数据不 gate readiness
 
 
-async def test_prepare_issuer_ir_source_not_found_not_ready(env, monkeypatch) -> None:
-    """issuer_ir 有 provider（issuer_official）但无来源 → NOT_FOUND（V1.1 closure）。"""
+async def test_prepare_issuer_ir_source_not_found_non_blocking(env, monkeypatch) -> None:
+    """issuer_ir 有 provider（issuer_official）但无来源 → NOT_FOUND，且非阻塞（P9）。"""
     await _seed_worker_inputs(env, monkeypatch, research_question=_QUESTION)
     fake = FakeResearchPlannerModel(
         _plan_payload(
@@ -1035,7 +1041,8 @@ async def test_prepare_issuer_ir_source_not_found_not_ready(env, monkeypatch) ->
     )
     plan_result, preparation = await _create_and_route(env["sessionmaker"], fake, env["task_id"])
     result = await preparation.prepare_research(plan_result.research_plan_id)
-    assert result.ready_for_analysis is False
+    # 非定期报告类资料缺失不阻塞（核心 needs 已满足）；缺口保留在 missing。
+    assert result.ready_for_analysis is True
     missing = {n.need_code: n.reason_code for n in result.missing_needs}
     assert missing["ir_material"] == MissingReasonCode.NOT_FOUND
 

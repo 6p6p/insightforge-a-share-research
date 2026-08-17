@@ -1116,7 +1116,7 @@ async def test_waiting_manual_task_shows_company_evidence(env, connection_uri) -
         await session.execute(
             text(
                 "INSERT INTO raw_artifacts (artifact_id, content_sha256, storage_key, "
-                "byte_size, media_type, created_at) VALUES ",
+                "byte_size, media_type, created_at) VALUES "
                 "(:id, :sha, 'k', 1, 'application/pdf', :now)",
             ),
             {"id": raw_id, "sha": fingerprint, "now": datetime.now(UTC)},
@@ -1137,7 +1137,7 @@ async def test_waiting_manual_task_shows_company_evidence(env, connection_uri) -
             text(
                 "INSERT INTO parsed_sources (parsed_source_id, source_id, artifact_id, "
                 "parser_name, parser_version, raw_content_sha256, parse_fingerprint, "
-                "block_count, parsed_at, created_at) VALUES ",
+                "block_count, parsed_at, created_at) VALUES "
                 "(:id, :sid, :rid, 'pv', 1, :sha, :fp, 1, :now, :now)",
             ),
             {
