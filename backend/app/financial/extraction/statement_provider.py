@@ -80,6 +80,8 @@ _METRIC_PATTERNS: list[tuple[str, MetricCode, StatementScope]] = [
     ("负债合计", MetricCode.TOTAL_LIABILITIES, StatementScope.CONSOLIDATED),
     ("归属于上市公司股东的权益", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),
     ("归属于母公司所有者权益合计", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),
+    # 常见变体（贵州茅台等）："归属于上市公司股东的净资产"。
+    ("归属于上市公司股东的净资产", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),
     # 银行变体（P7 行业差异）：招商银行等上市银行资产负债表用
     # "归属于本行股东权益"（主要指标摘要行）。
     ("归属于本行股东权益", MetricCode.EQUITY_PARENT, StatementScope.CONSOLIDATED),

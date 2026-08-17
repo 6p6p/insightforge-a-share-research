@@ -173,12 +173,12 @@ class ReportAuditService:
         # 有界重试：生产实测 DeepSeek 瞬时 5xx/超时——重试 2 次仍失败才
         # 抛 ModelUnavailable（orchestration 可 retry；不写任何行）。
         decision = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 decision = await self._call_model(pack)
                 break
             except (ReportAuditModelUnavailable, ReportAuditMalformedOutput) as exc:
-                if attempt < 2:
+                if attempt < 4:
                     self._logger.warning(
                         "report_audit_model_retry",
                         attempt=attempt,
@@ -188,7 +188,7 @@ class ReportAuditService:
                 raise
             except ReportAuditError as exc:  # noqa: BLE001 - 校验违规（绑定/数字规则）
                 # 有界重试：生产实测模型偶发违反硬性校验，重试显著提高通过率。
-                if attempt < 2:
+                if attempt < 4:
                     self._logger.warning(
                         "report_audit_validation_retry",
                         attempt=attempt,

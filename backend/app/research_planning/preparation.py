@@ -432,24 +432,29 @@ class ResearchPreparationService:
                     )
                 )
 
-        # context / macro / event（外部环境类）缺失不阻塞；news_article 类型
-        # 的 document need 同样非阻塞（与 event 同类——新闻驱动资料不可得
-        # 时不卡死研究）。只由核心 needs（定期报告/公告/IR 的 document、
-        # financial / valuation / module:business / module:risk /
-        # module:financial / module:valuation）判定 ready——用户只输入公司名
-        # （默认全部模块）时，外部数据源不可得（World Bank 无该指标、新闻
-        # 验证失败）不应卡死研究；缺口保留在 missing（前端展示 + 报告
-        # evidence gaps 体现）。
-        news_doc_codes = {
+        # context / macro / event（外部环境类）缺失不阻塞；非定期报告类
+        # document need（news_article / company_announcement / issuer_ir_material）
+        # 同样非阻塞——事件驱动/补充资料不可得（新闻验证失败、公告无相关
+        # evidence、IR 材料简单）时不卡死研究。只由核心 needs（定期报告
+        # annual/semiannual/quarterly 的 document、financial / valuation /
+        # module:business / module:risk / module:financial / module:valuation）
+        # 判定 ready——用户只输入公司名（默认全部模块）时，外部数据源不可得
+        # 不应卡死研究；缺口保留在 missing（前端展示 + 报告 evidence gaps 体现）。
+        non_blocking_doc_codes = {
             need.need_code
             for need in payload.document_needs
-            if need.source_type == ResearchDocumentNeedType.NEWS_ARTICLE
+            if need.source_type
+            in (
+                ResearchDocumentNeedType.NEWS_ARTICLE,
+                ResearchDocumentNeedType.COMPANY_ANNOUNCEMENT,
+                ResearchDocumentNeedType.ISSUER_IR_MATERIAL,
+            )
         }
         ready = not [
             item
             for item in missing
             if item.need_kind not in ("context", "macro", "event")
-            and item.need_code not in news_doc_codes
+            and item.need_code not in non_blocking_doc_codes
             and not (
                 item.need_kind == "module"
                 and item.need_code.split(":", 1)[-1] in ("macro", "event")

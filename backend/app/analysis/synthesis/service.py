@@ -129,7 +129,7 @@ class SynthesisAnalysisService:
         # 不可用都重试）仍失败才抛（orchestration 可 retry；不写任何行）。
         claim_refs = list(claim_pack.alias_map().keys())
         output = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 output = await self._call_model(context, claim_pack)
                 validate_synthesis_output(output, claim_refs)
@@ -138,7 +138,7 @@ class SynthesisAnalysisService:
                 # 校验违规（UnknownRef / NoCherryPicking / MalformedOutput）：
                 # 有界重试后**原样抛**（保留错误类别语义——调用方据此区分
                 # 校验失败与模型不可用）。
-                if attempt < 2:
+                if attempt < 4:
                     self._logger.warning(
                         "synthesis_model_retry",
                         attempt=attempt,
@@ -147,7 +147,7 @@ class SynthesisAnalysisService:
                     continue
                 raise
             except Exception as exc:  # noqa: BLE001 - 模型瞬时不可用/网络错误
-                if attempt < 2:
+                if attempt < 4:
                     self._logger.warning(
                         "synthesis_model_retry",
                         attempt=attempt,

@@ -210,7 +210,7 @@ class DraftSectionService:
         # 改写）。
         decision = None
         correction_hint: str | None = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 if decision is None:
                     decision = await self._call_model(pack, correction_hint=correction_hint)
@@ -223,7 +223,7 @@ class DraftSectionService:
                 correction_hint = None
                 break
             except DraftSectionError as exc:
-                if attempt < 2:
+                if attempt < 4:
                     correction_hint = str(exc)
                     logger.warning("draft_section_validation_retry", reason=correction_hint)
                     decision = None
@@ -233,7 +233,7 @@ class DraftSectionService:
                 # 有界重试（生产实测 DeepSeek 瞬时 5xx/超时；重试显著提高
                 # 真实运行通过率）；仍失败 → DraftSectionModelUnavailable
                 # （orchestration 可 retry，不写任何行）。
-                if attempt < 2:
+                if attempt < 4:
                     logger.warning(
                         "draft_section_model_retry",
                         attempt=attempt,
