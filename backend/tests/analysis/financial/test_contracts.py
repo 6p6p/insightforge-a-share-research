@@ -304,7 +304,13 @@ def test_decision_rejects_duplicate_claims() -> None:
 
 def test_reason_codes_allow_only_analysis_outcomes() -> None:
     codes = {code.value for code in FinancialAnalysisReason}
-    assert codes == {"not_relevant", "insufficient_calculations", "insufficient_evidence"}
+    assert codes == {
+        "not_relevant",
+        "insufficient_calculations",
+        "insufficient_evidence",
+        # Part 1 Hardening：numeric 违规 repair 耗尽后的降级 reason。
+        "numeric_reference_downgraded",
+    }
 
 
 def test_request_roundtrip_uuid_integrity() -> None:

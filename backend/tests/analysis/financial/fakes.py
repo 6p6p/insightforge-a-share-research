@@ -26,11 +26,15 @@ class FakeFinancialAnalysisModel:
         decision: FinancialAnalysisDecision | dict | None = None,
         model_id: str = "deepseek:deepseek-v4-flash",
         error: type[Exception] | None = None,
+        decisions_by_round: list[FinancialAnalysisDecision] | None = None,
     ) -> None:
         self._decision = decision
         self._model_id = model_id
         self._error = error
+        self._decisions_by_round = decisions_by_round
         self.calls: list[tuple[FinancialAnalysisContext, CalculationPack, EvidencePack]] = []
+        # Part 1 repair flow：记录每次调用收到的 correction_hint。
+        self.correction_hints: list[str | None] = []
 
     @property
     def model_id(self) -> str:
@@ -41,8 +45,15 @@ class FakeFinancialAnalysisModel:
         context: FinancialAnalysisContext,
         calculation_pack: CalculationPack,
         evidence_pack: EvidencePack,
+        correction_hint: str | None = None,
     ) -> FinancialAnalysisDecision:
         self.calls.append((context, calculation_pack, evidence_pack))
+        self.correction_hints.append(correction_hint)
         if self._error is not None:
             raise self._error()
+        if self._decisions_by_round is not None:
+            index = len(self.calls) - 1
+            if index < len(self._decisions_by_round):
+                return self._decisions_by_round[index]
+            return self._decision
         return self._decision

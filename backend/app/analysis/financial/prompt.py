@@ -116,11 +116,22 @@ def _render_evidence(item: EvidencePackItem) -> str:
     return "\n".join(lines)
 
 
+# Part 1 Hardening：numeric-literal 违规后的 repair 指令（追加到 system prompt，
+# 要求删除未绑定证据的数字表达或改为引用 C/E 编号——不降低任何校验强度）。
+NUMERIC_REPAIR_HINT = (
+    "你的上一轮分析包含未绑定证据的数字。"
+    "请删除所有未经 evidence/citation 支持的数字表达，"
+    "或者改为引用已有 evidence_id/claim_id（C 编号 / E 编号）。"
+    "保持分析逻辑完整。"
+)
+
+
 def build_analysis_messages(
     *,
     context: FinancialAnalysisContext,
     calculation_pack: CalculationPack,
     evidence_pack: EvidencePack,
+    correction_hint: str | None = None,
 ) -> list[dict[str, str]]:
     """构建 [system, user] 两条消息：Calculation/Evidence 只进入 user（data delimiter 内）。
 
@@ -149,8 +160,11 @@ def build_analysis_messages(
             lines.append(_render_evidence(item))
         lines.append(EVIDENCE_DATA_END)
 
+    system_content = FINANCIAL_ANALYSIS_SYSTEM_PROMPT
+    if correction_hint:
+        system_content = system_content + "\n\n【上一轮输出修正要求】\n" + correction_hint.strip()
     return [
-        {"role": "system", "content": FINANCIAL_ANALYSIS_SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": "\n".join(lines)},
     ]
 

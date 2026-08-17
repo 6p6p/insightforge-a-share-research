@@ -46,6 +46,7 @@ from app.analysis.financial.contracts import (
     FinancialAnalysisContext,
     FinancialAnalysisDecision,
     FinancialAnalysisModel,
+    FinancialAnalysisReason,
     FinancialAnalysisRequest,
     FinancialAnalysisResult,
 )
@@ -58,6 +59,7 @@ from app.analysis.financial.errors import (
     FinancialAnalysisEvidenceCompanyMismatch,
     FinancialAnalysisInputError,
     FinancialAnalysisMalformedOutput,
+    FinancialAnalysisNumericLiteralForbidden,
 )
 from app.analysis.financial.packs import (
     CalculationPackSource,
@@ -68,6 +70,7 @@ from app.analysis.financial.packs import (
     build_evidence_pack_allowing_empty,
     resolve_decision_refs,
 )
+from app.analysis.financial.prompt import NUMERIC_REPAIR_HINT
 from app.claims.financial_contracts import (
     FinancialClaimDraft,
     FinancialClaimImportance,
@@ -105,16 +108,25 @@ class FinancialAnalysisService:
         evidence_pack = build_evidence_pack_allowing_empty(evidence_sources)
 
         # 4-7. 调模型（结构化决策；LLM 调用期间不持有 DB transaction）。
-        # 有界重试：生产实测 DeepSeek 瞬时 5xx/超时/偶发输出违规（numeric
-        # literal）——重试 2 次仍失败才抛（0 写；orchestration 可 retry）。
+        # Part 1 Hardening：numeric-literal 违规 → **自动修复**（带 correction
+        # hint 重新生成，最多 3 次）→ 仍失败 → **降级为 0-claims 定性结果**
+        # （不阻断 Stage4；不引入无来源数字；warning 记录）。模型瞬时错误
+        # （ModelUnavailable）仍走 5 次有界重试。
         context = FinancialAnalysisContext(
             research_question=request.research_question,
             strategy=FINANCIAL_ANALYST_FOCUS,
         )
         decision = None
+        correction_hint: str | None = None
+        numeric_repairs = 0
         for attempt in range(5):
             try:
-                decision = await self._call_model(context, calculation_pack, evidence_pack)
+                decision = await self._call_model(
+                    context,
+                    calculation_pack,
+                    evidence_pack,
+                    correction_hint=correction_hint,
+                )
                 # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
                 if not decision.relevant:
                     return FinancialAnalysisResult(
@@ -124,12 +136,36 @@ class FinancialAnalysisService:
                         replayed_count=0,
                         reason_code=decision.reason_code,
                     )
-                # 7. numeric-literal guard（任一 Claim 含数字/百分比 → 整次失败
-                #    0 写；不自动删数字 / 不改写 / 不让第二个 LLM 修正——重试
-                #    是让模型重新生成合规输出）。
+                # 7. numeric-literal guard（任一 Claim 含数字/百分比 → 进入
+                #    repair flow，带 hint 重新生成；guard 本身不删数字/不改写）。
                 for candidate in decision.claims:
                     assert_statement_has_no_numeric_literals(candidate.statement)
                 break
+            except FinancialAnalysisNumericLiteralForbidden as exc:
+                numeric_repairs += 1
+                if numeric_repairs <= 3:
+                    correction_hint = NUMERIC_REPAIR_HINT
+                    self._logger.warning(
+                        "financial_analysis_numeric_repair",
+                        attempt=attempt,
+                        repair_round=numeric_repairs,
+                        reason=str(exc)[:200],
+                    )
+                    decision = None
+                    continue
+                # repair 3 次仍失败 → 降级：0-claims 定性结果（无数字可进报告），
+                # 不阻断 Stage4（synthesis 继续）。
+                self._logger.warning(
+                    "financial_analysis_numeric_downgraded",
+                    reason_code=FinancialAnalysisReason.NUMERIC_REFERENCE_DOWNGRADED.value,
+                )
+                return FinancialAnalysisResult(
+                    relevant=False,
+                    claim_ids=[],
+                    created_count=0,
+                    replayed_count=0,
+                    reason_code=FinancialAnalysisReason.NUMERIC_REFERENCE_DOWNGRADED,
+                )
             except FinancialAnalysisError as exc:
                 if attempt < 4:
                     self._logger.warning(
@@ -240,13 +276,20 @@ class FinancialAnalysisService:
         context: FinancialAnalysisContext,
         calculation_pack: CalculationPack,
         evidence_pack: EvidencePack,
+        correction_hint: str | None = None,
     ) -> FinancialAnalysisDecision:
         """调用模型并归一到 FinancialAnalysisDecision（防御性 double-check）。
 
         模型层负责解析；这里再对返回结果做一次 schema 校验（provider 可能
         返回 raw dict / 已构造对象），ValidationError → MalformedOutput。
+        correction_hint（Part 1 repair flow）：上一轮违规的修复指令。
         """
-        raw = await self._model.analyze(context, calculation_pack, evidence_pack)
+        raw = await self._model.analyze(
+            context,
+            calculation_pack,
+            evidence_pack,
+            correction_hint=correction_hint,
+        )
         if isinstance(raw, FinancialAnalysisDecision):
             return raw
         try:

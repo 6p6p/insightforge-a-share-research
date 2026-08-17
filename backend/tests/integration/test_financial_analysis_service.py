@@ -48,7 +48,6 @@ from app.analysis.financial.errors import (
     FinancialAnalysisEvidenceCompanyMismatch,
     FinancialAnalysisMalformedOutput,
     FinancialAnalysisModelUnavailable,
-    FinancialAnalysisNumericLiteralForbidden,
     FinancialAnalysisRelationConflict,
     FinancialAnalysisUnknownRef,
 )
@@ -393,7 +392,8 @@ async def test_analyze_missing_additional_evidence_aborts_before_llm(env) -> Non
 # ---------------------------------------------------------------- 失败路径（0 写）
 
 
-async def test_analyze_numeric_literal_guard_aborts_zero_writes(env) -> None:
+async def test_analyze_numeric_literal_guard_repair_then_downgrade(env) -> None:
+    """Part 1：numeric guard 保留——违规不直接失败；repair 3 次后降级 0 写。"""
     _, calc = await _seed_calc(env)
     request = FinancialAnalysisRequest(
         company_id=env["company_id"],
@@ -403,10 +403,12 @@ async def test_analyze_numeric_literal_guard_aborts_zero_writes(env) -> None:
     model = FakeFinancialAnalysisModel(
         decision=_decision(claims=[_candidate(statement="营业收入同比增长20%。")])
     )
-    with pytest.raises(FinancialAnalysisNumericLiteralForbidden):
-        await FinancialAnalysisService(env["sessionmaker"], model).analyze(request)
-    # LLM 被调用（guard 在模型输出之后），但 0 写。
-    assert len(model.calls) == 1
+    result = await FinancialAnalysisService(env["sessionmaker"], model).analyze(request)
+    # guard 未被绕过：违规输出不会产生任何 claim（0 写）；repair 耗尽 → 降级。
+    assert result.relevant is False
+    assert result.claim_ids == []
+    assert result.reason_code == FinancialAnalysisReason.NUMERIC_REFERENCE_DOWNGRADED
+    assert len(model.calls) == 4  # 1 次初始 + 3 次 repair
     assert await _fin_claim_count(env["sessionmaker"]) == 0
 
 
@@ -476,7 +478,7 @@ async def test_analyze_fact_candidate_rejected_zero_writes(env) -> None:
 
 
 async def test_analyze_chinese_numeric_statement_zero_writes(env) -> None:
-    """中文数字表达（两成）→ numeric guard 拒绝，整次失败 0 写。"""
+    """中文数字表达（两成）→ numeric guard 拒绝 → repair 耗尽降级，0 写。"""
     _, calc = await _seed_calc(env)
     request = FinancialAnalysisRequest(
         company_id=env["company_id"],
@@ -486,9 +488,11 @@ async def test_analyze_chinese_numeric_statement_zero_writes(env) -> None:
     model = FakeFinancialAnalysisModel(
         decision=_decision(claims=[_candidate(statement="营业收入增长两成。")])
     )
-    with pytest.raises(FinancialAnalysisNumericLiteralForbidden):
-        await FinancialAnalysisService(env["sessionmaker"], model).analyze(request)
-    assert len(model.calls) == 1
+    result = await FinancialAnalysisService(env["sessionmaker"], model).analyze(request)
+    assert result.relevant is False
+    assert result.claim_ids == []
+    assert result.reason_code == FinancialAnalysisReason.NUMERIC_REFERENCE_DOWNGRADED
+    assert len(model.calls) == 4
     assert await _fin_claim_count(env["sessionmaker"]) == 0
 
 
@@ -695,3 +699,89 @@ async def test_smoke_cleanup_removes_all_scratch_rows(env) -> None:
         artifact_id=artifact_id,
     )
     assert all(count == 0 for count in residual.values()), residual
+
+
+# ---------------------------------------------------------------- Part 1 Hardening：numeric repair flow
+
+
+async def test_analyze_numeric_repair_then_success(env) -> None:
+    """Part 1：第一次输出含违规数字 → 自动 repair（带 hint）→ 第二次合法 → 成功。"""
+    _, calc = await _seed_calc(env)
+    request = FinancialAnalysisRequest(
+        company_id=env["company_id"],
+        research_question=_QUESTION,
+        calculation_ids=[calc.calculation_id],
+    )
+    # 第一轮：statement 含数字（违规）；第二轮：合法定性输出。
+    model = FakeFinancialAnalysisModel(
+        decisions_by_round=[
+            _decision(
+                claims=[
+                    _candidate(
+                        statement="2025年收入增长54%。",
+                        support_calculation_refs=["C1"],
+                    )
+                ]
+            ),
+            _decision(
+                claims=[
+                    _candidate(
+                        statement="公司收入保持较快增长，主要受到主营业务扩张推动。",
+                        support_calculation_refs=["C1"],
+                    )
+                ]
+            ),
+        ]
+    )
+    service = FinancialAnalysisService(env["sessionmaker"], model)
+
+    result = await service.analyze(request)
+
+    assert result.relevant is True
+    assert result.created_count == 1
+    assert result.reason_code is None
+    # repair 触发了 hint（第二轮调用收到完整 NUMERIC_REPAIR_HINT）。
+    assert len(model.calls) == 2
+    assert model.correction_hints[0] is None
+    assert model.correction_hints[1] is not None
+    assert "未绑定证据的数字" in model.correction_hints[1]
+    # 数字没有进入任何 claim（guard 未被绕过）。
+    async with env["sessionmaker"]() as session:
+        rows = (await session.execute(text("SELECT statement FROM claims"))).scalars().all()
+    assert all("54" not in (row or "") and "2025" not in (row or "") for row in rows)
+
+
+async def test_analyze_numeric_repair_exhausted_downgrades_not_blocking(env) -> None:
+    """Part 1：3 次 repair 仍失败 → 降级 0-claims（numeric_reference_downgraded），
+    不抛错（Stage4 不阻断）。
+    """
+    _, calc = await _seed_calc(env)
+    request = FinancialAnalysisRequest(
+        company_id=env["company_id"],
+        research_question=_QUESTION,
+        calculation_ids=[calc.calculation_id],
+    )
+    bad = _decision(
+        claims=[
+            _candidate(
+                statement="2025年收入增长54%。",
+                support_calculation_refs=["C1"],
+            )
+        ]
+    )
+    # 初始 1 次 + repair 3 次 = 4 次调用，全部违规。
+    model = FakeFinancialAnalysisModel(decisions_by_round=[bad, bad, bad, bad])
+    service = FinancialAnalysisService(env["sessionmaker"], model)
+
+    result = await service.analyze(request)
+
+    # 降级结果：不抛错、0 写、reason 明确。
+    assert result.relevant is False
+    assert result.claim_ids == []
+    assert result.created_count == 0
+    assert result.reason_code == FinancialAnalysisReason.NUMERIC_REFERENCE_DOWNGRADED
+    assert await _fin_claim_count(env["sessionmaker"]) == 0
+    # 3 次调用都带 repair hint（第 1 次无 hint，第 2-4 次带）。
+    assert len(model.calls) == 4
+    assert model.correction_hints[0] is None
+    assert all(h is not None and "未绑定证据的数字" in h for h in model.correction_hints[1:])

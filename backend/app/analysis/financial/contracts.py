@@ -89,6 +89,9 @@ class FinancialAnalysisReason(StrEnum):
     NOT_RELEVANT = "not_relevant"
     INSUFFICIENT_CALCULATIONS = "insufficient_calculations"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    # 自动修复（Part 1 Hardening）：numeric-literal 违规 repair 重试耗尽后
+    # 降级为 0-claims 定性结果（不引入无来源数字；warning 记录在日志/审计）。
+    NUMERIC_REFERENCE_DOWNGRADED = "numeric_reference_downgraded"
 
 
 class FinancialClaimCandidate(BaseModel):
@@ -354,6 +357,7 @@ class FinancialAnalysisModel(Protocol):
         context: FinancialAnalysisContext,
         calculation_pack: CalculationPack,
         evidence_pack: EvidencePack,
+        correction_hint: str | None = None,
     ) -> FinancialAnalysisDecision: ...
 
 

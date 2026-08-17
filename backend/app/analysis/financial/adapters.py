@@ -54,6 +54,7 @@ class DeepSeekFinancialAnalysisModel:
         context: FinancialAnalysisContext,
         calculation_pack: CalculationPack,
         evidence_pack: EvidencePack,
+        correction_hint: str | None = None,
     ) -> FinancialAnalysisDecision:
         try:
             from langchain_core.exceptions import OutputParserException  # noqa: F401
@@ -65,6 +66,7 @@ class DeepSeekFinancialAnalysisModel:
             context=context,
             calculation_pack=calculation_pack,
             evidence_pack=evidence_pack,
+            correction_hint=correction_hint,
         )
         api_key = self._settings.deepseek_api_key
         llm = ChatDeepSeek(
