@@ -701,7 +701,7 @@ async def test_smoke_cleanup_removes_all_scratch_rows(env) -> None:
     assert all(count == 0 for count in residual.values()), residual
 
 
-# ---------------------------------------------------------------- Part 1 Hardening：numeric repair flow
+# ---------------------------------------------------------------- Part 1 Hardening
 
 
 async def test_analyze_numeric_repair_then_success(env) -> None:
