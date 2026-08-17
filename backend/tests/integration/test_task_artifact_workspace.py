@@ -1050,3 +1050,166 @@ async def test_no_run_task_returns_empty(env, connection_uri) -> None:
         assert summary.review_issue_count == 0
     finally:
         await manager.close()
+
+
+async def test_waiting_manual_task_shows_company_evidence(env, connection_uri) -> None:
+    """P9：任务无 Stage4/5 checkpoint（waiting_manual）时，sources/evidence
+    fallback 到公司已获取资料（真实 provenance，进度展示），不再显示空工作台。
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+    company_id = env["company_id"]
+    # 清理本测试可能残留的行（共享 _cleanup 不删 research_plans/source 链）。
+    async with sessionmaker() as session:
+        await session.execute(
+            text("DELETE FROM evidence_cards WHERE company_id = :c"), {"c": company_id}
+        )
+        await session.execute(
+            text(
+                "DELETE FROM parsed_sources WHERE source_id IN "
+                "(SELECT source_id FROM source_records WHERE company_id = :c)"
+            ),
+            {"c": company_id},
+        )
+        await session.execute(
+            text("DELETE FROM source_records WHERE company_id = :c"), {"c": company_id}
+        )
+        await session.execute(
+            text(
+                "DELETE FROM raw_artifacts WHERE artifact_id NOT IN "
+                "(SELECT artifact_id FROM source_records)"
+            )
+        )
+        await session.execute(
+            text("DELETE FROM research_plans WHERE company_id = :c"), {"c": company_id}
+        )
+        await session.commit()
+    plan_id = uuid4()
+    raw_id = uuid4()
+    source_id = uuid4()
+    parsed_id = uuid4()
+    card_id = uuid4()
+    quote_text = "营业收入（千元） 362,012,554 400,917,045"
+    fingerprint = hashlib.sha256(b"pv-fallback-test").hexdigest()
+    quote_sha = hashlib.sha256(quote_text.encode()).hexdigest()
+    async with sessionmaker() as session:
+        await session.execute(
+            text(
+                "INSERT INTO research_plans (research_plan_id, task_id, company_id, "
+                "plan_schema_version, planner_name, planner_version, model_id, "
+                "planner_input_fingerprint, plan_fingerprint, plan_payload, "
+                "planner_input_payload, planner_input_schema_version, created_at) "
+                "VALUES (:pid, :tid, :cid, 2, 'pv', 1, 'test:model', :fp, :fp, "
+                "'{}'::jsonb, '{}'::jsonb, 1, :now)",
+            ),
+            {
+                "pid": plan_id,
+                "tid": task_id,
+                "cid": company_id,
+                "fp": fingerprint,
+                "now": datetime.now(UTC),
+            },
+        )
+        await session.execute(
+            text(
+                "INSERT INTO raw_artifacts (artifact_id, content_sha256, storage_key, "
+                "byte_size, media_type, created_at) VALUES ",
+                "(:id, :sha, 'k', 1, 'application/pdf', :now)",
+            ),
+            {"id": raw_id, "sha": fingerprint, "now": datetime.now(UTC)},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO source_records (source_id, company_id, provider_key, artifact_id, "
+                "document_type, title, source_url, acquisition_method, status, "
+                "authority_tier_snapshot, critical_claim_eligible_snapshot, "
+                "provider_capabilities_snapshot, acquired_at, created_at) "
+                "VALUES (:id, :cid, 'eastmoney', :rid, 'annual_report', '测试年报', "
+                "'https://example.com/a.pdf', 'automatic_discovery', 'available', 3, false, "
+                "'[\"annual_report\"]'::jsonb, :now, :now)",
+            ),
+            {"id": source_id, "cid": company_id, "rid": raw_id, "now": datetime.now(UTC)},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO parsed_sources (parsed_source_id, source_id, artifact_id, "
+                "parser_name, parser_version, raw_content_sha256, parse_fingerprint, "
+                "block_count, parsed_at, created_at) VALUES ",
+                "(:id, :sid, :rid, 'pv', 1, :sha, :fp, 1, :now, :now)",
+            ),
+            {
+                "id": parsed_id,
+                "sid": source_id,
+                "rid": raw_id,
+                "sha": fingerprint,
+                "fp": fingerprint,
+                "now": datetime.now(UTC),
+            },
+        )
+        await session.execute(
+            text(
+                "INSERT INTO evidence_cards (evidence_card_id, company_id, source_id, "
+                "parsed_source_id, research_question, research_question_sha256, "
+                "evidence_statement, evidence_type, quote_text, quote_sha256, "
+                "quote_start, quote_end, locator_refs, provider_key, "
+                "authority_tier_snapshot, critical_claim_eligible_snapshot, "
+                "extractor_name, extractor_version, extractor_confidence, "
+                "evidence_schema_version, evidence_fingerprint, origin_type, created_at) "
+                "VALUES (:id, :cid, :sid, :pid, 'q', :qsha, 's', 'metric', :qt, :qsha, 0, :qend, "
+                '\'[{"type":"financial_extraction","block_id":"b"}]\'::jsonb, '
+                "'eastmoney', 3, false, 'pv', 1, 'low', 1, :fp, 'financial_extraction', :now)",
+            ),
+            {
+                "id": card_id,
+                "cid": company_id,
+                "sid": source_id,
+                "pid": parsed_id,
+                "qsha": quote_sha,
+                "qt": quote_text,
+                "qend": len(quote_text),
+                "fp": fingerprint,
+                "now": datetime.now(UTC),
+            },
+        )
+        await session.commit()
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        artifact = _make_artifact_service(sessionmaker, manager)
+        sources = await artifact.get_sources(task_id, limit=20, offset=0)
+        assert sources.total == 1
+        assert sources.items[0].source_id == source_id
+        evidence = await artifact.get_evidence(task_id, limit=20, offset=0)
+        assert evidence.total == 1
+        assert evidence.items[0].evidence_card_id == card_id
+    finally:
+        await manager.close()
+        # 清理本测试创建的产物（共享 _cleanup 不删 research_plans/source 链）。
+        async with sessionmaker() as session:
+            await session.execute(
+                text("DELETE FROM evidence_cards WHERE company_id = :c"), {"c": company_id}
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM parsed_sources WHERE source_id IN "
+                    "(SELECT source_id FROM source_records WHERE company_id = :c)"
+                ),
+                {"c": company_id},
+            )
+            await session.execute(
+                text("DELETE FROM source_records WHERE company_id = :c"), {"c": company_id}
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM raw_artifacts WHERE artifact_id NOT IN "
+                    "(SELECT artifact_id FROM source_records)"
+                )
+            )
+            await session.execute(
+                text("DELETE FROM research_plans WHERE company_id = :c"), {"c": company_id}
+            )
+            await session.commit()

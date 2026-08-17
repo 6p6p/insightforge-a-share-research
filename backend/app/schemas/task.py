@@ -1,6 +1,6 @@
 """Pydantic contracts for research task creation and queries."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -9,15 +9,24 @@ from app.domain.tasks import ResearchModule, TaskStage, TaskStatus
 
 _MAX_QUESTIONS = 20
 _MAX_QUESTION_LENGTH = 500
+# AUTO 默认窗口：近 3 年至今（与前端 TaskCreateForm 默认值一致）。
+_DEFAULT_WINDOW_DAYS = 3 * 365
+# AUTO 默认模块：全部研究模块（与前端 DEFAULT_MODULES 一致）。
+_DEFAULT_MODULES = list(ResearchModule)
 
 
 class TaskCreateRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    # 产品最小输入 = 公司名称/代码；研究周期与模块都有 AUTO 默认值（可覆盖）。
     company_query: str = Field(min_length=1, max_length=100)
-    research_start_date: date
-    research_end_date: date
-    modules: list[ResearchModule] = Field(min_length=1)
+    research_start_date: date = Field(
+        default_factory=lambda: date.today() - timedelta(days=_DEFAULT_WINDOW_DAYS)
+    )
+    research_end_date: date = Field(default_factory=date.today)
+    modules: list[ResearchModule] = Field(
+        default_factory=lambda: list(_DEFAULT_MODULES), min_length=1
+    )
     questions: list[str] = Field(default_factory=list, max_length=_MAX_QUESTIONS)
     include_relative_valuation: bool = False
     require_plan_approval: bool = True

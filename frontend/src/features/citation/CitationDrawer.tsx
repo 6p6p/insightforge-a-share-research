@@ -43,6 +43,7 @@ import type {
   CitationTarget,
   DocumentProvenance,
   EvidenceProvenance,
+  FinancialExtractionProvenance,
   MacroProvenance,
 } from '../../types/citation';
 
@@ -234,6 +235,9 @@ function ProvenanceBlock({ provenance }: { provenance: EvidenceProvenance }): Re
   if (provenance.origin_type === 'document_chunk') {
     return <DocumentProvenanceBlock provenance={provenance} />;
   }
+  if (provenance.origin_type === 'financial_extraction') {
+    return <FinancialExtractionProvenanceBlock provenance={provenance} />;
+  }
   return <MacroProvenanceBlock provenance={provenance} />;
 }
 
@@ -334,6 +338,68 @@ function DocumentProvenanceBlock({ provenance }: { provenance: DocumentProvenanc
   return (
     <div>
       <Text strong>来源追溯（Document）</Text>
+      <Descriptions size="small" column={1} bordered style={{ marginTop: 8 }}>
+        <Descriptions.Item label="来源">
+          {provenance.title || provenance.source_id.slice(0, 8)}
+        </Descriptions.Item>
+        <Descriptions.Item label="URL">
+          {provenance.source_url ? (
+            <a href={provenance.source_url} target="_blank" rel="noopener noreferrer">
+              {provenance.source_url}
+            </a>
+          ) : (
+            '—'
+          )}
+        </Descriptions.Item>
+        <Descriptions.Item label="提供方">
+          {provenance.provider_label}（{provenance.provider_key}）
+        </Descriptions.Item>
+        <Descriptions.Item label="发布/获取时间">{provenance.published_at ?? '—'}</Descriptions.Item>
+        <Descriptions.Item label="文档类型">{provenance.document_type ?? '—'}</Descriptions.Item>
+        <Descriptions.Item label="权威层级">{provenance.authority_tier}</Descriptions.Item>
+        <Descriptions.Item label="定位">{locatorLabel(provenance.locator)}</Descriptions.Item>
+        <Descriptions.Item label="Source ID">
+          <Text code>{provenance.source_id}</Text>
+        </Descriptions.Item>
+      </Descriptions>
+      <div style={{ marginTop: 8 }}>
+        <OriginalTextButton
+          sourceId={provenance.source_id}
+          mediaType={provenance.media_type}
+          sourceUrl={provenance.source_url}
+          pageNumber={provenance.locator?.page_number ?? null}
+        />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <Text type="secondary">引用上下文（≤5000 字符）</Text>
+        <pre
+          style={{
+            background: '#fafafa',
+            padding: 12,
+            borderRadius: 6,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            maxHeight: 260,
+            overflow: 'auto',
+            fontSize: 12,
+          }}
+        >
+          {provenance.context_text}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+
+function FinancialExtractionProvenanceBlock({
+  provenance,
+}: {
+  provenance: FinancialExtractionProvenance;
+}): React.JSX.Element {
+  return (
+    <div>
+      <Text strong>来源追溯（财务提取）</Text>
       <Descriptions size="small" column={1} bordered style={{ marginTop: 8 }}>
         <Descriptions.Item label="来源">
           {provenance.title || provenance.source_id.slice(0, 8)}

@@ -214,3 +214,39 @@ async def test_concurrent_idempotent_creation(session_factory) -> None:
             {"key": key},
         )
         await cleanup.commit()
+
+
+# ---------------------------------------------------------------- TaskCreateRequest AUTO 默认值
+
+
+def test_create_request_company_only_defaults() -> None:
+    """产品最小输入 = 公司名：周期/模块缺省时用 AUTO 默认值（近 3 年至今 + 全部模块）。"""
+    from datetime import date, timedelta
+
+    from app.schemas.task import TaskCreateRequest
+
+    request = TaskCreateRequest(company_query="宁德时代")
+    assert request.company_query == "宁德时代"
+    # 近 3 年窗口（前端默认值一致）。
+    expected_start = date.today() - timedelta(days=3 * 365)
+    assert request.research_start_date == expected_start
+    assert request.research_end_date == date.today()
+    # 全部模块。
+    assert set(request.modules) == {
+        "company_profile",
+        "business",
+        "financial",
+        "events",
+        "macro",
+        "risk",
+    }
+    assert request.questions == []
+    # 显式覆盖仍然生效。
+    explicit = TaskCreateRequest(
+        company_query="600519",
+        research_start_date=date(2024, 1, 1),
+        research_end_date=date(2024, 12, 31),
+        modules=["financial"],
+    )
+    assert explicit.research_start_date == date(2024, 1, 1)
+    assert explicit.modules == ["financial"]

@@ -305,3 +305,63 @@ describe('CitationDrawer（Stage 6B.2 spec K/L/N）', () => {
     expect(onNavigateClaim).toHaveBeenCalledWith('cl-1');
   });
 });
+
+
+const financialEvidence: EvidenceCitationResponse = {
+  evidence: {
+    evidence_card_id: 'ev-fin-1',
+    statement: 'revenue（consolidated）报告期 2024-12-31 的数值为 362,012,554',
+    quote_text: '营业收入（千元） 362,012,554 400,917,045',
+    evidence_type: 'metric',
+    origin_type: 'financial_extraction',
+  },
+  claim_relations: [],
+  provenance: {
+    origin_type: 'financial_extraction',
+    source_id: 'src-fin-1',
+    provider_key: 'eastmoney',
+    provider_label: '东方财富（公告数据中心）',
+    title: '宁德时代:2024年年度报告',
+    source_url: 'https://pdf.dfcfw.com/xxx.pdf',
+    published_at: '2025-03-14T00:00:00Z',
+    authority_tier: 3,
+    document_type: 'annual_report',
+    raw_artifact_id: 'raw-fin-1',
+    media_type: 'application/pdf',
+    parsed_source_id: 'ps-fin-1',
+    block_id: 'block-fin-1',
+    locator: {
+      locator_type: 'pdf_page',
+      block_ordinal: null,
+      char_start: null,
+      char_end: null,
+      ordinal: null,
+      tag: null,
+      xpath: null,
+      element_id: null,
+      page_number: 42,
+      line_index: 7,
+      bbox: null,
+      page_width: null,
+      page_height: null,
+    },
+    locator_refs: [],
+    context_text: '营业收入（千元） 362,012,554 400,917,045 -9.70%',
+    quote_text: '营业收入（千元） 362,012,554 400,917,045',
+  },
+};
+
+it('financial_extraction provenance 渲染财务提取来源追溯', async () => {
+  mocks.getEvidenceCitation.mockResolvedValue(financialEvidence);
+  renderDrawer({ kind: 'evidence', evidenceCardId: 'ev-fin-1' });
+
+  expect(await screen.findByText('来源追溯（财务提取）')).toBeInTheDocument();
+  expect(screen.getByText('宁德时代:2024年年度报告')).toBeInTheDocument();
+  expect(screen.getByText('第 42 页 · 第 7 行')).toBeInTheDocument();
+  const pdfButton = screen.getByText('打开原文 PDF').closest('a');
+  expect(pdfButton).not.toBeNull();
+  expect(pdfButton).toHaveAttribute(
+    'href',
+    `${API_BASE_URL}/source-records/src-fin-1/content#page=42`,
+  );
+});

@@ -147,16 +147,16 @@ export function TaskCreateForm({ onCreated }: Props): React.JSX.Element {
 
         <Form.Item
           name="research_dates"
-          label="研究分析周期"
-          rules={[{ required: true, message: '请选择研究起止日期' }]}
+          label="研究分析周期（默认近 3 年，可调整）"
+          tooltip="默认近 3 年至今；不修改直接提交即可。"
         >
           <DatePicker.RangePicker />
         </Form.Item>
 
         <Form.Item
           name="modules"
-          label="研究模块"
-          rules={[{ required: true, message: '请至少选择一个研究模块' }]}
+          label="研究模块（默认全部，可调整）"
+          tooltip="默认覆盖全部研究模块；不修改直接提交即可。"
         >
           <Select
             mode="multiple"

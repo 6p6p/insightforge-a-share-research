@@ -53,6 +53,7 @@ from app.db.models.evidence_card import EvidenceCardModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
+from app.db.models.research_plan import ResearchPlanModel
 from app.db.models.research_task import ResearchTaskModel
 from app.db.models.source_record import SourceRecordModel
 from app.db.models.workflow_run import WorkflowRunModel
@@ -142,6 +143,9 @@ _WORK_ITEM_EVIDENCE_KEYS = (
 # macro source 投影的 origin_type / source_type（spec F dual-origin）。
 _ORIGIN_DOCUMENT = "document_chunk"
 _ORIGIN_MACRO = "macro_observation"
+# financial_extraction 卡同样持有真实 source_id（报告 PDF）——dual-origin 并集
+# 必须包含它（P9：财务提取证据的来源展示）。
+_ORIGIN_FINANCIAL = "financial_extraction"
 _SOURCE_TYPE_MACRO = "macro_series"
 
 
@@ -248,6 +252,10 @@ class TaskArtifactService:
         anchor = await self._anchor(task_id)
         verified_result, verified_run = await self._resolve_verified(anchor)
         evidence_ids = await self._evidence_ids(anchor, verified_run)
+        if not evidence_ids:
+            # P9 产品修复：waiting_manual（无 Stage4/5 checkpoint）任务展示
+            # 公司已获取的资料（真实 provenance，进度展示用）。
+            evidence_ids = await self._company_evidence_ids(task_id)
         all_sources = await self._combined_sources(evidence_ids)
         total = len(all_sources)
         return SourceArtifactListResponse(
@@ -268,6 +276,11 @@ class TaskArtifactService:
         verified_result, verified_run = await self._resolve_verified(anchor)
         evidence_ids = await self._evidence_ids(anchor, verified_run)
         claim_ids = set(verified_result.input_claim_ids) if verified_result is not None else set()
+        if not evidence_ids and not claim_ids:
+            # P9 产品修复：任务停在 waiting_manual（无 Stage4/5 checkpoint）时，
+            # checkpoint 派生集为空——fallback 到该公司**已获取**的证据卡
+            # （真实 provenance，非伪造；仅用于进度展示，不冒充 canonical 引用集）。
+            evidence_ids = await self._company_evidence_ids(task_id)
         async with self._sessionmaker() as session:
             rows, total = await EvidenceCardRepository(session).list_by_ids(
                 sorted(evidence_ids, key=str), limit, offset
@@ -770,6 +783,28 @@ class TaskArtifactService:
                 ids.update(claim.evidence_card_ids)
         return ids
 
+    async def _company_evidence_ids(self, task_id: UUID) -> set[UUID]:
+        """waiting_manual 兜底：该公司已获取的全部证据卡（经 plan 解析 company）。
+
+        仅用于无 Stage4/5 checkpoint 的任务进度展示；卡片 provenance 完整
+        （evidence → source → raw artifact），不伪造任何数据。
+        """
+        async with self._sessionmaker() as session:
+            company_id = (
+                await session.execute(
+                    select(ResearchPlanModel.company_id)
+                    .where(ResearchPlanModel.task_id == task_id)
+                    .order_by(ResearchPlanModel.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if company_id is None:
+                return set()
+            rows = await EvidenceCardRepository(session).list_by_company(
+                company_id, limit=10000, offset=0
+            )
+        return {row.evidence_card_id for row in rows}
+
     async def _combined_sources(self, evidence_ids: set[UUID]) -> list[SourceArtifactResponse]:
         """dual-origin 来源并集（spec F）：document sources + macro sources，去重合并。
 
@@ -784,7 +819,8 @@ class TaskArtifactService:
             doc_source_ids = {
                 card.source_id
                 for card in cards
-                if card.origin_type == _ORIGIN_DOCUMENT and card.source_id is not None
+                if card.origin_type in (_ORIGIN_DOCUMENT, _ORIGIN_FINANCIAL)
+                and card.source_id is not None
             }
             macro_obs_ids = {
                 card.macro_observation_id
