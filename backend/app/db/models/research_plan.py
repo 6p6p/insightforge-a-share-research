@@ -118,6 +118,14 @@ class ResearchPlanModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # Planner reliability telemetry (P1: deterministic fallback / repair counters).
+    # Internal-only; never exposed to users.
+    planner_fallback_used: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=text("false")
+    )
+    planner_repair_attempts: Mapped[int] = mapped_column(
+        nullable=False, default=0, server_default=text("0")
+    )
 
 
 class ResearchPlanRouteModel(Base):

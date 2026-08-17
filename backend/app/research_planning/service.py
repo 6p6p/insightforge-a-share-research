@@ -54,7 +54,13 @@ from app.research_planning.contracts import (
 from app.research_planning.errors import (
     ResearchPlanIntegrityError,
     ResearchPlanLegacyExecutionUnsupported,
+    ResearchPlannerMalformedOutput,
+    ResearchPlannerModelUnavailable,
     ResearchPlanNotFound,
+)
+from app.research_planning.fallback import (
+    MAX_PLANNER_RETRIES,
+    build_fallback_plan_payload,
 )
 from app.research_planning.intent import DefaultResearchIntentGenerator
 from app.research_planning.plan_scope import (
@@ -84,6 +90,8 @@ class ResearchPlanResult:
     plan_fingerprint: str
     plan_payload: dict
     created_at: datetime
+    planner_fallback_used: bool = False
+    planner_repair_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -285,8 +293,28 @@ class ResearchPlanningService:
                 self._assert_replay_matches(existing, input_fingerprint)
                 return self._to_result(existing, replayed=True)
 
-        payload = await self._planner_model.generate(request)
-        # 确定性强制用户模块范围（planner 输出过滤；空交集 → ScopeMismatch）。
+        # P1: Planner reliability — bounded retry then deterministic fallback.
+        # Malformed output / model unavailable must not block research start.
+        payload: ResearchPlanPayload | None = None
+        repair_attempts = 0
+        fallback_used = False
+        for attempt in range(MAX_PLANNER_RETRIES):
+            try:
+                payload = await self._planner_model.generate(request)
+                break
+            except ResearchPlannerMalformedOutput:
+                repair_attempts = attempt + 1
+            except ResearchPlannerModelUnavailable:
+                repair_attempts = attempt + 1
+        if payload is None:
+            # All retries exhausted → deterministic fallback (P1 safety net)
+            payload = build_fallback_plan_payload(
+                modules=list(task.modules or []),
+                research_question=research_question,
+                analysis_as_of=analysis_as_of,
+            )
+            fallback_used = True
+        # 确定性强制用户模块范围（planner 输出过滤；空交集 → ScopeMismatch）
         payload = apply_selected_modules(
             payload,
             task.modules,
@@ -303,6 +331,8 @@ class ResearchPlanningService:
             payload=payload,
             input_fingerprint=input_fingerprint,
             plan_fingerprint=plan_fingerprint,
+            fallback_used=fallback_used,
+            repair_attempts=repair_attempts,
         )
 
     async def _persist(
@@ -314,6 +344,8 @@ class ResearchPlanningService:
         payload: ResearchPlanPayload,
         input_fingerprint: str,
         plan_fingerprint: str,
+        fallback_used: bool = False,
+        repair_attempts: int = 0,
     ) -> ResearchPlanResult:
         """短事务 create_or_get（并发 → replay 同一行）。v2 行同时持久化
         creation-time PlannerInputSnapshot（spec A）。"""
@@ -331,6 +363,8 @@ class ResearchPlanningService:
                 plan_fingerprint=plan_fingerprint,
                 planner_input_payload=snapshot.model_dump(mode="json"),
                 planner_input_schema_version=PLANNER_INPUT_SNAPSHOT_SCHEMA_VERSION,
+                planner_fallback_used=fallback_used,
+                planner_repair_attempts=repair_attempts,
             )
             row, created = await repo.create_or_get(plan)
             await session.commit()
@@ -563,4 +597,6 @@ class ResearchPlanningService:
             plan_fingerprint=plan.plan_fingerprint,
             plan_payload=dict(plan.plan_payload),
             created_at=plan.created_at.astimezone(UTC),
+            planner_fallback_used=bool(getattr(plan, "planner_fallback_used", False)),
+            planner_repair_attempts=int(getattr(plan, "planner_repair_attempts", 0)),
         )
