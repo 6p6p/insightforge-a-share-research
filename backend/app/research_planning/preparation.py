@@ -432,9 +432,29 @@ class ResearchPreparationService:
                     )
                 )
 
-        # context（外部环境）缺失不阻塞：只由核心 needs（document/financial/
-        # macro/event/valuation/module）判定 ready。
-        ready = not [item for item in missing if item.need_kind != "context"]
+        # context / macro / event（外部环境类）缺失不阻塞；news_article 类型
+        # 的 document need 同样非阻塞（与 event 同类——新闻驱动资料不可得
+        # 时不卡死研究）。只由核心 needs（定期报告/公告/IR 的 document、
+        # financial / valuation / module:business / module:risk /
+        # module:financial / module:valuation）判定 ready——用户只输入公司名
+        # （默认全部模块）时，外部数据源不可得（World Bank 无该指标、新闻
+        # 验证失败）不应卡死研究；缺口保留在 missing（前端展示 + 报告
+        # evidence gaps 体现）。
+        news_doc_codes = {
+            need.need_code
+            for need in payload.document_needs
+            if need.source_type == ResearchDocumentNeedType.NEWS_ARTICLE
+        }
+        ready = not [
+            item
+            for item in missing
+            if item.need_kind not in ("context", "macro", "event")
+            and item.need_code not in news_doc_codes
+            and not (
+                item.need_kind == "module"
+                and item.need_code.split(":", 1)[-1] in ("macro", "event")
+            )
+        ]
         stage4_request = self._build_stage4_request(ctx, module_inputs) if ready else None
         return ResearchPreparationResult(
             research_plan_id=ctx.research_plan_id,
@@ -798,6 +818,11 @@ class ResearchPreparationService:
         """按 module_inputs 构造现有 Stage4WorkflowRequest（question/as_of 来自 frozen ctx）。"""
         items = []
         for index, input_ in enumerate(module_inputs, start=1):
+            # 空主池模块不进入 Stage4（其缺失已记录在 missing_needs，用户可见；
+            # 不因外部数据源不可得而让分析器空跑失败）。macro 必须有 driver
+            # 证据（MacroWorkItem 硬要求 ≥1；company-only 池无意义）。
+            if not input_.artifact_ids:
+                continue
             item_id = f"{input_.analysis_type}-{index}"
             if input_.analysis_type in ("business", "risk"):
                 items.append(

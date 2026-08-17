@@ -25,6 +25,7 @@ CNINFO WAF 不可用（hisAnnouncement/query 恒返回空）时，年度/半年�
 _eligible=False、Tier-3 快照由 eastmoney provider 行提供）。
 """
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -467,29 +468,37 @@ class AnnouncementDiscoveryService:
     # ------------------------------------------------------------ internal
 
     async def _fetch_page(self, security_code: str, page: int) -> list[dict]:
-        try:
-            response = await self._get(
-                _ANNOUNCEMENT_LIST_URL,
-                {
-                    "sr": -1,
-                    "page_size": _PAGE_SIZE,
-                    "page_index": page,
-                    "ann_type": "A",
-                    "client_source": "web",
-                    "stock_list": security_code,
-                    "f_node": 0,
-                    "s_node": 0,
-                },
-            )
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise AnnouncementDiscoveryError(
-                code="announcement_list_fetch_failed",
-                message="公告列表获取失败",
-            ) from exc
-        data = payload.get("data") or {}
-        items = data.get("list") or []
-        return [item for item in items if isinstance(item, dict)]
+        # 有界重试：生产实测 eastmoney API 瞬时抖动（网络/限流）——单次失败
+        # 即放弃会让真实研究中报告/公告获取失败；重试 2 次显著提高成功率。
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self._get(
+                    _ANNOUNCEMENT_LIST_URL,
+                    {
+                        "sr": -1,
+                        "page_size": _PAGE_SIZE,
+                        "page_index": page,
+                        "ann_type": "A",
+                        "client_source": "web",
+                        "stock_list": security_code,
+                        "f_node": 0,
+                        "s_node": 0,
+                    },
+                )
+                payload = response.json()
+                data = payload.get("data") or {}
+                items = data.get("list") or []
+                return [item for item in items if isinstance(item, dict)]
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+        raise AnnouncementDiscoveryError(
+            code="announcement_list_fetch_failed",
+            message="公告列表获取失败",
+        ) from last_error
 
     async def _get(self, url: str, params: dict) -> httpx.Response:
         """GET（注入 client 时复用且不关闭；否则用一次性 client）。"""

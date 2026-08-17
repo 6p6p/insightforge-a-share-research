@@ -127,7 +127,7 @@ class MacroAnalysisService:
             strategy=MACRO_ANALYST_FOCUS,
         )
         decision = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 decision = await self._call_model(context, driver_pack, company_pack)
                 # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
@@ -146,7 +146,7 @@ class MacroAnalysisService:
                     assert_macro_statement_has_no_numeric_literals(candidate.statement)
                 break
             except MacroAnalysisError as exc:
-                if attempt < 2:
+                if attempt < 4:
                     self._logger.warning(
                         "macro_analysis_model_retry",
                         attempt=attempt,

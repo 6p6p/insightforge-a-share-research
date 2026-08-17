@@ -554,7 +554,7 @@ async def test_durable_resume_after_worker_failure(env, monkeypatch, connection_
         with pytest.raises(FinancialAnalysisModelUnavailable):
             await runner_a.execute_stage4(run.run_id, request)
         assert (await runner_a.get_run(run.run_id)).status.value == "failed"
-        assert len(fail_financial.calls) == 3  # financial worker 有界重试后失败
+        assert len(fail_financial.calls) == 5  # financial worker 有界重试后失败
         # business/risk 已完成（慢失败留足时间）→ claim model 调用 2 次。
         assert len(models_a["claim"].calls) == 2
 

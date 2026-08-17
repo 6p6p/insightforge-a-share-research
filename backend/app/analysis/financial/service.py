@@ -112,7 +112,7 @@ class FinancialAnalysisService:
             strategy=FINANCIAL_ANALYST_FOCUS,
         )
         decision = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 decision = await self._call_model(context, calculation_pack, evidence_pack)
                 # 6. relevant=false → 0-claims 结果（不写任何 Claim）。
@@ -131,7 +131,7 @@ class FinancialAnalysisService:
                     assert_statement_has_no_numeric_literals(candidate.statement)
                 break
             except FinancialAnalysisError as exc:
-                if attempt < 2:
+                if attempt < 4:
                     self._logger.warning(
                         "financial_analysis_model_retry",
                         attempt=attempt,

@@ -465,8 +465,8 @@ async def test_analyze_numeric_literal_guard_aborts_zero_writes(env, monkeypatch
         await _service(env, model).analyze(
             _request(env, macro_driver=[macro_card], company=[doc_card])
         )
-    # LLM 被调用（guard 在模型输出之后），有界重试 3 次后仍失败；0 写。
-    assert len(model.calls) == 3
+    # LLM 被调用（guard 在模型输出之后），有界重试 5 次后仍失败；0 写。
+    assert len(model.calls) == 5
     assert await _claim_count(env["sessionmaker"]) == 0
     assert await _macro_tables_count(env["sessionmaker"], "macro_transmission_chains") == 0
 
