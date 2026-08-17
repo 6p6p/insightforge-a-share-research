@@ -1,5 +1,15 @@
 /** 产品展示映射（Part 3/4 Hardening）：后端枚举保持英文，前端显示中文。 */
 
+/** 研究模块 → 中文（未知原样返回）。 */
+export const MODULE_LABEL: Record<string, string> = {
+  company_profile: '公司概况',
+  business: '业务',
+  financial: '财务',
+  events: '事件',
+  macro: '宏观',
+  risk: '风险',
+};
+
 /** source_type / document_type → 中文（未知原样返回）。 */
 export const SOURCE_TYPE_LABEL: Record<string, string> = {
   annual_report: '年度报告',

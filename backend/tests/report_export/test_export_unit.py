@@ -25,6 +25,7 @@ from docx import Document
 from app.db.models.research_task import ResearchTaskModel
 from app.report.contracts import VerifiedReport
 from app.report_export.contracts import (
+    EXPORT_SCHEMA_VERSION,
     RENDERER_NAME_BY_FORMAT,
     RENDERER_VERSION_BY_FORMAT,
     ExportCitation,
@@ -83,10 +84,12 @@ def _card_detail(card_id, statement: str) -> ExportCardDetail:
 
 def _sample_pack(*, audit_note: str | None = None) -> ExportReportPack:
     return ExportReportPack(
-        export_schema_version=1,
+        export_schema_version=EXPORT_SCHEMA_VERSION,
         task_id=uuid4(),
         report_id=uuid4(),
         analysis_as_of=date(2024, 1, 1),
+        research_start_date=date(2023, 1, 1),
+        research_end_date=date(2026, 12, 31),
         company_name="贵州茅台",
         security_code="600519",
         research_question="600519 基本面研究",
@@ -298,6 +301,109 @@ def test_pack_audit_note_and_company() -> None:
     assert pack.audit_note == AUDIT_NOTE_HUMAN_APPROVED
     # questions 空 → 研究问题回退到 company_query。
     assert pack.research_question == "600519"
+    # 研究区间投影（task 日期进入 pack）。
+    assert pack.research_start_date == date(2023, 1, 1)
+    assert pack.research_end_date == date(2026, 12, 31)
+
+
+def test_pack_financial_extraction_provenance() -> None:
+    """financial_extraction 证据卡（P8 Evidence Locator 产物）必须可导出。
+
+    Regression（export HTTP 500 root cause）：真实报告引用财务自动提取证据卡，
+    provenance 是 FinancialExtractionProvenance——此前 _map_citation 只处理
+    Document / Macro 两种类型 → AttributeError，Markdown/DOCX/PDF 全部 500。
+    """
+    from app.schemas.citation import FinancialExtractionProvenance
+
+    card_a = uuid4()
+    payload = {
+        "sections": [
+            {
+                "section_id": "s1",
+                "title": "财务",
+                "paragraphs": [{"text": "p", "evidence_card_ids": [str(card_a)]}],
+            }
+        ]
+    }
+    report = VerifiedReport(
+        report_id=uuid4(),
+        outline_id=uuid4(),
+        company_id=uuid4(),
+        research_question_sha256="x",
+        analysis_as_of=date(2024, 1, 1),
+        report_schema_version=1,
+        report_fingerprint="f" * 64,
+        report_payload=payload,
+        verified_outline=object(),
+        verified_drafts=(),
+    )
+    task = ResearchTaskModel(
+        task_id=uuid4(),
+        company_query="600519",
+        research_start_date=date(2023, 1, 1),
+        research_end_date=date(2026, 12, 31),
+        modules=["company_profile"],
+        questions=[],
+        require_plan_approval=False,
+    )
+    cards_by_id = {
+        card_a: ExportCardDetail(
+            evidence_card_id=card_a,
+            statement="2024年营业收入同比增长15%",
+            quote_text="营业收入 1505.60 亿元",
+            origin_type="financial_extraction",
+        )
+    }
+    provenance = {
+        card_a: FinancialExtractionProvenance(
+            origin_type="financial_extraction",
+            source_id=uuid4(),
+            provider_key="sse",
+            provider_label="上交所",
+            title="2024年年度报告",
+            source_url="https://www.sse.com.cn/a.pdf",
+            published_at=datetime(2025, 3, 1),
+            authority_tier=1,
+            document_type="annual_report",
+            raw_artifact_id=uuid4(),
+            media_type="application/pdf",
+            parsed_source_id=uuid4(),
+            block_id=uuid4(),
+            locator=CitationLocator(locator_type="pdf_page", page_number=126),
+            context_text="上下文",
+            quote_text="营业收入 1505.60 亿元",
+        )
+    }
+
+    pack = build_export_report_pack(
+        verified_report=report,
+        task=task,
+        company=None,
+        cards_by_id=cards_by_id,
+        provenance_by_card=provenance,
+        audit_note=None,
+    )
+    assert len(pack.citations) == 1
+    citation = pack.citations[0]
+    assert citation.number == 1
+    assert citation.provider_label == "上交所"
+    assert citation.title == "2024年年度报告"
+    assert citation.page_number == 126
+    # clean projection：xpath / provider code 不进入导出引用。
+    assert citation.xpath is None
+    assert citation.page_number == 126
+
+    # 三个 renderer 全部可渲染（共享 pack → 不再 500）。
+    md = render_markdown(pack).decode("utf-8")
+    assert "来源：2024年年度报告" in md
+    assert "定位：第 126 页" in md
+    document = Document(BytesIO(render_docx(pack)))
+    assert any("来源：2024年年度报告" in p.text for p in document.paragraphs)
+    import pdfplumber
+
+    with pdfplumber.open(BytesIO(render_pdf(pack))) as pdf:
+        extracted = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    assert "2024年年度报告" in extracted
 
 
 # ---------------------------------------------------------------- renderers (spec O)
@@ -311,12 +417,16 @@ def test_render_markdown_deterministic_and_structure() -> None:
     text = first.decode("utf-8")
     assert "# 贵州茅台 基本面研究报告（600519）" in text
     assert "- 研究问题：600519 基本面研究" in text
+    # clean projection：研究区间（human-readable 元数据）。
+    assert "- 研究区间：2023-01-01 ~ 2026-12-31" in text
     # 正文 + [n] 标记原样。
     assert "公司经营现金流净额同比增长20%。[1][2]" in text
     assert "第二段无引用。" in text
-    # 附录 E1..En。
+    # 附录 E1..En：只输出人类可读来源引用——不输出 provider code（key）。
     assert "### E1 ｜ 上交所" in text
     assert "### E2 ｜ 国家统计局" in text
+    assert "- 提供方：上交所" in text
+    assert "（sse）" not in text
     assert "- 原始网页：https://www.sse.com.cn/a.pdf" in text
     assert "- 定位：第 12 页" in text
     assert "- 宏观：指标 GDP同比 ｜ 地域 全国 ｜ 观测期 2024Q1" in text
@@ -421,7 +531,8 @@ def test_fingerprint_stable_and_sensitive() -> None:
         != base
     )
     assert compute_export_input_fingerprint(**_fingerprint_args(pack, audit_id=uuid4())) != base
-    assert compute_export_input_fingerprint(**_fingerprint_args(pack, renderer_version=2)) != base
+    # renderer version 变化 → 新指纹（用与当前版本不同的值，如 v3）。
+    assert compute_export_input_fingerprint(**_fingerprint_args(pack, renderer_version=3)) != base
     assert (
         compute_export_input_fingerprint(
             **_fingerprint_args(_sample_pack(audit_note=AUDIT_NOTE_HUMAN_APPROVED))

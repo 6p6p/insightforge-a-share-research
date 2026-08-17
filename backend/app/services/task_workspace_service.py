@@ -20,11 +20,13 @@ from app.core.errors import (
 )
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
+from app.research_orchestration.repository import ResearchOrchestrationRepository
 from app.schemas.research_execution import ArtifactSummary, TaskWorkspaceResponse
 from app.schemas.task import TaskResponse
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.task_artifact_service import TaskArtifactService
+from app.services.task_status_projection import project_public_status
 
 
 class TaskWorkspaceService:
@@ -45,9 +47,21 @@ class TaskWorkspaceService:
         async with self._sessionmaker() as session:
             task_model = await ResearchTaskRepository(session).get_by_id(task_id)
             run_model = await WorkflowRunRepository(session).get_latest_for_task(task_id)
+            orchestration = await ResearchOrchestrationRepository(session).get_latest_for_task(
+                task_id
+            )
         if task_model is None:
             raise TaskNotFound()
-        task = TaskResponse.model_validate(task_model)
+        task = TaskResponse.model_validate(task_model).model_copy(
+            update={
+                "public_status": project_public_status(
+                    task_status=task_model.status,
+                    orchestration_status=(
+                        orchestration.status if orchestration is not None else None
+                    ),
+                )
+            }
+        )
 
         resolved_company = None
         company_id: UUID | None = None

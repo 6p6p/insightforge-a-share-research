@@ -234,7 +234,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     );
     expect(screen.getByText('需要更新结构化数据')).toBeInTheDocument();
     expect(
-      screen.getByText(/当前自动补充研究仅支持文档资料，该缺口需要人工处理或后续结构化数据刷新能力。/),
+      screen.getByText(/自动补充研究已尽力完成文档类资料缺口；该估值数据缺口不在自动补充研究范围内/),
     ).toBeInTheDocument();
     // 不提供「上传 PDF / 导入官方链接 / 继续研究」的补资料面板。
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();

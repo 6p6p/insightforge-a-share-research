@@ -27,10 +27,16 @@ from app.workflows.execution_manager import WorkflowExecutionManager
 
 
 def get_task_service(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> TaskService:
     repository = ResearchTaskRepository(session)
-    return TaskService(repository)
+    # 注入 sessionmaker：list/get 时按 task + 最新 orchestration 推导 canonical
+    # public_status（Product Consistency；见 task_status_projection）。
+    from app.db.dependencies import get_database
+
+    database = get_database(request)
+    return TaskService(repository, database.session_factory())
 
 
 def get_workflow_execution_manager(request: Request) -> WorkflowExecutionManager:

@@ -85,6 +85,7 @@ const workspaceData: TaskWorkspaceResponse = {
     status: 'pending',
     current_stage: 'created',
     progress: 0,
+    public_status: 'not_started',
     created_at: '2026-08-11T00:00:00Z',
     updated_at: '2026-08-11T00:00:00Z',
   },

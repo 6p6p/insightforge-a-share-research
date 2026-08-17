@@ -9,8 +9,7 @@ import { listTasks, taskKeys } from '../api/tasks';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import type { TaskResponse } from '../types/task';
-import { progressStatus } from '../features/workflow-progress/WorkflowProgressPanel';
-import { stageLabel } from '../utils/status';
+import { PUBLIC_STATUS_LABEL, stageLabel } from '../utils/status';
 
 export function TaskListPage(): React.JSX.Element {
   const { data, isLoading } = useQuery({
@@ -26,8 +25,10 @@ export function TaskListPage(): React.JSX.Element {
     },
     {
       title: '状态',
-      dataIndex: 'status',
-      render: (status: TaskResponse['status']) => <StatusTag kind="task" status={status} />,
+      dataIndex: 'public_status',
+      render: (status: TaskResponse['public_status']) => (
+        <StatusTag kind="public" status={status} />
+      ),
     },
     {
       title: '阶段',
@@ -36,8 +37,8 @@ export function TaskListPage(): React.JSX.Element {
     },
     {
       title: '进度',
-      dataIndex: 'progress',
-      render: (value: number, record) => progressStatus(record.status, value),
+      dataIndex: 'public_status',
+      render: (status: TaskResponse['public_status']) => PUBLIC_STATUS_LABEL[status] ?? status,
     },
     { title: '分析周期', dataIndex: 'research_start_date', render: (_, record) => `${record.research_start_date} ~ ${record.research_end_date}` },
     { title: '创建时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false }) },

@@ -5,10 +5,11 @@ import type { WorkflowRunResponse } from './workflow';
 
 export interface CompanyIdentityResponse {
   company_id: string;
-  company_name: string;
+  /** 后端真实字段（无 company_name 字段；公司名用 short_name || official_name）。 */
+  official_name: string;
+  short_name: string;
   security_code: string | null;
   exchange: string | null;
-  industry: string | null;
   listing_status: string | null;
 }
 

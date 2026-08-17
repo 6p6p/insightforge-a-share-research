@@ -1,7 +1,17 @@
 /** UI 中文状态映射（spec N）。不要把 DB 枚举直接显示给用户。 */
 
-import type { TaskStage, TaskStatus } from '../types/task';
+import type { PublicTaskStatus, TaskStage, TaskStatus } from '../types/task';
 import type { WorkflowRunStatus } from '../types/workflow';
+
+/** canonical public 五态（Product Consistency）：所有位置统一展示，不再由各
+ * 组件从 task.status / run.status / orchestration.status 分别推导。 */
+export const PUBLIC_STATUS_LABEL: Record<PublicTaskStatus, string> = {
+  not_started: '未开始',
+  in_progress: '进行中',
+  waiting_confirmation: '等待确认',
+  completed: '已完成',
+  failed: '失败',
+};
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   pending: '待执行',
@@ -75,5 +85,21 @@ export function taskStatusTone(status: TaskStatus): PresetStatus {
       return 'error';
     case 'waiting_human':
       return 'warning';
+  }
+}
+
+/** canonical public 五态语义色。 */
+export function publicStatusTone(status: PublicTaskStatus): PresetStatus {
+  switch (status) {
+    case 'in_progress':
+      return 'processing';
+    case 'completed':
+      return 'success';
+    case 'failed':
+      return 'error';
+    case 'waiting_confirmation':
+      return 'warning';
+    case 'not_started':
+      return 'default';
   }
 }

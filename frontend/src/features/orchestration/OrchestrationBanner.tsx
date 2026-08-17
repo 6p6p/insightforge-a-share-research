@@ -216,7 +216,7 @@ export function OrchestrationBanner({
             message="需要更新结构化数据"
             description={
               <Space direction="vertical" size={4}>
-                <div>当前自动补充研究仅支持文档资料，该缺口需要人工处理或后续结构化数据刷新能力。</div>
+                <div>自动补充研究已尽力完成文档类资料缺口；该估值数据缺口不在自动补充研究范围内（需重新计算估值数据），可人工补充数据或稍后刷新。</div>
                 <Collapse
                   ghost
                   size="small"

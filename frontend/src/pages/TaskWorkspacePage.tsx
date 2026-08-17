@@ -48,6 +48,7 @@ import { CitationDrawer } from '../features/citation/CitationDrawer';
 import { FinancialObservationForm } from '../features/financial/FinancialObservationForm';
 import type { CitationTarget } from '../types/citation';
 import { ApiError } from '../types/api';
+import { displayLabel, MODULE_LABEL } from '../utils/display';
 import type { WorkflowEventResponse, WorkflowRunResponse } from '../types/workflow';
 import type { TaskWorkspaceResponse } from '../types/workspace';
 
@@ -290,13 +291,15 @@ function OverviewPanel({
       <Card title="任务概要">
         <Descriptions size="small" column={3}>
           <Descriptions.Item label="状态">
-            <StatusTag kind="task" status={data.task.status} />
+            <StatusTag kind="public" status={data.task.public_status} />
           </Descriptions.Item>
           <Descriptions.Item label="公司">{data.task.company_query}</Descriptions.Item>
           <Descriptions.Item label="分析周期">
             {data.task.research_start_date} ~ {data.task.research_end_date}
           </Descriptions.Item>
-          <Descriptions.Item label="模块">{data.task.modules.join('、')}</Descriptions.Item>
+          <Descriptions.Item label="模块">
+            {data.task.modules.map((m) => displayLabel(MODULE_LABEL, m)).join('、')}
+          </Descriptions.Item>
           <Descriptions.Item label="研究问题">
             {data.task.questions.length > 0 ? data.task.questions[0] : '—'}
           </Descriptions.Item>
@@ -306,9 +309,13 @@ function OverviewPanel({
         </Descriptions>
         {data.resolved_company ? (
           <Descriptions size="small" column={3} style={{ marginTop: 8 }}>
-            <Descriptions.Item label="公司名称">{data.resolved_company.company_name}</Descriptions.Item>
-            <Descriptions.Item label="证券代码">{data.resolved_company.security_code ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="行业">{data.resolved_company.industry ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="公司名称">
+              {data.resolved_company.short_name || data.resolved_company.official_name || '—'}
+            </Descriptions.Item>
+            <Descriptions.Item label="证券代码">
+              {data.resolved_company.security_code ?? '—'}
+            </Descriptions.Item>
+            <Descriptions.Item label="行业">—</Descriptions.Item>
           </Descriptions>
         ) : null}
       </Card>

@@ -575,11 +575,15 @@ def make_execute_supplemental_research_node(deps: ResearchOrchestrationDependenc
             "backflow_new_evidence_card_ids": [
                 str(card_id) for card_id in result.new_evidence_card_ids
             ],
-            # 7A.2B.3 scope 冻结：plan 派生时检测到的 structured 需求（非白名单
-            # issue，不在 automatic 文档补充研究范围）→ 投影给 verify_progress，
-            # 使其给稳定 manual reason（structured_data_refresh_required）而非
-            # 误报 research_backflow_no_progress。
+            # plan 派生时检测到的 structured 需求（真正结构化缺口，不在 automatic
+            # 文档补充研究范围）→ 投影给 verify_progress，使其给稳定 manual reason
+            # （structured_data_refresh_required）而非误报 research_backflow_no_progress。
             "backflow_manual_reasons": plan.plan_payload.get("manual_required_reasons", []),
+            # 非阻断数据缺口（措辞/表示类 normal 缺口）：报告继续完成，缺口在
+            # Audit/Review 中保持可见（见 derive.py 分类说明）。
+            "backflow_non_blocking_gap_issues": plan.plan_payload.get(
+                "non_blocking_gap_issues", []
+            ),
             "backflow_executor_manual_reasons": executor_reasons,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         }
@@ -609,6 +613,8 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
         # manual_required 稳定 reason 优先级（恒常，不随 has_progress 翻转）：
         #   plan 级 structured 需求（backflow_manual_reasons）>
         #   纯 document 进度（has_progress）>
+        #   非阻断数据缺口（non_blocking_gap_issues：措辞/表示类 normal 缺口，
+        #     audit 已展示，报告继续完成）>
         #   executor 级 manual reasons（backflow_executor_manual_reasons，7A Product
         #     Gate spec I/J：缺 eligible source → source_acquisition_required、
         #     index/evidence 未就绪 → 对应 reason）>
@@ -617,10 +623,16 @@ def make_verify_progress_node(deps: ResearchOrchestrationDependencies):
         # source_acquisition_required（可补资料后同线程恢复）与 genuine no-progress。
         manual_reasons = state.get("backflow_manual_reasons") or []
         executor_reasons = state.get("backflow_executor_manual_reasons") or []
+        non_blocking_gaps = state.get("backflow_non_blocking_gap_issues") or []
         if manual_reasons:
             can_advance = False
             manual_reason = manual_reasons[0]
         elif has_progress:
+            can_advance = True
+            manual_reason = None
+        elif non_blocking_gaps:
+            # 非关键数据缺口：不阻断——报告继续完成（Stage4 → Stage5 → 新 audit），
+            # 缺口在 Audit/Review 中保持可见。文档侧无新证据也不误报 no_progress。
             can_advance = True
             manual_reason = None
         elif executor_reasons:

@@ -227,14 +227,20 @@ def test_plan_multiple_whitelist_codes_each_a_need_spec() -> None:
 
 
 def test_plan_no_whitelist_issues_yields_empty_need_specs() -> None:
-    """全部非白名单 issue → 空 need_specs + structured manual_required_reasons
-    （执行阶段据此给 structured_data_refresh_required，**不误报 no_progress**）。"""
+    """全部非白名单 issue（措辞/表示类）→ 空 need_specs + **不** blocking：
+    进入 non_blocking_gap_issues（audit 已展示，报告继续完成，不误切 waiting_human）。"""
     request = _verified_request(issues=[_issue(issue_type="wording_overclaim")])
     payload = derive_research_backflow_plan_payload(request, {})
     assert payload["need_specs"] == []
     assert payload["max_queries_per_need"] == MAX_QUERIES_PER_NEED
-    assert payload["manual_required_reasons"] == [
-        RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH
+    assert payload["manual_required_reasons"] == []
+    assert payload["non_blocking_gap_issues"] == [
+        {
+            "issue_type": "wording_overclaim",
+            "severity": "normal",
+            "section_ref": "S1",
+            "message": "测试 issue",
+        }
     ]
 
 
@@ -251,12 +257,13 @@ def test_plan_whitelist_only_manual_required_reasons_empty() -> None:
 
 
 def test_plan_structured_issue_adds_manual_required_reason_even_with_whitelist() -> None:
-    """structured issue 混入白名单 issue → 两者都投影：need_specs 只含白名单，
-    manual_required_reasons 恒含 structured_data_refresh_required。"""
+    """真正 structured issue（valuation_overreach）混入白名单 issue → need_specs
+    只含白名单，manual_required_reasons 恒含 structured_data_refresh_required
+    （估值重算不在 automatic 文档补充研究范围）。"""
     request = _verified_request(
         issues=[
             _issue(issue_type="insufficient_evidence", section_id="S2"),
-            _issue(issue_type="valuation_overreach"),  # structured → manual
+            _issue(issue_type="valuation_overreach"),  # structured → blocking
         ]
     )
     payload = derive_research_backflow_plan_payload(request, {})
@@ -264,6 +271,25 @@ def test_plan_structured_issue_adds_manual_required_reason_even_with_whitelist()
     assert payload["manual_required_reasons"] == [
         RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH
     ]
+    assert payload["non_blocking_gap_issues"] == []
+
+
+def test_plan_wording_issues_are_non_blocking_gaps_not_structured() -> None:
+    """Regression（Product Consistency）：措辞/表示类 issue（evidence_mismatch /
+    wording_overclaim / unresolved_conflict 等）**不是**结构化数据缺口——不得把
+    任务误切到 structured_data_refresh_required 等待人工；缺口在 audit 展示，
+    plan 记录 non_blocking_gap_issues 供 verify_progress 继续完成报告。"""
+    request = _verified_request(
+        issues=[
+            _issue(issue_type="evidence_mismatch"),
+            _issue(issue_type="wording_overclaim", section_id="S2"),
+            _issue(issue_type="unresolved_conflict", section_id="S1"),
+        ]
+    )
+    payload = derive_research_backflow_plan_payload(request, {})
+    assert payload["manual_required_reasons"] == []
+    gap_types = [gap["issue_type"] for gap in payload["non_blocking_gap_issues"]]
+    assert gap_types == ["evidence_mismatch", "unresolved_conflict", "wording_overclaim"]
 
 
 # ---------------------------------------------------------------- query 模板（spec K frozen）

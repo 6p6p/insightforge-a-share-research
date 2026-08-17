@@ -31,7 +31,9 @@ from uuid import UUID
 
 # report_exports.export_schema_version 的当前值（改名或换结构时递增；已有导出
 # 原样保留，新语义 → 新指纹 → 新行）。
-EXPORT_SCHEMA_VERSION = 1
+# v2：clean report projection——pack 增加 research_start_date / research_end_date
+# （研究区间），renderer 输出只保留人类可读来源引用（去 provider_key / xpath）。
+EXPORT_SCHEMA_VERSION = 2
 
 # export_format 枚举（report_exports 表 CHECK 约束同步维护）。
 EXPORT_FORMAT_MARKDOWN = "markdown"
@@ -46,12 +48,12 @@ RENDERER_NAME_BY_FORMAT = {
     EXPORT_FORMAT_PDF: "insightforge_export_pdf",
 }
 RENDERER_VERSION_BY_FORMAT = {
-    EXPORT_FORMAT_MARKDOWN: 1,
-    # docx v2：确定性 OOXML ZIP normalize（固定 ZipInfo date_time/metadata +
-    # entry 排序重写）——v1 输出随保存时刻漂移；bump → 新 renderer 身份 →
-    # 新 input fingerprint → 新 Export 行（旧行按 v1 原样保留）。
-    EXPORT_FORMAT_DOCX: 2,
-    EXPORT_FORMAT_PDF: 1,
+    # v2：clean report projection（研究区间 + 仅人类可读来源引用）。
+    EXPORT_FORMAT_MARKDOWN: 2,
+    # docx v2：确定性 OOXML ZIP normalize；v3：clean report projection。
+    EXPORT_FORMAT_DOCX: 3,
+    # v2：clean report projection。
+    EXPORT_FORMAT_PDF: 2,
 }
 
 # media type / file extension（与 renderer 输出一致）。
@@ -171,6 +173,9 @@ class ExportReportPack:
     security_code: str | None
     research_question: str
     sections: tuple[ExportSection, ...] = ()
+    # clean projection：研究区间（task 日期投影，人类可读元数据）。
+    research_start_date: date | None = None
+    research_end_date: date | None = None
     citations: tuple[ExportCitation, ...] = ()
     audit_note: str | None = None
     # fingerprint 身份（不参与 pack 内容指纹，单独进入 input fingerprint）
@@ -189,6 +194,12 @@ class ExportReportPack:
             "task_id": str(self.task_id),
             "report_id": str(self.report_id),
             "analysis_as_of": self.analysis_as_of.isoformat(),
+            "research_start_date": (
+                self.research_start_date.isoformat() if self.research_start_date else None
+            ),
+            "research_end_date": (
+                self.research_end_date.isoformat() if self.research_end_date else None
+            ),
             "company_name": self.company_name,
             "security_code": self.security_code,
             "research_question": self.research_question,

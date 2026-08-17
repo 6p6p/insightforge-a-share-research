@@ -21,7 +21,11 @@ from app.report_export.contracts import (
     ExportReportPack,
     ExportSection,
 )
-from app.schemas.citation import DocumentProvenance, MacroProvenance
+from app.schemas.citation import (
+    DocumentProvenance,
+    FinancialExtractionProvenance,
+    MacroProvenance,
+)
 from app.schemas.company import CompanyIdentityResponse
 
 # 人工批准路径的 audit note（spec I：固定文案，不随 comment 变化）。
@@ -93,6 +97,8 @@ def build_export_report_pack(
         task_id=task.task_id,
         report_id=verified_report.report_id,
         analysis_as_of=verified_report.analysis_as_of,
+        research_start_date=task.research_start_date,
+        research_end_date=task.research_end_date,
         company_name=_company_name(company, task),
         security_code=company.security_code if company is not None else None,
         research_question=_research_question(task),
@@ -128,15 +134,13 @@ def _map_citation(
     detail: ExportCardDetail,
     provenance: DocumentProvenance | MacroProvenance,
 ) -> ExportCitation:
-    if isinstance(provenance, DocumentProvenance):
+    if isinstance(provenance, (DocumentProvenance, FinancialExtractionProvenance)):
+        # document_chunk 与 financial_extraction 同构（quote / title / locator /
+        # source 元数据）。xpath 属技术定位元数据，不进入 clean export projection。
         locator = provenance.locator
         page_number = None
-        xpath = None
-        if locator is not None:
-            if locator.locator_type == "pdf_page":
-                page_number = locator.page_number
-            elif locator.locator_type == "html_dom":
-                xpath = locator.xpath
+        if locator is not None and locator.locator_type == "pdf_page":
+            page_number = locator.page_number
         return ExportCitation(
             number=number,
             evidence_card_id=detail.evidence_card_id,
@@ -150,7 +154,7 @@ def _map_citation(
             fetched_at=None,
             source_url=provenance.source_url,
             page_number=page_number,
-            xpath=xpath,
+            xpath=None,
             indicator=None,
             geography=None,
             period=None,

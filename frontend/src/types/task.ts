@@ -46,6 +46,17 @@ export interface TaskCreateRequest {
   require_plan_approval?: boolean;
 }
 
+/** canonical public status（后端 task_status_projection 推导）：未开始/进行中/
+ * 等待确认/已完成/失败。所有前端位置统一读取，不再各自推导。 */
+export const PUBLIC_TASK_STATUS = [
+  'not_started',
+  'in_progress',
+  'waiting_confirmation',
+  'completed',
+  'failed',
+] as const;
+export type PublicTaskStatus = (typeof PUBLIC_TASK_STATUS)[number];
+
 export interface TaskResponse {
   task_id: string;
   company_query: string;
@@ -58,6 +69,8 @@ export interface TaskResponse {
   status: TaskStatus;
   current_stage: TaskStage;
   progress: number;
+  /** canonical public projection（五态，全部位置统一展示）。 */
+  public_status: PublicTaskStatus;
   created_at: string;
   updated_at: string;
 }

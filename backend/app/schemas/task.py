@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.tasks import ResearchModule, TaskStage, TaskStatus
+from app.services.task_status_projection import PUBLIC_STATUS_NOT_STARTED
 
 _MAX_QUESTIONS = 20
 _MAX_QUESTION_LENGTH = 500
@@ -75,6 +76,10 @@ class TaskResponse(BaseModel):
     status: TaskStatus
     current_stage: TaskStage
     progress: int
+    # canonical public projection（未开始/进行中/等待确认/已完成/失败）：
+    # 由 task + 最新 orchestration 推导（app.services.task_status_projection），
+    # 所有前端位置统一读取，不再各自推导。
+    public_status: str = PUBLIC_STATUS_NOT_STARTED
     created_at: datetime
     updated_at: datetime
 

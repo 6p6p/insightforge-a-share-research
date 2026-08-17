@@ -119,6 +119,39 @@ class ResearchOrchestrationRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_latest_for_tasks(
+        self, task_ids: list[UUID]
+    ) -> dict[UUID, ResearchOrchestrationModel]:
+        """批量取每个 task 的「当前」orchestration（active 优先，否则最近一条）。
+
+        任务列表投影用（避免逐 task N+1）：一次查询该批 task 的全部 orchestration
+        行（created_at DESC），Python 侧按 task 分组选——active（pending/running/
+        waiting_human）优先，否则最先出现的最新行。确定性排序与
+        `get_latest_for_task` 一致（created_at DESC, orchestration_id DESC）。
+        """
+        if not task_ids:
+            return {}
+        result = await self._session.execute(
+            select(ResearchOrchestrationModel)
+            .where(ResearchOrchestrationModel.task_id.in_(task_ids))
+            .order_by(
+                ResearchOrchestrationModel.created_at.desc(),
+                ResearchOrchestrationModel.orchestration_id.desc(),
+            )
+        )
+        rows = result.scalars().all()
+        chosen: dict[UUID, ResearchOrchestrationModel] = {}
+        for row in rows:
+            current = chosen.get(row.task_id)
+            if current is None:
+                chosen[row.task_id] = row
+            elif (
+                row.status in ACTIVE_ORCHESTRATION_STATUSES
+                and current.status not in ACTIVE_ORCHESTRATION_STATUSES
+            ):
+                chosen[row.task_id] = row
+        return chosen
+
     async def create_or_get(
         self, orchestration: ResearchOrchestrationModel
     ) -> tuple[ResearchOrchestrationModel, bool]:

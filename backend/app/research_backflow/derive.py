@@ -45,6 +45,14 @@ from app.review.contracts import (
     VerifiedReviewAction,
 )
 
+# 真正需要「结构化数据刷新」的 issue 类型（当前：估值结论需要重算估值——确定性
+# calculation 产物不在 automatic 文档补充研究范围）。其余非白名单 issue 属于
+# 措辞 / 表示 / 表述类问题（evidence_mismatch / claim_misrepresentation /
+# wording_overclaim / omitted_counterevidence / unresolved_conflict）——它们是
+# 报告内容问题，已在 Audit 完整展示，**不是结构化数据缺口**，不得把整个任务
+# 误切到 structured_data_refresh_required 等待人工。
+_STRUCTURED_REFRESH_ISSUE_TYPES = frozenset({"valuation_overreach"})
+
 # weak_source_quality 只允许官方披露类来源（news 来源质量不可控 → 排除）。
 _ALL_OFFICIAL_DOCUMENT_TYPES = (
     SourceDocumentType.ANNUAL_REPORT.value,
@@ -169,26 +177,50 @@ def derive_research_backflow_plan_payload(
             }
         )
 
-    # 7A.2B.3 scope 冻结：非白名单（structured）issue——financial/macro/valuation
-    # refresh / 证据一致性核对等——不在 automatic 文档补充研究范围（需 provider /
-    # network 或新数据）。plan 只派生文档类 need_specs；structured 需求投影为
-    # `manual_required_reasons` 信号，供 verify_progress 给稳定 manual reason
-    # （structured_data_refresh_required），**不误报 research_backflow_no_progress**。
-    structured_issue_types = sorted(
+    # 7A.2B.3 scope 冻结 + 产品语义修正：非白名单 issue 分两类——
+    # 1) 真正的结构化数据缺口（valuation_overreach：估值需重算，不在 automatic
+    #    文档补充研究范围）→ `manual_required_reasons`（verify_progress 恒常
+    #    优先，稳定 manual reason = structured_data_refresh_required，阻断）；
+    # 2) 措辞 / 表示类问题（evidence_mismatch / wording_overclaim /
+    #    unresolved_conflict 等）→ 非阻断数据缺口 `non_blocking_gap_issues`
+    #    （audit issues 已完整展示；不把整个研究任务切换成 waiting_human——
+    #    报告继续完成，缺口在 Audit/Review 中可见）。
+    non_whitelist_issues = [
+        issue
+        for issue in verified_request.verified_action.verified_audit.issues
+        if issue.issue_type not in SUPPLEMENTAL_RESEARCH_NEED_CODES
+    ]
+    blocking_structured = sorted(
         {
             issue.issue_type
-            for issue in verified_request.verified_action.verified_audit.issues
-            if issue.issue_type not in SUPPLEMENTAL_RESEARCH_NEED_CODES
+            for issue in non_whitelist_issues
+            if issue.issue_type in _STRUCTURED_REFRESH_ISSUE_TYPES
         }
     )
+    non_blocking_gaps = [
+        {
+            "issue_type": issue.issue_type,
+            "severity": issue.severity,
+            "section_ref": issue.section_id,
+            "message": issue.message,
+        }
+        for issue in sorted(
+            non_whitelist_issues, key=lambda i: (i.issue_type, i.section_id, i.message)
+        )
+        if issue.issue_type not in _STRUCTURED_REFRESH_ISSUE_TYPES
+    ]
     return {
         "need_specs": need_specs,
         "max_queries_per_need": MAX_QUERIES_PER_NEED,
         "manual_required_reasons": (
             [RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH]
-            if structured_issue_types
+            if blocking_structured
             else []
         ),
+        # 非关键 / normal 措辞与表示类缺口：不阻断（报告继续完成），审计 issues
+        # 中保持可见。verify_progress 据此在无文档进度时也能继续（不误报
+        # research_backflow_no_progress）。
+        "non_blocking_gap_issues": non_blocking_gaps,
     }
 
 

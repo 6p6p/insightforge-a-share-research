@@ -57,6 +57,7 @@ def render_docx(pack: ExportReportPack) -> bytes:
     security = f"（{pack.security_code}）" if pack.security_code else ""
     document.add_heading(f"{pack.company_name} 基本面研究报告{security}", level=0)
     _add_meta(document, "研究问题", pack.research_question or "—")
+    _add_meta(document, "研究区间", _research_window(pack))
     _add_meta(document, "分析基准日", pack.analysis_as_of.isoformat())
 
     for section in pack.sections:
@@ -127,6 +128,15 @@ def _set_default_east_asian(document: Document) -> None:
     rfonts.set(qn("w:eastAsia"), _EAST_ASIAN_FONT)
 
 
+def _research_window(pack: ExportReportPack) -> str:
+    """研究区间（YYYY-MM-DD ~ YYYY-MM-DD；缺失 → "—"）。"""
+    if pack.research_start_date is None or pack.research_end_date is None:
+        return "—"
+    return (
+        f"{pack.research_start_date.isoformat()} ~ {pack.research_end_date.isoformat()}"
+    )
+
+
 def _add_meta(document: Document, label: str, value: str) -> None:
     paragraph = document.add_paragraph()
     run = paragraph.add_run(f"{label}：")
@@ -143,9 +153,8 @@ def _add_citation_lines(document: Document, citation) -> None:
     _add_bullet(document, "证据陈述", citation.statement or "—")
     if citation.quote_text:
         _add_bullet(document, "引用原文", f"「{citation.quote_text}」")
-    _add_bullet(
-        document, "提供方", f"{citation.provider_label or '—'}（{citation.provider_key or '—'}）"
-    )
+    # clean projection：只保留人类可读来源引用（不输出 provider code）。
+    _add_bullet(document, "提供方", citation.provider_label or "—")
     _add_bullet(document, "来源", citation.title or "—")
     if citation.source_url:
         _add_bullet(document, "原始网页", citation.source_url)
@@ -155,8 +164,6 @@ def _add_citation_lines(document: Document, citation) -> None:
         _add_bullet(document, "获取", citation.fetched_at.strftime(_DATE_FMT))
     if citation.page_number is not None:
         _add_bullet(document, "定位", f"第 {citation.page_number} 页")
-    if citation.xpath:
-        _add_bullet(document, "定位", citation.xpath)
     if (
         citation.indicator is not None
         or citation.geography is not None

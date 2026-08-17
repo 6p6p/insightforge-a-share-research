@@ -63,6 +63,7 @@ def render_pdf(pack: ExportReportPack) -> bytes:
     story.append(Paragraph(f"{pack.company_name} 基本面研究报告{security}", styles["title"]))
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(f"研究问题：{pack.research_question or '—'}", styles["meta"]))
+    story.append(Paragraph(f"研究区间：{_research_window(pack)}", styles["meta"]))
     story.append(Paragraph(f"分析基准日：{pack.analysis_as_of.isoformat()}", styles["meta"]))
     story.append(Spacer(1, 4 * mm))
 
@@ -171,11 +172,21 @@ def _is_wide(ch: str) -> bool:
     return ord(ch) > 0x2E80
 
 
+def _research_window(pack: ExportReportPack) -> str:
+    """研究区间（YYYY-MM-DD ~ YYYY-MM-DD；缺失 → "—"）。"""
+    if pack.research_start_date is None or pack.research_end_date is None:
+        return "—"
+    return (
+        f"{pack.research_start_date.isoformat()} ~ {pack.research_end_date.isoformat()}"
+    )
+
+
 def _citation_lines(citation) -> str:
     lines = [f"证据陈述：{citation.statement or '—'}"]
     if citation.quote_text:
         lines.append(f"引用原文：「{citation.quote_text}」")
-    lines.append(f"提供方：{citation.provider_label or '—'}（{citation.provider_key or '—'}）")
+    # clean projection：只保留人类可读来源引用（不输出 provider code）。
+    lines.append(f"提供方：{citation.provider_label or '—'}")
     lines.append(f"来源：{citation.title or '—'}")
     if citation.source_url:
         lines.append(f"原始网页：{citation.source_url}")
@@ -185,8 +196,6 @@ def _citation_lines(citation) -> str:
         lines.append(f"获取：{citation.fetched_at.strftime(_DATE_FMT)}")
     if citation.page_number is not None:
         lines.append(f"定位：第 {citation.page_number} 页")
-    if citation.xpath:
-        lines.append(f"定位：{citation.xpath}")
     if (
         citation.indicator is not None
         or citation.geography is not None
