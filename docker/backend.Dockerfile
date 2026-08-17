@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM m.daocloud.io/docker.io/library/python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -19,11 +19,11 @@ COPY backend/alembic ./alembic
 # （sympy / filelock 等）需 `--extra-index-url` 从 PyPI 解析（单源会解析失败）。
 RUN python -m pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://pypi.org/simple \
+    --extra-index-url https://mirrors.aliyun.com/pypi/simple/ \
     "torch==2.13.0+cpu"
 
 # 安装 backend 运行依赖（不含 dev 组）；显式超时/重试抵御 CDN 抖动。
-RUN pip install --no-cache-dir --timeout 120 --retries 5 .
+RUN pip install --no-cache-dir --timeout 120 --retries 5 -i https://mirrors.aliyun.com/pypi/simple/ .
 
 # 清理镜像内的全部 __pycache__ / .pyc：当前 Windows/Docker 构建环境中观察到间歇性
 # pyc corruption（ValueError: bad marshal data），源码 .py 均正常、移除 pyc 后运行

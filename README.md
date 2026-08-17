@@ -61,6 +61,16 @@ docker compose up -d --build
 # 前端 http://localhost:8080 · 后端 http://localhost:8001
 ```
 
+> **Docker 构建说明（国内镜像默认）**：为缓解国内网络下 Docker Hub / PyPI / npm 的
+> 超时问题，构建已默认走国内镜像源：
+> - 基础镜像：DaoCloud 镜像站（`m.daocloud.io/docker.io/library/*`，阿里云等公共镜像
+>   仓库缺少部分 tag，故选用 DaoCloud）；
+> - Python 依赖：阿里云 PyPI（`https://mirrors.aliyun.com/pypi/simple/`）；
+>   PyTorch CPU wheel 仍从官方 CPU 源
+>   （`https://download.pytorch.org/whl/cpu`）安装，仅普通依赖走阿里云；
+> - 前端依赖：npmmirror（`https://registry.npmmirror.com`）；
+> - PostgreSQL / ChromaDB 继续使用官方公共镜像（业务约束：不替换数据服务镜像）。
+
 ## 常用命令
 
 ```bash
