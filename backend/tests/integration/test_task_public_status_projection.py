@@ -185,13 +185,9 @@ async def test_awaiting_stage5_all_positions_waiting_confirmation(sessionmaker) 
         orchestration=("waiting_human", "awaiting_stage5"),
     )
 
+    assert await _list_public_status(sessionmaker, task_id) == PUBLIC_STATUS_WAITING_CONFIRMATION
     assert (
-        await _list_public_status(sessionmaker, task_id)
-        == PUBLIC_STATUS_WAITING_CONFIRMATION
-    )
-    assert (
-        await _workspace_public_status(sessionmaker, task_id)
-        == PUBLIC_STATUS_WAITING_CONFIRMATION
+        await _workspace_public_status(sessionmaker, task_id) == PUBLIC_STATUS_WAITING_CONFIRMATION
     )
     async with sessionmaker() as session:
         service = TaskService(ResearchTaskRepository(session), sessionmaker)

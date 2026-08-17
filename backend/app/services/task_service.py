@@ -157,29 +157,21 @@ class TaskService:
         if self._sessionmaker is None:
             return project_public_status(task_status=task.status)
         async with self._sessionmaker() as session:
-            orchestration = await ResearchOrchestrationRepository(
-                session
-            ).get_latest_for_task(task.task_id)
+            orchestration = await ResearchOrchestrationRepository(session).get_latest_for_task(
+                task.task_id
+            )
         return project_public_status(
             task_status=task.status,
-            orchestration_status=(
-                orchestration.status if orchestration is not None else None
-            ),
+            orchestration_status=(orchestration.status if orchestration is not None else None),
         )
 
-    async def _project_public_statuses(
-        self, tasks: list[ResearchTaskModel]
-    ) -> dict[UUID, str]:
+    async def _project_public_statuses(self, tasks: list[ResearchTaskModel]) -> dict[UUID, str]:
         """批量投影（列表页避免 N+1）；无 orchestration 信息 → 按 task 自身推导。"""
         if self._sessionmaker is None or not tasks:
-            return {
-                task.task_id: project_public_status(task_status=task.status) for task in tasks
-            }
+            return {task.task_id: project_public_status(task_status=task.status) for task in tasks}
         task_ids = [task.task_id for task in tasks]
         async with self._sessionmaker() as session:
-            latest = await ResearchOrchestrationRepository(session).list_latest_for_tasks(
-                task_ids
-            )
+            latest = await ResearchOrchestrationRepository(session).list_latest_for_tasks(task_ids)
         return {
             task.task_id: project_public_status(
                 task_status=task.status,

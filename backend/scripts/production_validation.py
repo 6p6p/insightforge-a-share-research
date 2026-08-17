@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-"""Production validation: real user path - company name only.",""",
+"""Production validation: real user path - company name only."""
 
 import json
 import sys
@@ -21,10 +20,18 @@ def run_company(client: httpx.Client, company: str) -> dict:
     )
     print(f"  [1] create task: {resp.status_code}")
     if resp.status_code != 201:
-        return {"company": company, "result": "create_failed", "stage": "create", "detail": resp.text[:200]}
+        return {
+            "company": company,
+            "result": "create_failed",
+            "stage": "create",
+            "detail": resp.text[:200],
+        }
     task = resp.json()
     task_id = task["task_id"]
-    print(f"      task_id={task_id} modules={task['modules']} dates={task['research_start_date']}~{task['research_end_date']}")
+    print(
+        f"      task_id={task_id} modules={task['modules']} "
+        f"dates={task['research_start_date']}~{task['research_end_date']}"
+    )
 
     # 2) 启动自动研究（planner 瞬时 malformed → 422 → 有界重试）
     resp = None
@@ -33,7 +40,10 @@ def run_company(client: httpx.Client, company: str) -> dict:
             resp = client.post(f"{BASE}/tasks/{task_id}/orchestrations", timeout=90)
         except httpx.TimeoutException:
             resp = None
-        print(f"  [2] start orchestration (attempt {attempt + 1}): {resp.status_code if resp else 'timeout'}")
+        print(
+            "  [2] start orchestration "
+            f"(attempt {attempt + 1}): {resp.status_code if resp else 'timeout'}"
+        )
         if resp is not None and resp.status_code in (201, 200, 202):
             break
         if resp is not None and resp.status_code == 422:
@@ -45,7 +55,12 @@ def run_company(client: httpx.Client, company: str) -> dict:
         if resp.status_code != 422:
             break
     if resp is None or resp.status_code not in (201, 200, 202):
-        return {"company": company, "result": "start_failed", "stage": "start", "detail": (resp.text if resp else "timeout")[:200]}
+        return {
+            "company": company,
+            "result": "start_failed",
+            "stage": "start",
+            "detail": (resp.text if resp else "timeout")[:200],
+        }
     orch = resp.json()
     print(f"      orchestration_id={orch['orchestration_id']} status={orch['status']}")
 
@@ -66,7 +81,10 @@ def run_company(client: httpx.Client, company: str) -> dict:
         phase = st.get("current_phase")
         status = st.get("status")
         if phase != last:
-            print(f"      [{time.strftime('%H:%M:%S')}] {status} | {phase}" + (f" | reason={st.get('manual_reason')}" if st.get("manual_reason") else ""))
+            print(
+                f"      [{time.strftime('%H:%M:%S')}] {status} | {phase}"
+                + (f" | reason={st.get('manual_reason')}" if st.get("manual_reason") else "")
+            )
             phases.append(f"{status}:{phase}")
             last = phase
         if status in ("completed", "failed", "cancelled", "waiting_human"):

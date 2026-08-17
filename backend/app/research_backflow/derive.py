@@ -213,9 +213,7 @@ def derive_research_backflow_plan_payload(
         "need_specs": need_specs,
         "max_queries_per_need": MAX_QUERIES_PER_NEED,
         "manual_required_reasons": (
-            [RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH]
-            if blocking_structured
-            else []
+            [RESEARCH_BACKFLOW_MANUAL_REASON_STRUCTURED_DATA_REFRESH] if blocking_structured else []
         ),
         # 非关键 / normal 措辞与表示类缺口：不阻断（报告继续完成），审计 issues
         # 中保持可见。verify_progress 据此在无文档进度时也能继续（不误报

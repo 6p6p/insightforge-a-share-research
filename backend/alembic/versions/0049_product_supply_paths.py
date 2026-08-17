@@ -34,9 +34,7 @@ down_revision: str | None = "0048"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_ORIGIN_TYPE_CHECK = (
-    "origin_type IN ('document_chunk','macro_observation','user_supplied')"
-)
+_ORIGIN_TYPE_CHECK = "origin_type IN ('document_chunk','macro_observation','user_supplied')"
 _ORIGIN_CONSISTENCY_CHECK = """
 (
   (origin_type = 'document_chunk' AND
@@ -136,9 +134,7 @@ def upgrade() -> None:
     )
 
     # 2. acquisition_method 扩展。
-    _drop_constraint_if_exists(
-        "source_records", "ck_source_records_acquisition_method", "check"
-    )
+    _drop_constraint_if_exists("source_records", "ck_source_records_acquisition_method", "check")
     op.create_check_constraint(
         "ck_source_records_acquisition_method",
         "source_records",
@@ -149,9 +145,7 @@ def upgrade() -> None:
     _drop_constraint_if_exists("evidence_cards", "ck_evidence_cards_origin_type", "check")
     # 0017 已创建 origin_consistency / locator_refs_nonempty（document+macro 分支），
     # 必须先 drop 再以扩展定义重建。
-    _drop_constraint_if_exists(
-        "evidence_cards", "ck_evidence_cards_origin_consistency", "check"
-    )
+    _drop_constraint_if_exists("evidence_cards", "ck_evidence_cards_origin_consistency", "check")
     op.create_check_constraint(
         "ck_evidence_cards_origin_type",
         "evidence_cards",
@@ -163,9 +157,7 @@ def upgrade() -> None:
         _ORIGIN_CONSISTENCY_CHECK,
     )
     # user_supplied 卡没有 chunk locator → 允许空 locator_refs。
-    _drop_constraint_if_exists(
-        "evidence_cards", "ck_evidence_cards_locator_refs_nonempty", "check"
-    )
+    _drop_constraint_if_exists("evidence_cards", "ck_evidence_cards_locator_refs_nonempty", "check")
     op.create_check_constraint(
         "ck_evidence_cards_locator_refs_nonempty",
         "evidence_cards",
@@ -265,9 +257,7 @@ def downgrade() -> None:
     op.drop_table("issuer_domain_snapshots")
     op.drop_index("ix_issuer_domains_domain", table_name="issuer_domains")
     op.drop_table("issuer_domains")
-    op.drop_constraint(
-        "ck_evidence_cards_origin_consistency", "evidence_cards", type_="check"
-    )
+    op.drop_constraint("ck_evidence_cards_origin_consistency", "evidence_cards", type_="check")
     op.drop_constraint("ck_evidence_cards_origin_type", "evidence_cards", type_="check")
     op.create_check_constraint(
         "ck_evidence_cards_origin_type",
@@ -279,17 +269,13 @@ def downgrade() -> None:
         "evidence_cards",
         _DOWNGRADE_ORIGIN_CONSISTENCY_CHECK,
     )
-    op.drop_constraint(
-        "ck_evidence_cards_locator_refs_nonempty", "evidence_cards", type_="check"
-    )
+    op.drop_constraint("ck_evidence_cards_locator_refs_nonempty", "evidence_cards", type_="check")
     op.create_check_constraint(
         "ck_evidence_cards_locator_refs_nonempty",
         "evidence_cards",
         "jsonb_array_length(locator_refs) > 0",
     )
-    op.drop_constraint(
-        "ck_source_records_acquisition_method", "source_records", type_="check"
-    )
+    op.drop_constraint("ck_source_records_acquisition_method", "source_records", type_="check")
     op.create_check_constraint(
         "ck_source_records_acquisition_method",
         "source_records",

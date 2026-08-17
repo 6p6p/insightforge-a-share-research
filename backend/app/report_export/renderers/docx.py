@@ -132,9 +132,7 @@ def _research_window(pack: ExportReportPack) -> str:
     """研究区间（YYYY-MM-DD ~ YYYY-MM-DD；缺失 → "—"）。"""
     if pack.research_start_date is None or pack.research_end_date is None:
         return "—"
-    return (
-        f"{pack.research_start_date.isoformat()} ~ {pack.research_end_date.isoformat()}"
-    )
+    return f"{pack.research_start_date.isoformat()} ~ {pack.research_end_date.isoformat()}"
 
 
 def _add_meta(document: Document, label: str, value: str) -> None:

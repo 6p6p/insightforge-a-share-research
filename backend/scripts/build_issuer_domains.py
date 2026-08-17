@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Build the A-share issuer official-domain snapshot (V1.1 closure).
 
 数据来源（只取官方权威来源，降级逐条记录）：
@@ -16,7 +15,6 @@
 """
 
 import argparse
-import io
 import json
 import re
 import ssl
@@ -50,9 +48,7 @@ _EM_TYPE_TO_EXCHANGE = {
     "北京证券交易所A股": "BSE",
 }
 
-_HOST_RE = re.compile(
-    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
-)
+_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 _CODE_RE = re.compile(r"^\d{6}$")
 
 _SSL_CTX = ssl.create_default_context()
@@ -279,9 +275,7 @@ def main() -> int:
     }
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(snapshot, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
-    )
+    args.out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"wrote {args.out} ({args.out.stat().st_size} bytes)")
     return 0
 

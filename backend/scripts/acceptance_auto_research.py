@@ -3,6 +3,7 @@
 输入任意 A 股公司名 → 自动研究 → 完整研究报告（含 provenance）。
 用法: python scripts/acceptance_auto_research.py <company_name>
 """
+
 import json
 import sys
 import time
@@ -63,8 +64,10 @@ def main() -> None:
         phase = state["current_phase"]
         status = state["status"]
         if phase != last_phase:
-            print(f"[3] progress: status={status} phase={phase}"
-                  + (f" reason={state.get('manual_reason')}" if state.get("manual_reason") else ""))
+            print(
+                f"[3] progress: status={status} phase={phase}"
+                + (f" reason={state.get('manual_reason')}" if state.get("manual_reason") else "")
+            )
             last_phase = phase
         if status in ("completed", "failed", "cancelled"):
             break
