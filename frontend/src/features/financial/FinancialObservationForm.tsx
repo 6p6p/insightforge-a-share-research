@@ -26,18 +26,12 @@ import {
   FINANCIAL_METRIC_LABELS,
   FINANCIAL_RAW_UNIT,
   FINANCIAL_RAW_UNIT_LABELS,
-  FINANCIAL_STATEMENT_SCOPE,
-  FINANCIAL_STATEMENT_SCOPE_LABELS,
   type FinancialMetricCode,
   type FinancialObservationRequest,
   type FinancialRawUnit,
   type FinancialStatementScope,
 } from '../../types/financial';
-import {
-  SOURCE_DOCUMENT_TYPE,
-  SOURCE_DOCUMENT_TYPE_LABELS,
-  type SourceDocumentType,
-} from '../../types/source';
+import type { SourceDocumentType } from '../../types/source';
 
 interface FormValues {
   metric_code: FinancialMetricCode;
