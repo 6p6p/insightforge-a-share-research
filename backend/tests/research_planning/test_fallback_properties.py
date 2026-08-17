@@ -9,8 +9,8 @@ from datetime import date
 import pytest
 
 from app.domain.tasks import ResearchModule
-from app.research_planning.fallback import build_fallback_plan_payload
 from app.research_planning.contracts import ResearchPlanPayload
+from app.research_planning.fallback import build_fallback_plan_payload
 
 
 class TestFallbackPlanProperties:
@@ -71,12 +71,8 @@ class TestFallbackPlanProperties:
         q = "分析公司财务状况"
         d = date(2026, 8, 17)
 
-        p1 = build_fallback_plan_payload(
-            modules=modules, research_question=q, analysis_as_of=d
-        )
-        p2 = build_fallback_plan_payload(
-            modules=modules, research_question=q, analysis_as_of=d
-        )
+        p1 = build_fallback_plan_payload(modules=modules, research_question=q, analysis_as_of=d)
+        p2 = build_fallback_plan_payload(modules=modules, research_question=q, analysis_as_of=d)
         assert p1.normalized_payload() == p2.normalized_payload()
 
     def test_fallback_plan_no_company_specific_branches(self):
@@ -85,10 +81,13 @@ class TestFallbackPlanProperties:
         # The only varying input is modules, question, analysis_as_of.
         # Verify the source code has no 'if company' / 'if security_code' patterns.
         import inspect
+
         source = inspect.getsource(build_fallback_plan_payload)
         forbidden = ["security_code", "company_name", "company_id", "600519", "300750"]
         for token in forbidden:
-            assert token not in source, f"Company-specific token '{token}' found in fallback builder"
+            assert token not in source, (
+                f"Company-specific token '{token}' found in fallback builder"
+            )
 
     def test_fallback_plan_respects_modules(self):
         """Fallback with only FINANCIAL module → must have financial scope/needs."""
@@ -99,6 +98,7 @@ class TestFallbackPlanProperties:
         )
         # After apply_selected_modules, only FINANCIAL should remain
         from app.research_planning.contracts import ResearchScope
+
         assert ResearchScope.FINANCIAL in plan.research_scope
         # Financial needs must be present
         assert len(plan.financial_needs) > 0
