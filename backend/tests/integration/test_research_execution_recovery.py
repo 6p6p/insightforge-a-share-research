@@ -284,7 +284,13 @@ class _GatedFinancial(FakeFinancialAnalysisModel):
         super().__init__(decision=_financial_decision())
         self._gate = gate
 
-    async def analyze(self, context, calculation_pack, evidence_pack):
+    async def analyze(
+        self,
+        context,
+        calculation_pack,
+        evidence_pack,
+        correction_hint: str | None = None,
+    ):
         self.calls.append((context, calculation_pack, evidence_pack))
         await self._gate.wait()  # 进程"卡死"在节点内，直到测试取消。
         return await super().analyze(context, calculation_pack, evidence_pack)

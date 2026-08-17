@@ -428,7 +428,13 @@ async def test_case4_stage4_child_failure_projection(env, monkeypatch, connectio
         class _SlowFailingFinancial(FakeFinancialAnalysisModel):
             """慢失败：让其余 worker 完成并 checkpoint，再抛 provider 错误。"""
 
-            async def analyze(self, context, calculation_pack, evidence_pack):
+            async def analyze(
+                self,
+                context,
+                calculation_pack,
+                evidence_pack,
+                correction_hint: str | None = None,
+            ):
                 self.calls.append((context, calculation_pack, evidence_pack))
                 await asyncio.sleep(0.5)
                 raise FinancialAnalysisModelUnavailable()
@@ -501,7 +507,13 @@ async def test_case6_recovery_same_orchestration_thread(env, monkeypatch, connec
                 super().__init__(decision=_financial_decision())
                 self._g = g
 
-            async def analyze(self, context, calculation_pack, evidence_pack):
+            async def analyze(
+                self,
+                context,
+                calculation_pack,
+                evidence_pack,
+                correction_hint: str | None = None,
+            ):
                 self.calls.append((context, calculation_pack, evidence_pack))
                 await self._g.wait()
                 return await super().analyze(context, calculation_pack, evidence_pack)

@@ -537,7 +537,13 @@ async def test_durable_resume_after_worker_failure(env, monkeypatch, connection_
     class SlowFailingFinancial(FakeFinancialAnalysisModel):
         """慢失败：先让其余 worker 完成并 checkpoint，再抛 provider 错误。"""
 
-        async def analyze(self, context, calculation_pack, evidence_pack):
+        async def analyze(
+            self,
+            context,
+            calculation_pack,
+            evidence_pack,
+            correction_hint: str | None = None,
+        ):
             self.calls.append((context, calculation_pack, evidence_pack))
             await asyncio.sleep(0.5)
             raise FinancialAnalysisModelUnavailable()

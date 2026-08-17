@@ -850,7 +850,13 @@ class _SlowFailingFinancial(FakeFinancialAnalysisModel):
     """慢失败：让其余 worker 完成并 checkpoint，再抛 provider 错误（O1 失败于
     stage4 child 执行）。"""
 
-    async def analyze(self, context, calculation_pack, evidence_pack):
+    async def analyze(
+        self,
+        context,
+        calculation_pack,
+        evidence_pack,
+        correction_hint: str | None = None,
+    ):
         self.calls.append((context, calculation_pack, evidence_pack))
         await asyncio.sleep(0.5)
         raise FinancialAnalysisModelUnavailable()
