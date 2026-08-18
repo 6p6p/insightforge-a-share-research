@@ -69,3 +69,17 @@ export const STRUCTURED_DATA_REFRESH_REASON = 'structured_data_refresh_required'
 
 /** 回填达到上限：不能再绕过（后端 resume 会以 InvalidAction 拒绝）。 */
 export const BACKFLOW_LIMIT_REASON = 'research_backflow_limit_reached';
+/** P0 backflow manual closure request/decision projection（/backflow-review）。 */
+export interface BackflowReview {
+  orchestration_id: string;
+  backflow_human_request_id: string | null;
+  reason: string | null;
+  decision: 'accept' | 'extra_research' | 'cancel' | null;
+  comment: string | null;
+  decided_at: string | null;
+  /** accept 被确定性守卫拒绝时的中文理由（空 → 可接受）。 */
+  acceptance_barriers: string[];
+}
+
+/** backflow manual closure action（POST /backflow-review/actions）。 */
+export type BackflowReviewAction = 'accept' | 'extra_research' | 'cancel';

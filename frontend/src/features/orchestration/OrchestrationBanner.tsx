@@ -30,10 +30,13 @@ import type { FormInstance } from 'antd';
 import { UploadOutlined } from '@ant-design/icons';
 
 import {
+  actOnBackflowReview,
   actOnOrchestration,
+  getBackflowReview,
   orchestrationKeys,
   resumeSourceAcquisition,
 } from '../../api/orchestrations';
+import type { BackflowReview } from '../../types/orchestration';
 import {
   importUrlSource,
   listSourceProviders,
@@ -187,6 +190,13 @@ export function OrchestrationBanner({
 
   const awaitingStage5 = status === 'waiting_human' && current_phase === 'awaiting_stage5';
 
+  /** P0：backflow 上限/无进展 → 人工闭环（接受 / 再次补充研究 / 取消）。 */
+  const backflowClosure =
+    status === 'waiting_human' &&
+    current_phase === 'research_backflow' &&
+    !needsSource &&
+    !structuredGap;
+
   const phaseLabel = PHASE_LABELS[current_phase] ?? current_phase;
   const statusLabel = STATUS_LABELS[status] ?? status;
 
@@ -244,7 +254,15 @@ export function OrchestrationBanner({
           <OrchestrationHumanActionCard orchestration={orchestration} />
         ) : null}
 
-        {status === 'waiting_human' && !needsSource && !structuredGap && !awaitingStage5 ? (
+        {backflowClosure ? (
+          <BackflowClosureCard orchestration={orchestration} />
+        ) : null}
+
+        {status === 'waiting_human' &&
+        !needsSource &&
+        !structuredGap &&
+        !awaitingStage5 &&
+        !backflowClosure ? (
           <Alert
             type="warning"
             showIcon
@@ -730,6 +748,102 @@ function OrchestrationHumanActionCard({
             </Button>
           ))}
         </Space>
+      </Space>
+    </Card>
+  );
+}
+
+// ------------------------------------------------------------------ P0 backflow 人工闭环
+
+/** research_backflow 已达上限/无进展：人工闭环（接受 / 再次补充研究 / 取消）。 */
+function BackflowClosureCard({
+  orchestration,
+}: {
+  orchestration: ResearchOrchestrationResponse;
+}): React.JSX.Element {
+  const queryClient = useQueryClient();
+  const reviewQuery = useQuery({
+    queryKey: ['backflow-review', orchestration.orchestration_id],
+    queryFn: () => getBackflowReview(orchestration.orchestration_id),
+    enabled: orchestration.orchestration_id != null,
+  });
+  const review: BackflowReview | undefined = reviewQuery.data;
+
+  const mutation = useMutation({
+    mutationFn: (action: 'accept' | 'extra_research' | 'cancel') =>
+      actOnBackflowReview(orchestration.orchestration_id, action),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: orchestrationKeys.all });
+      void queryClient.invalidateQueries({
+        queryKey: taskKeys.workspace(orchestration.task_id),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ['backflow-review', orchestration.orchestration_id],
+      });
+    },
+    onError: (error: unknown) => {
+      if (error instanceof ApiError) {
+        void queryClient.invalidateQueries({ queryKey: orchestrationKeys.all });
+        void queryClient.invalidateQueries({
+          queryKey: taskKeys.workspace(orchestration.task_id),
+        });
+      }
+    },
+  });
+
+  const barriers = review?.acceptance_barriers ?? [];
+  const acceptDisabled = barriers.length > 0 || mutation.isPending;
+  const submitting = mutation.isPending;
+  const done = review?.decision != null;
+
+  return (
+    <Card title="需要人工确认" type="inner" size="small">
+      <Space direction="vertical" style={{ width: '100%' }}>
+        <Alert
+          type="warning"
+          showIcon
+          message="自动补充研究已达到上限"
+          description="你可以接受当前报告、再次补充研究（有界），或取消研究。"
+        />
+        {!done && acceptDisabled && barriers.length > 0 ? (
+          <Alert
+            type="error"
+            showIcon
+            message="当前报告存在关键问题，暂不能接受"
+            description={barriers.join('；')}
+          />
+        ) : null}
+        <Space wrap>
+          <Button
+            type="primary"
+            loading={submitting}
+            disabled={acceptDisabled || done}
+            onClick={() => mutation.mutate('accept')}
+            data-action="accept"
+          >
+            接受当前报告
+          </Button>
+          <Button
+            loading={submitting}
+            disabled={submitting || done}
+            onClick={() => mutation.mutate('extra_research')}
+            data-action="extra_research"
+          >
+            再次补充研究
+          </Button>
+          <Button
+            danger
+            loading={submitting}
+            disabled={submitting || done}
+            onClick={() => mutation.mutate('cancel')}
+            data-action="cancel"
+          >
+            取消研究
+          </Button>
+        </Space>
+        {done ? (
+          <Alert type="success" showIcon message="已收到你的操作，正在处理。" />
+        ) : null}
       </Space>
     </Card>
   );

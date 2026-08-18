@@ -9,6 +9,8 @@ import { OrchestrationBanner } from './OrchestrationBanner';
 
 const mocks = vi.hoisted(() => ({
   actOnOrchestration: vi.fn(),
+  actOnBackflowReview: vi.fn(),
+  getBackflowReview: vi.fn(),
   resumeSourceAcquisition: vi.fn(),
   listSourceProviders: vi.fn(),
   importUrlSource: vi.fn(),
@@ -18,6 +20,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../../api/orchestrations', () => ({
   actOnOrchestration: mocks.actOnOrchestration,
+  actOnBackflowReview: mocks.actOnBackflowReview,
+  getBackflowReview: mocks.getBackflowReview,
   resumeSourceAcquisition: mocks.resumeSourceAcquisition,
   orchestrationKeys: {
     all: ['orchestrations'],
@@ -207,7 +211,16 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     expect(await screen.findByText('研究资料不足')).toBeInTheDocument();
   });
 
-  it('research_backflow + limit_reached → 不显示补资料面板（不可绕过 MAX rounds）', () => {
+  it('research_backflow + limit_reached → 人工闭环卡片（接受/再次补充研究/取消）', async () => {
+    mocks.getBackflowReview.mockResolvedValue({
+      orchestration_id: 'orch-1',
+      backflow_human_request_id: 'req-1',
+      reason: 'research_backflow_limit_reached',
+      decision: null,
+      comment: null,
+      decided_at: null,
+      acceptance_barriers: [],
+    });
     renderWithProviders(
       <OrchestrationBanner
         orchestration={withPhase({
@@ -217,8 +230,36 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
         companyId="c1"
       />,
     );
-    expect(screen.getByText('研究已暂停，等待人工确认')).toBeInTheDocument();
+    expect(await screen.findByText('自动补充研究已达到上限')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '接受当前报告' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '再次补充研究' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消研究' })).toBeInTheDocument();
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
+  });
+
+  it('research_backflow + limit_reached + 关键 barrier → 接受按钮禁用并给出中文理由', async () => {
+    mocks.getBackflowReview.mockResolvedValue({
+      orchestration_id: 'orch-1',
+      backflow_human_request_id: 'req-1',
+      reason: 'research_backflow_limit_reached',
+      decision: null,
+      comment: null,
+      decided_at: null,
+      acceptance_barriers: ['报告检查未通过', '存在关键完整性失败'],
+    });
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'research_backflow',
+          manual_reason: 'research_backflow_limit_reached',
+        })}
+        companyId="c1"
+      />,
+    );
+    expect(await screen.findByText('当前报告存在关键问题，暂不能接受')).toBeInTheDocument();
+    expect(screen.getByText('报告检查未通过；存在关键完整性失败')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '接受当前报告' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '再次补充研究' })).toBeEnabled();
   });
 
   it('research_backflow + structured_data_refresh_required → 显示结构化缺口警告，不显示补资料面板/继续研究', () => {

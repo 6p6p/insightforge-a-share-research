@@ -483,6 +483,14 @@ class TaskArtifactService:
             claim_count = len(verified_result.input_claim_ids)
         else:
             claim_count = len(anchor.matched_stage4_state.get("claim_ids") or [])
+        # P2: running-phase fallback (no canonical synthesis / no evidence closure) ->
+        # Overview reflects real company artifacts (0 -> N) instead of stuck 0.
+        # Lightweight: read company source_records / evidence_cards (plan -> company);
+        # no WebSocket / no big state rewrite. Canonical path stays authoritative once
+        # the run completes.
+        if not sources and not evidence_ids and verified_result is None:
+            evidence_ids = await self._company_evidence_ids(task_id)
+            sources = await self._company_sources(task_id)
         return ArtifactSummary(
             source_count=len(sources),
             evidence_count=len(evidence_ids),
@@ -490,6 +498,28 @@ class TaskArtifactService:
             report_count=1 if report is not None else 0,
             review_issue_count=reviews.issue_count if reviews is not None else 0,
         )
+
+    async def _company_sources(self, task_id: UUID) -> list[SourceArtifactResponse]:
+        """Running-phase fallback: document sources already fetched for the company.
+
+        Reads source_records only (all document_type); card-level provenance still
+        goes through the canonical Evidence snapshot -- never fabricated."""
+
+        async with self._sessionmaker() as session:
+            company_id = (
+                await session.execute(
+                    select(ResearchPlanModel.company_id)
+                    .where(ResearchPlanModel.task_id == task_id)
+                    .order_by(ResearchPlanModel.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if company_id is None:
+                return []
+            rows = await SourceRecordRepository(session).list_for_company(
+                company_id, document_type=None, limit=10000, offset=0
+            )
+        return [self._map_document_source(row) for row in rows]
 
     # ------------------------------------------------------------------ anchor
 

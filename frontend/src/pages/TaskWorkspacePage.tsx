@@ -45,7 +45,6 @@ import { ReportTab } from '../features/artifacts/ReportTab';
 import { ReviewsTab } from '../features/artifacts/ReviewsTab';
 import { SourcesTab } from '../features/artifacts/SourcesTab';
 import { CitationDrawer } from '../features/citation/CitationDrawer';
-import { FinancialObservationForm } from '../features/financial/FinancialObservationForm';
 import type { CitationTarget } from '../types/citation';
 import { ApiError } from '../types/api';
 import { displayLabel, MODULE_LABEL } from '../utils/display';
@@ -212,16 +211,9 @@ export function TaskWorkspacePage(): React.JSX.Element {
             label: '审核',
             children: <ReviewsTab taskId={taskId} onLocateReport={onLocateReport} />,
           },
-          {
-            key: 'financial',
-            label: '财务数据',
-            children: (
-              <FinancialObservationForm
-                taskId={taskId}
-                companyId={data?.resolved_company?.company_id ?? null}
-              />
-            ),
-          },
+          // P3：移除「财务数据」默认主导航。正常 SUCCESS 用户不需要手动补结构化
+          // 数据；渐进式披露——仅在 backflow 人工闭环「再次补充研究 → 补充财务数据」
+          // 时才展示该表单（后台能力与 API 全保留，fallback）。
         ]}
       />
 

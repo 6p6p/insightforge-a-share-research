@@ -8,6 +8,8 @@ Stage 5 人工决策经 POST /research-orchestrations/{id}/actions（继续顶�
 import { apiRequest } from './client';
 import type {
   OrchestrationAction,
+  BackflowReview,
+  BackflowReviewAction,
   ResearchOrchestrationResponse,
 } from '../types/orchestration';
 
@@ -53,6 +55,27 @@ export async function actOnOrchestration(
 ): Promise<ResearchOrchestrationResponse> {
   return apiRequest<ResearchOrchestrationResponse>(
     `/research-orchestrations/${orchestrationId}/actions`,
+    { method: 'POST', body: { action, comment: comment ?? null } },
+  );
+}
+
+/** P0 backflow manual closure：读取 request + decision + accept 禁用 barrier。 */
+export async function getBackflowReview(
+  orchestrationId: string,
+): Promise<BackflowReview> {
+  return apiRequest<BackflowReview>(
+    `/research-orchestrations/${orchestrationId}/backflow-review`,
+  );
+}
+
+/** P0 backflow manual closure action（accept / extra_research / cancel）。 */
+export async function actOnBackflowReview(
+  orchestrationId: string,
+  action: BackflowReviewAction,
+  comment?: string | null,
+): Promise<ResearchOrchestrationResponse> {
+  return apiRequest<ResearchOrchestrationResponse>(
+    `/research-orchestrations/${orchestrationId}/backflow-review/actions`,
     { method: 'POST', body: { action, comment: comment ?? null } },
   );
 }
