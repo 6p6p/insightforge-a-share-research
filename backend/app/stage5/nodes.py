@@ -24,6 +24,7 @@ from langgraph.types import interrupt
 
 from app.audit.contracts import ReportAuditRequest
 from app.draft_section.contracts import DraftSectionRequest
+from app.draft_section.errors import DraftSectionModelUnavailable
 from app.report.contracts import CHECK_STATUS_PASS, ReportAssemblyDraft
 from app.review.contracts import (
     ACTION_TYPE_FINALIZE,
@@ -107,22 +108,43 @@ def make_build_report_draft_node(deps: Stage5WorkflowDependencies):
             outline.outline_id
         )
         sections: list[dict] = []
+        degraded_count = 0
         for section in verified_outline.sections:
-            result = await deps.draft_section_service.create_or_get_section(
-                DraftSectionRequest(
-                    outline_id=verified_outline.outline_id, section_id=section.section_id
+            try:
+                result = await deps.draft_section_service.create_or_get_section(
+                    DraftSectionRequest(
+                        outline_id=verified_outline.outline_id, section_id=section.section_id
+                    )
                 )
-            )
-            sections.append(
-                {
-                    "section_id": section.section_id,
-                    "section_order": section.section_order,
-                    "section_type": section.section_type,
-                    "title": section.title,
-                    "draft_section_id": str(result.draft_section_id),
-                }
-            )
-        return {"outline_id": str(verified_outline.outline_id), "sections": sections}
+                sections.append(
+                    {
+                        "section_id": section.section_id,
+                        "section_order": section.section_order,
+                        "section_type": section.section_type,
+                        "title": section.title,
+                        "draft_section_id": str(result.draft_section_id),
+                        "section_status": "completed",
+                    }
+                )
+            except DraftSectionModelUnavailable:
+                degraded_count += 1
+                sections.append(
+                    {
+                        "section_id": section.section_id,
+                        "section_order": section.section_order,
+                        "section_type": section.section_type,
+                        "title": section.title,
+                        "draft_section_id": None,
+                        "section_status": "degraded",
+                        "degraded_reason": "model_unavailable",
+                    }
+                )
+        return {
+            "outline_id": str(verified_outline.outline_id),
+            "sections": sections,
+            "degraded_section_count": degraded_count,
+            "section_count": len(verified_outline.sections),
+        }
 
     return build_report_draft
 
@@ -140,11 +162,19 @@ def make_assemble_report_node(deps: Stage5WorkflowDependencies):
         if not outline_id or not sections:
             raise Stage5InvalidState("assemble_report 需要 outline_id + sections")
         ordered = sorted(sections, key=lambda s: s.get("section_order", 0))
-        draft_section_ids = tuple(UUID(s["draft_section_id"]) for s in ordered)
+        valid = [s for s in ordered if s.get("draft_section_id") is not None]
+        degraded = [s for s in ordered if s.get("section_status") == "degraded"]
+        if not valid:
+            raise Stage5InvalidState(f"所有 {len(ordered)} 个 section 均 degraded，无法装配报告")
+        draft_section_ids = tuple(UUID(s["draft_section_id"]) for s in valid)
         result = await deps.report_service.create_or_get_report(
             ReportAssemblyDraft(outline_id=UUID(outline_id), draft_section_ids=draft_section_ids)
         )
-        return {"report_id": str(result.report_id)}
+        return {
+            "report_id": str(result.report_id),
+            "assembled_section_count": len(draft_section_ids),
+            "degraded_section_count": len(degraded),
+        }
 
     return assemble_report
 

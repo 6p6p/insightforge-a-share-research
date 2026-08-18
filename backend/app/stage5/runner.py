@@ -494,12 +494,19 @@ class Stage5WorkflowRunner:
         不含 Evidence text / prompt / raw response / comment 全文。"""
         if node_name == "build_report_draft":
             sections = node_update.get("sections") or []
+            degraded_count = node_update.get("degraded_section_count", 0)
+            total_count = node_update.get("section_count", len(sections))
             return {
                 "outline_id": node_update.get("outline_id"),
-                "section_count": len(sections),
+                "section_count": total_count,
+                "degraded_section_count": degraded_count,
             }
         if node_name == "assemble_report":
-            return {"report_id": node_update.get("report_id")}
+            return {
+                "report_id": node_update.get("report_id"),
+                "assembled_section_count": node_update.get("assembled_section_count"),
+                "degraded_section_count": node_update.get("degraded_section_count"),
+            }
         if node_name == "check_report":
             return {"check_result_id": node_update.get("check_result_id")}
         if node_name == "audit_report":

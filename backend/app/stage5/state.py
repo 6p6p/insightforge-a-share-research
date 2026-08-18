@@ -53,6 +53,9 @@ class Stage5WorkflowState(TypedDict, total=False):
     # 报告装配（5A Outline → 5B sections → 5C Report）。
     outline_id: str | None
     sections: Annotated[list[dict], merge_sections]
+    section_count: int | None
+    degraded_section_count: int | None
+    assembled_section_count: int | None
     report_id: str | None
 
     # 确定性检查 + 审计 + 路由。
