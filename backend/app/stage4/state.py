@@ -27,6 +27,17 @@ def merge_analysis_results(current, update):
     return out
 
 
+def merge_degraded_items(current, update):
+    """Reducer: merge degraded item dicts by item_id (retry-safe, resume-safe)."""
+    out = list(current or [])
+    keys = {r["item_id"] for r in out}
+    for item in update or []:
+        if item["item_id"] not in keys:
+            out.append(item)
+            keys.add(item["item_id"])
+    return out
+
+
 class Stage4WorkflowState(TypedDict, total=False):
     """分析工作流的一次执行状态（全部 checkpoint-safe）。"""
 
@@ -38,3 +49,4 @@ class Stage4WorkflowState(TypedDict, total=False):
     claim_ids: list[str]
     synthesis_id: str | None
     synthesis_result_id: str | None
+    degraded_items: Annotated[list[dict], merge_degraded_items]

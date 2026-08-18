@@ -22,6 +22,10 @@ from app.analysis.macro.contracts import MacroAnalysisRequest
 from app.analysis.synthesis.contracts import SynthesisAnalysisRequest
 from app.analysis.valuation.contracts import ValuationAnalysisRequest
 from app.claims.contracts import ClaimAnalysisDomain
+from app.stage4.analyst_error_policy import (
+    MAX_ANALYST_RETRIES,
+    classify_analyst_error,
+)
 from app.stage4.dependencies import Stage4AnalysisDependencies
 from app.stage4.errors import (
     Stage4InsufficientClaims,
@@ -121,67 +125,107 @@ def make_run_analysis_item_node(deps: Stage4AnalysisDependencies):
     """
 
     async def run_analysis_item(state) -> dict:
+        """Run one analysis item with bounded retry then graceful degradation.
+
+        P3: Single analyst malformed/model errors are retried up to
+        MAX_ANALYST_RETRIES; after exhaustion the item is marked degraded
+        (empty claims + degraded record). Hard failures (integrity/data
+        corruption) still propagate.
+        """
         item_id = state["item_id"]
         analysis_type = state["analysis_type"]
         question = state["research_question"]
         company_id = UUID(state["company_id"])
 
-        if analysis_type in {
-            ClaimAnalysisDomain.BUSINESS.value,
-            ClaimAnalysisDomain.EVENT.value,
-            ClaimAnalysisDomain.RISK.value,
-        }:
-            result = await deps.claim_analysis_service.analyze(
-                ClaimAnalysisRequest(
-                    company_id=company_id,
-                    research_question=question,
-                    analysis_domain=ClaimAnalysisDomain(analysis_type),
-                    evidence_card_ids=[UUID(c) for c in state["evidence_card_ids"]],
+        async def _run_once():
+            if analysis_type in {
+                ClaimAnalysisDomain.BUSINESS.value,
+                ClaimAnalysisDomain.EVENT.value,
+                ClaimAnalysisDomain.RISK.value,
+            }:
+                result = await deps.claim_analysis_service.analyze(
+                    ClaimAnalysisRequest(
+                        company_id=company_id,
+                        research_question=question,
+                        analysis_domain=ClaimAnalysisDomain(analysis_type),
+                        evidence_card_ids=[UUID(c) for c in state["evidence_card_ids"]],
+                    )
                 )
-            )
-            claim_ids = [str(cid) for cid in result.claim_ids]
-        elif analysis_type == ClaimAnalysisDomain.FINANCIAL.value:
-            result = await deps.financial_analysis_service.analyze(
-                FinancialAnalysisRequest(
-                    company_id=company_id,
-                    research_question=question,
-                    calculation_ids=[UUID(c) for c in state["calculation_ids"]],
-                    additional_evidence_ids=[UUID(c) for c in state["additional_evidence_ids"]],
+                return [str(cid) for cid in result.claim_ids]
+            elif analysis_type == ClaimAnalysisDomain.FINANCIAL.value:
+                result = await deps.financial_analysis_service.analyze(
+                    FinancialAnalysisRequest(
+                        company_id=company_id,
+                        research_question=question,
+                        calculation_ids=[UUID(c) for c in state["calculation_ids"]],
+                        additional_evidence_ids=[UUID(c) for c in state["additional_evidence_ids"]],
+                    )
                 )
-            )
-            claim_ids = [str(cid) for cid in result.claim_ids]
-        elif analysis_type == ClaimAnalysisDomain.MACRO.value:
-            result = await deps.macro_analysis_service.analyze(
-                MacroAnalysisRequest(
-                    company_id=company_id,
-                    research_question=question,
-                    analysis_as_of=date.fromisoformat(state["analysis_as_of"]),
-                    macro_driver_evidence_ids=[UUID(c) for c in state["macro_driver_evidence_ids"]],
-                    company_evidence_ids=[UUID(c) for c in state["company_evidence_ids"]],
+                return [str(cid) for cid in result.claim_ids]
+            elif analysis_type == ClaimAnalysisDomain.MACRO.value:
+                result = await deps.macro_analysis_service.analyze(
+                    MacroAnalysisRequest(
+                        company_id=company_id,
+                        research_question=question,
+                        analysis_as_of=date.fromisoformat(state["analysis_as_of"]),
+                        macro_driver_evidence_ids=[
+                            UUID(c) for c in state["macro_driver_evidence_ids"]
+                        ],
+                        company_evidence_ids=[UUID(c) for c in state["company_evidence_ids"]],
+                    )
                 )
-            )
-            claim_ids = [str(cid) for cid in result.claim_ids]
-        elif analysis_type == ClaimAnalysisDomain.VALUATION.value:
-            result = await deps.valuation_analysis_service.analyze(
-                ValuationAnalysisRequest(
-                    company_id=company_id,
-                    research_question=question,
-                    analysis_as_of=date.fromisoformat(state["analysis_as_of"]),
-                    comparison_ids=[UUID(c) for c in state["comparison_ids"]],
+                return [str(cid) for cid in result.claim_ids]
+            elif analysis_type == ClaimAnalysisDomain.VALUATION.value:
+                result = await deps.valuation_analysis_service.analyze(
+                    ValuationAnalysisRequest(
+                        company_id=company_id,
+                        research_question=question,
+                        analysis_as_of=date.fromisoformat(state["analysis_as_of"]),
+                        comparison_ids=[UUID(c) for c in state["comparison_ids"]],
+                    )
                 )
-            )
-            claim_ids = [str(result.claim_id)] if result.claim_id else []
-        else:
-            raise Stage4UnknownWorkItemType(f"unknown analysis_type: {analysis_type!r}")
+                return [str(result.claim_id)] if result.claim_id else []
+            else:
+                raise Stage4UnknownWorkItemType(f"unknown analysis_type: {analysis_type!r}")
 
+        last_exc = None
+        for _attempt in range(MAX_ANALYST_RETRIES):
+            try:
+                claim_ids = await _run_once()
+                return {
+                    "analysis_results": [
+                        {
+                            "item_id": item_id,
+                            "analysis_type": analysis_type,
+                            "claim_ids": claim_ids,
+                        }
+                    ]
+                }
+            except Exception as exc:
+                last_exc = exc
+                classification = classify_analyst_error(exc)
+                if classification != "retryable":
+                    # Hard failure -- propagate immediately (no retry)
+                    raise
+                # Retryable -- continue loop
+
+        # All retries exhausted -> degrade this item
         return {
             "analysis_results": [
                 {
                     "item_id": item_id,
                     "analysis_type": analysis_type,
-                    "claim_ids": claim_ids,
+                    "claim_ids": [],
                 }
-            ]
+            ],
+            "degraded_items": [
+                {
+                    "item_id": item_id,
+                    "analysis_type": analysis_type,
+                    "error_code": type(last_exc).__name__ if last_exc else "unknown",
+                    "attempts": MAX_ANALYST_RETRIES,
+                }
+            ],
         }
 
     return run_analysis_item
@@ -196,15 +240,30 @@ def make_collect_claim_ids_node():
     """
 
     async def collect_claim_ids(state) -> dict:
+        """Collect and dedupe claims; tolerate partial degradation.
+
+        If every analyst degraded (0 claims) -> Stage4InsufficientClaims
+        (irrecoverable). If some analysts succeeded, proceed with available
+        claims -- missing modules are honest gaps (P3 principle).
+        """
         unique = {
             cid
             for result in state.get("analysis_results", [])
             for cid in result.get("claim_ids", [])
         }
+        degraded = state.get("degraded_items", [])
         if len(unique) < MIN_SYNTHESIS_CLAIMS:
-            raise Stage4InsufficientClaims(
-                f"synthesis requires at least {MIN_SYNTHESIS_CLAIMS} claims, got {len(unique)}"
-            )
+            if not degraded:
+                # No degradation: genuinely insufficient data, must fail
+                raise Stage4InsufficientClaims(
+                    f"synthesis requires at least {MIN_SYNTHESIS_CLAIMS} claims, got {len(unique)}"
+                )
+            # Degraded modules present: honest gap, proceed if we have some claims
+            if len(unique) == 0:
+                raise Stage4InsufficientClaims(
+                    f"synthesis requires at least {MIN_SYNTHESIS_CLAIMS} claims, "
+                    f"got {len(unique)} ({len(degraded)} module(s) degraded)"
+                )
         return {"claim_ids": sorted(unique)}
 
     return collect_claim_ids
