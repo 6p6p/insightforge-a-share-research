@@ -306,6 +306,70 @@ async def test_resolve_alias_short_name_same_company_not_ambiguous(
 
 
 @pytest.mark.asyncio
+async def test_resolve_whitespace_in_short_name_falls_back_to_direct_match(monkeypatch) -> None:
+    """P1 generalization: alias table miss due to whitespace → direct name fallback."""
+    company = _company(short_name="五 粮 液", official_name="宜宾五粮液股份有限公司")
+    service = CompanyIdentityService(_SessionMaker())
+
+    async def fake_alias(self, normalized):
+        return []  # alias table miss
+
+    async def fake_direct(self, normalized):
+        return [(company, "short_name")]
+
+    monkeypatch.setattr(CompanyRepository, "find_by_normalized_alias", fake_alias)
+    monkeypatch.setattr(CompanyRepository, "find_by_direct_name", fake_direct)
+
+    result = await service.resolve("五粮液")
+
+    assert result.company.company_id == company.company_id
+    assert result.match_type.value == "short_name"
+
+
+@pytest.mark.asyncio
+async def test_resolve_whitespace_in_official_name_falls_back(monkeypatch) -> None:
+    """Direct name fallback also works for official_name with whitespace."""
+    company = _company(short_name="五粮液", official_name="宜宾 五粮液 股份有限公司")
+    service = CompanyIdentityService(_SessionMaker())
+
+    async def fake_alias(self, normalized):
+        return []
+
+    async def fake_direct(self, normalized):
+        return [(company, "official_name")]
+
+    monkeypatch.setattr(CompanyRepository, "find_by_normalized_alias", fake_alias)
+    monkeypatch.setattr(CompanyRepository, "find_by_direct_name", fake_direct)
+
+    result = await service.resolve("宜宾五粮液股份有限公司")
+
+    assert result.company.company_id == company.company_id
+    assert result.match_type.value == "official_name"
+
+
+@pytest.mark.asyncio
+async def test_resolve_direct_fallback_ambiguous(monkeypatch) -> None:
+    """Direct name fallback preserves ambiguity detection."""
+    c1 = _company(company_id=uuid4(), short_name="名称A", official_name="公司A")
+    c2 = _company(company_id=uuid4(), short_name="名称B", official_name="公司B")
+    # Make sure they have different IDs
+    c2.company_id = uuid4()
+    service = CompanyIdentityService(_SessionMaker())
+
+    async def fake_alias(self, normalized):
+        return []
+
+    async def fake_direct(self, normalized):
+        return [(c1, "short_name"), (c2, "short_name")]
+
+    monkeypatch.setattr(CompanyRepository, "find_by_normalized_alias", fake_alias)
+    monkeypatch.setattr(CompanyRepository, "find_by_direct_name", fake_direct)
+
+    with pytest.raises(CompanyIdentityAmbiguous):
+        await service.resolve("名称")
+
+
+@pytest.mark.asyncio
 async def test_get_company_missing(monkeypatch) -> None:
     service = CompanyIdentityService(_SessionMaker())
 

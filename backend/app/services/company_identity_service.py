@@ -56,6 +56,11 @@ class CompanyIdentityService:
                     parsed.security_code,
                 )
             rows = await repo.find_by_normalized_alias(parsed.normalized)
+            if not rows:
+                # P1 generalization: fallback — direct match on short_name /
+                # official_name when alias table has no normalized match.
+                # Catches cases like whitespace artifacts in source data.
+                rows = await repo.find_by_direct_name(parsed.normalized)
             return self._resolve_by_alias(rows, parsed.normalized)
 
     async def get_company(self, company_id: UUID) -> CompanyIdentityResponse:

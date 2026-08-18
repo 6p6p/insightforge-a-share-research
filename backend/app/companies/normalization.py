@@ -39,7 +39,7 @@ def normalize_company_text(value: str) -> str:
     if len(stripped) > _MAX_LENGTH:
         raise InvalidCompanyQuery()
     folded = unicodedata.normalize("NFKC", stripped)
-    folded = re.sub(r"\s+", " ", folded)
+    folded = re.sub(r"\s+", "", folded)
     return folded.casefold()
 
 

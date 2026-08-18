@@ -8,11 +8,11 @@ from app.domain.companies import ExchangeCode
 
 
 def test_nfkc_and_whitespace_folding() -> None:
-    assert normalize_company_text("  贵州  茅台  ") == "贵州 茅台"
+    assert normalize_company_text("  贵州  茅台  ") == "贵州茅台"
 
 
 def test_casefold() -> None:
-    assert normalize_company_text("KWEICHOW MOUTAI") == "kweichow moutai"
+    assert normalize_company_text("KWEICHOW MOUTAI") == "kweichowmoutai"
 
 
 def test_identity_key_sse() -> None:
@@ -53,7 +53,7 @@ def test_chinese_name() -> None:
 
 def test_english_name() -> None:
     parsed = parse_company_query("Kweichow Moutai")
-    assert parsed.normalized == "kweichow moutai"
+    assert parsed.normalized == "kweichowmoutai"
 
 
 def test_empty_rejected() -> None:
@@ -78,6 +78,27 @@ def test_unknown_explicit_prefix_rejected() -> None:
 def test_unknown_symbol_suffix_rejected() -> None:
     with pytest.raises(InvalidCompanyQuery):
         parse_company_query("600519.XS")
+
+
+def test_whitespace_stripped_from_chinese() -> None:
+    """P1 generalization: ALL whitespace stripped, not just collapsed."""
+    assert normalize_company_text("五 粮 液") == "五粮液"
+    assert normalize_company_text("宁德 时代") == "宁德时代"
+    assert normalize_company_text(" 贵 州 茅台 ") == "贵州茅台"
+
+
+def test_whitespace_stripped_from_official_name() -> None:
+    """Whitespace in official names from source data does not block matching."""
+    assert normalize_company_text("宜宾五粮液股份有限公司") == "宜宾五粮液股份有限公司"
+    assert normalize_company_text("宜宾 五粮液 股份 有限公司") == "宜宾五粮液股份有限公司"
+
+
+def test_whitespace_stripped_from_security_code() -> None:
+    """Security codes with whitespace normalized correctly."""
+    result = parse_company_query(" 300750 ")
+    assert result.security_code == "300750"
+    result2 = parse_company_query(" 000858 .SZ ")
+    assert result2 is not None
 
 
 def test_too_long_rejected() -> None:

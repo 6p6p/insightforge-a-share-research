@@ -59,3 +59,37 @@ class CompanyRepository:
             .order_by(CompanyModel.exchange.asc(), CompanyModel.company_id.asc())
         )
         return [(company, alias_type) for company, alias_type in result.all()]
+
+    async def find_by_direct_name(
+        self,
+        normalized_name: str,
+    ) -> list[tuple[CompanyModel, str]]:
+        """P1 generalization: direct match on short_name / official_name after
+        stripping all whitespace (same normalization as normalize_company_text).
+
+        Fallback when alias table has no matching normalized_alias entry —
+        typically due to whitespace artifacts in source data (e.g. "五 粮 液").
+        Returns same (CompanyModel, alias_type) shape for _resolve_by_alias.
+        """
+        from sqlalchemy import func as sa_func
+
+        stripped = sa_func.replace(CompanyModel.short_name, " ", "")
+        result = await self._session.execute(
+            select(CompanyModel).where(stripped == normalized_name)
+        )
+        companies: list[tuple[CompanyModel, str]] = []
+        seen: set[UUID] = set()
+        for company in result.scalars().all():
+            seen.add(company.company_id)
+            companies.append((company, "short_name"))
+        if companies:
+            return companies
+
+        stripped_official = sa_func.replace(CompanyModel.official_name, " ", "")
+        result = await self._session.execute(
+            select(CompanyModel).where(stripped_official == normalized_name)
+        )
+        for company in result.scalars().all():
+            if company.company_id not in seen:
+                companies.append((company, "official_name"))
+        return companies
