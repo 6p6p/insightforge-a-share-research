@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.research_backflow.closure import ResearchBackflowClosureService
 from app.research_backflow.executor import ResearchBackflowExecutor
 from app.research_backflow.service import ResearchBackflowService
 from app.research_fulfillment.service import ResearchFulfillmentService
@@ -45,3 +46,6 @@ class ResearchOrchestrationDependencies:
     # 不注入——backflow 节点在缺 deps 时抛 RuntimeError，不静默降级）。
     backflow_service: ResearchBackflowService | None = None
     backflow_executor: ResearchBackflowExecutor | None = None
+    # P0：backflow manual closure（research_backflow_manual 终止 → 持久化人工审核
+    # 请求）；未注入 → 节点不创建（单元测试未进入 backflow 终止路径返回 None）。
+    closure_service: ResearchBackflowClosureService | None = None

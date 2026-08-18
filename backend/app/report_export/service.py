@@ -58,6 +58,7 @@ from app.report_export.errors import (
     ReportNotExportable,
 )
 from app.report_export.pack import (
+    AUDIT_NOTE_BACKFLOW_ACCEPTED,
     AUDIT_NOTE_HUMAN_APPROVED,
     ExportCardDetail,
     build_export_report_pack,
@@ -178,7 +179,10 @@ class ReportExportService:
         if verified_report is None or verified_audit is None:
             raise ReportNotExportable()
 
-        audit_note, eligible = _eligibility(verified_audit, verified_decision)
+        backflow_accepted = await self._backflow_accept_for_task(task_id)
+        audit_note, eligible = _eligibility(
+            verified_audit, verified_decision, backflow_accepted=backflow_accepted
+        )
         if not eligible or verified_audit.verified_check.status != CHECK_STATUS_PASS:
             raise ReportNotExportable()
 
@@ -319,7 +323,10 @@ class ReportExportService:
                 raise TaskNotFound()
             company = await self._resolve_company(verified_report)
 
-            audit_note, eligible = _eligibility(verified_audit, verified_decision)
+            backflow_accepted = await self._backflow_accept_for_task(row.task_id)
+            audit_note, eligible = _eligibility(
+                verified_audit, verified_decision, backflow_accepted=backflow_accepted
+            )
             if not eligible or verified_check.status != CHECK_STATUS_PASS:
                 raise ReportExportIntegrityError()
 
@@ -450,6 +457,39 @@ class ReportExportService:
                     raise ReportExportIntegrityError() from None
         return details, provenance
 
+    async def _backflow_accept_for_task(self, task_id: UUID) -> bool:
+        """task 的（active/最新）orchestration 是否已有 backflow closure accept。
+
+        只读 closure 决策；任何解析失败（行缺失）→ False（export 资格不因
+        closure 侧异常而放宽）。accept 守卫已在服务层保证不含 critical
+        integrity failure。
+        """
+        from app.repositories.backflow_review_repository import BackflowReviewRepository
+        from app.research_orchestration.repository import ResearchOrchestrationRepository
+
+        try:
+            async with self._sessionmaker() as session:
+                orchestration = await ResearchOrchestrationRepository(session).get_active_for_task(
+                    task_id
+                )
+                if orchestration is None:
+                    orchestration = await ResearchOrchestrationRepository(
+                        session
+                    ).get_latest_for_task(task_id)
+                if orchestration is None:
+                    return False
+                request = await BackflowReviewRepository(session).get_by_orchestration(
+                    orchestration.orchestration_id
+                )
+                if request is None:
+                    return False
+                decision = await BackflowReviewRepository(session).get_decision_by_request(
+                    request.backflow_human_request_id
+                )
+        except Exception:  # noqa: BLE001 - 只读资格判定，不因闭包侧异常放宽
+            return False
+        return decision is not None and decision.decision == "accept"
+
     async def _load_export_row(self, task_id: UUID, export_id: UUID) -> ReportExportModel:
         async with self._sessionmaker() as session:
             row = await ReportExportRepository(session).get_by_id(export_id)
@@ -461,11 +501,17 @@ class ReportExportService:
 def _eligibility(
     audit: VerifiedReportAudit,
     decision: VerifiedHumanReviewDecision | None,
+    *,
+    backflow_accepted: bool = False,
 ) -> tuple[str | None, bool]:
     """spec H 资格判定：返回 (audit_note, eligible)。
 
     A. audit pass + route pass → 可导出，无 audit_note；
     B. audit fail + route human_review + 人工 approve → 可导出，audit_note 固定文案；
+    C. audit fail + backflow manual closure accept（补充研究已达上限，用户接受当前
+       报告；accept 守卫已保证不含 critical integrity failure）→ 可导出，固定文案。
+       确定性 Check=pass 由调用方另行强制；critical 守卫在 accept 时已拒绝，此处
+       只需读 closure 决策。
     其余（rewrite / research / waiting_human / 无 audit）→ 不可导出。
     """
     if audit.audit_status == AUDIT_STATUS_PASS and audit.recommended_route == AUDIT_ROUTE_PASS:
@@ -477,6 +523,8 @@ def _eligibility(
         and decision.decision == HUMAN_DECISION_APPROVE
     ):
         return AUDIT_NOTE_HUMAN_APPROVED, True
+    if audit.audit_status == AUDIT_STATUS_FAIL and backflow_accepted:
+        return AUDIT_NOTE_BACKFLOW_ACCEPTED, True
     return None, False
 
 

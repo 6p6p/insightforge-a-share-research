@@ -58,6 +58,8 @@ from app.db.models.report_audit import ReportAuditModel, ReviewIssueModel
 from app.db.models.report_export import ReportExportModel
 from app.db.models.report_outline import ReportOutlineModel
 from app.db.models.research_backflow import (
+    BackflowHumanReviewDecisionModel,
+    BackflowHumanReviewRequestModel,
     ResearchBackflowFulfillmentModel,
     ResearchBackflowPlanModel,
     ResearchBackflowRequestModel,
@@ -135,6 +137,8 @@ __all__ = [
     "ReviewIssueModel",
     "ReportExportModel",
     "ReportOutlineModel",
+    "BackflowHumanReviewDecisionModel",
+    "BackflowHumanReviewRequestModel",
     "ResearchBackflowFulfillmentModel",
     "ResearchBackflowPlanModel",
     "ResearchBackflowRequestModel",

@@ -28,6 +28,8 @@ from fastapi import APIRouter, Depends, Response, status
 from app.api.dependencies import get_research_orchestration_service
 from app.research_orchestration.service import ResearchOrchestrationService
 from app.schemas.research_orchestration import (
+    BackflowReviewActionRequest,
+    BackflowReviewResponse,
     ResearchOrchestrationActionRequest,
     ResearchOrchestrationResponse,
 )
@@ -137,4 +139,32 @@ async def resume_source_acquisition(
     - awaiting_stage5 → 400（L：与 HumanReviewDecision 分开，走 /actions）。
     返回**调度后**的状态投影（后端后台执行，前端轮询）。"""
     result = await service.resume_after_source_acquisition(orchestration_id)
+    return _to_response(result)
+
+
+@orchestrations_router.get(
+    "/research-orchestrations/{orchestration_id}/backflow-review",
+    response_model=BackflowReviewResponse,
+)
+async def get_backflow_review(
+    orchestration_id: UUID,
+    service: Annotated[ResearchOrchestrationService, Depends(get_research_orchestration_service)],
+) -> BackflowReviewResponse:
+    """backflow manual closure 投影（request + decision + accept 禁用 barrier）。"""
+    return BackflowReviewResponse.model_validate(
+        vars(await service.get_backflow_review(orchestration_id))
+    )
+
+
+@orchestrations_router.post(
+    "/research-orchestrations/{orchestration_id}/backflow-review/actions",
+    response_model=ResearchOrchestrationResponse,
+)
+async def act_on_backflow_review(
+    orchestration_id: UUID,
+    payload: BackflowReviewActionRequest,
+    service: Annotated[ResearchOrchestrationService, Depends(get_research_orchestration_service)],
+) -> ResearchOrchestrationResponse:
+    """backflow manual closure action（accept / extra_research / cancel）。"""
+    result = await service.act_on_backflow_review(orchestration_id, payload.action, payload.comment)
     return _to_response(result)

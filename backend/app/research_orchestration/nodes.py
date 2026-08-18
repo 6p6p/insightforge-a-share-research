@@ -744,6 +744,18 @@ def make_research_backflow_manual_node(deps: ResearchOrchestrationDependencies):
             OrchestrationStatus.WAITING_HUMAN.value,
             _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
         )
+        if deps.closure_service is not None:
+            await deps.closure_service.create_or_get_review(
+                UUID(state["orchestration_id"]),
+                reason=reason,
+                request_payload={
+                    "backflow_round": state.get("backflow_round"),
+                    "missing_need_codes": list(state.get("missing_need_codes") or []),
+                    "non_blocking_gap_count": len(
+                        state.get("backflow_non_blocking_gap_issues") or []
+                    ),
+                },
+            )
         return {
             "backflow_manual_reason": reason,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),

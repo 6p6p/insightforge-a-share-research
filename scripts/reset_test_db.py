@@ -1,5 +1,11 @@
 """Pre-integration DB reset: FK-safe table cleanup preserving seed data."""
-import asyncio, selectors, psycopg, os
+
+import asyncio
+import os
+import selectors
+
+import psycopg
+
 
 async def main():
     dsn = os.environ.get(
@@ -12,6 +18,8 @@ async def main():
     # FK-safe order: leaf tables first, parents last
     # Preserves: issuer_domains, source_providers, companies (seed data)
     tables = [
+        "backflow_human_review_decisions",
+        "backflow_human_review_requests",
         "workflow_events",
         "task_events",
         "synthesis_claims",
@@ -43,4 +51,7 @@ async def main():
     await conn.close()
     print("DB reset OK")
 
-asyncio.run(main(), loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()))
+
+asyncio.run(
+    main(), loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
+)

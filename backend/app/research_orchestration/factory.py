@@ -26,6 +26,7 @@ from app.llm.instrumentation import LlmUsageObserver
 from app.rag.embedding.bge import BGEProvider
 from app.rag.index.service import VectorIndexService
 from app.rag.retrieval.service import RetrievalService
+from app.research_backflow.closure import ResearchBackflowClosureService
 from app.research_backflow.executor import ResearchBackflowExecutor
 from app.research_fulfillment.executors import SourceIndexBuilder
 from app.research_fulfillment.factory import create_research_fulfillment_service
@@ -124,6 +125,7 @@ def create_research_orchestration_dependencies(
         stage5_runner=stage5_runner,
         backflow_service=stage5_runner.dependencies.research_backflow_service,
         backflow_executor=backflow_executor,
+        closure_service=ResearchBackflowClosureService(sessionmaker),
     )
 
 

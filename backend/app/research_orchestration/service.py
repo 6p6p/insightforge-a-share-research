@@ -40,7 +40,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -48,6 +48,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.audit.contracts import AUDIT_SEVERITY_CRITICAL, AUDIT_SEVERITY_HIGH
 from app.core.errors import ActiveWorkflowRunExists
 from app.core.logging import get_logger
 from app.db.models.research_orchestration import (
@@ -55,6 +56,7 @@ from app.db.models.research_orchestration import (
     ResearchOrchestrationModel,
 )
 from app.domain.tasks import ACTIVE_WORKFLOW_RUN_STATUSES
+from app.report.contracts import CHECK_STATUS_PASS
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
     ORCHESTRATION_SCHEMA_VERSION,
@@ -190,6 +192,19 @@ class ResearchOrchestrationResult:
     updated_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class BackflowReviewView:
+    """backflow manual closure 的只读投影（供 API / 前端按钮 disable 判断）。"""
+
+    orchestration_id: UUID
+    backflow_human_request_id: UUID | None = None
+    reason: str | None = None
+    decision: str | None = None
+    comment: str | None = None
+    decided_at: datetime | None = None
+    acceptance_barriers: list[str] = field(default_factory=list)
+
+
 class ResearchOrchestrationService:
     """Top-level research orchestration 应用服务（create / read / verify / cancel）。"""
 
@@ -201,6 +216,9 @@ class ResearchOrchestrationService:
         orchestration_runner: ResearchOrchestrationRunner | None = None,
         execution_manager: ResearchOrchestrationExecutionManager | None = None,
         source_preparation: object | None = None,
+        report_audit_service: object | None = None,
+        report_check_service: object | None = None,
+        closure_service: object | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._plan_service = plan_service
@@ -215,6 +233,12 @@ class ResearchOrchestrationService:
         # V1.1 P0-2：resume 前预准备公司 source（parse→chunk→index，best-effort
         # 后台）；未绑定（unit 测试）→ 跳过，编排图内 fulfill 仍可自愈。
         self._source_preparation = source_preparation
+        # P0 backflow manual closure：accept 守卫用 report_audit/check verify；
+        # closure_service 持久化人工审核请求与裁决。未绑定（unit 测试）→ 守卫
+        # RuntimeError（不静默降级）。
+        self._report_audit_service = report_audit_service
+        self._report_check_service = report_check_service
+        self._closure_service = closure_service
 
     @property
     def orchestration_runner(self) -> ResearchOrchestrationRunner | None:
@@ -761,6 +785,173 @@ class ResearchOrchestrationService:
         async with self._sessionmaker() as session:
             plan = await session.get(ResearchPlanModel, orchestration.research_plan_id)
             return plan.company_id if plan is not None else None
+
+    # ------------------------------------------------------------------ backflow closure (P0)
+
+    async def get_backflow_review(self, orchestration_id: UUID) -> BackflowReviewView:
+        """closure 只读投影：request + decision + accept 守卫 barrier（按钮禁用理由）。"""
+        async with self._sessionmaker() as session:
+            orchestration = await ResearchOrchestrationRepository(session).get_by_id(
+                orchestration_id,
+            )
+        if orchestration is None:
+            raise ResearchOrchestrationNotFound()
+        if self._closure_service is None:
+            raise RuntimeError("backflow closure service not bound")
+        request = await self._closure_service.get_request_for_orchestration(orchestration_id)
+        if request is None:
+            return BackflowReviewView(orchestration_id=orchestration_id)
+        decision = await self._closure_service.get_decision_for_request(
+            request.backflow_human_request_id,
+        )
+        barriers: list[str] = []
+        if decision is None:
+            try:
+                barriers = await self._acceptance_barriers(orchestration_id)
+            except RuntimeError:
+                # 守卫服务未绑定（unit 测试 / 只读场景）→ 不计算 barrier。
+                barriers = []
+        return BackflowReviewView(
+            orchestration_id=orchestration_id,
+            backflow_human_request_id=request.backflow_human_request_id,
+            reason=request.reason,
+            decision=decision.decision if decision is not None else None,
+            comment=decision.comment if decision is not None else None,
+            decided_at=decision.decided_at if decision is not None else None,
+            acceptance_barriers=barriers,
+        )
+
+    async def act_on_backflow_review(
+        self,
+        orchestration_id: UUID,
+        decision: str,
+        comment: str | None = None,
+    ) -> ResearchOrchestrationResult:
+        """backflow manual closure (P0): only waiting_human + research_backflow.
+
+        decision in {accept / extra_research / cancel}:
+        - accept: only when it holds no critical integrity failure (deterministic
+          Check=pass AND no critical/high invalid issue) -> persist adjudication +
+          orchestration completed;
+        - extra_research: persist adjudication + schedule one bounded manual
+          supplemental research round (reuse K2 same-thread resume; bounded);
+        - cancel: persist adjudication + cancel_orchestration (clean terminal).
+        Guards mirror act_on_orchestration (NotFound / AlreadyFinished /
+        InvalidAction); a closure request must already exist (created by the
+        research_backflow_manual node).
+        """
+        from app.research_backflow.closure import (
+            BACKFLOW_DECISION_ACCEPT,
+            BACKFLOW_DECISION_CANCEL,
+            BACKFLOW_DECISION_EXTRA_RESEARCH,
+            BACKFLOW_DECISIONS,
+            BackflowReviewNotAcceptable,
+        )
+
+        if decision not in BACKFLOW_DECISIONS:
+            raise ResearchOrchestrationInvalidAction(
+                f"unsupported backflow review decision: {decision}"
+            )
+        if self._closure_service is None:
+            raise RuntimeError("backflow closure service not bound")
+        async with self._sessionmaker() as session:
+            orchestration = await ResearchOrchestrationRepository(session).get_by_id(
+                orchestration_id,
+            )
+        if orchestration is None:
+            raise ResearchOrchestrationNotFound()
+        if orchestration.status != OrchestrationStatus.WAITING_HUMAN.value:
+            raise ResearchOrchestrationAlreadyFinished()
+        if orchestration.current_phase != OrchestrationPhase.RESEARCH_BACKFLOW.value:
+            raise ResearchOrchestrationInvalidAction(
+                "orchestration must be research_backflow to run a closure action"
+            )
+
+        request = await self._closure_service.get_request_for_orchestration(orchestration_id)
+        if request is None:
+            raise ResearchOrchestrationIntegrityError("backflow closure request missing")
+
+        if decision == BACKFLOW_DECISION_CANCEL:
+            await self._closure_service.resolve_review(
+                request.backflow_human_request_id,
+                decision=BACKFLOW_DECISION_CANCEL,
+                comment=comment,
+            )
+            return await self.cancel_orchestration(orchestration_id)
+
+        if decision == BACKFLOW_DECISION_ACCEPT:
+            barriers = await self._acceptance_barriers(orchestration_id)
+            if barriers:
+                raise BackflowReviewNotAcceptable(barriers)
+            await self._closure_service.resolve_review(
+                request.backflow_human_request_id,
+                decision=BACKFLOW_DECISION_ACCEPT,
+                comment=comment,
+            )
+            async with self._sessionmaker() as session:
+                await ResearchOrchestrationRepository(session).mark_completed(
+                    orchestration_id, datetime.now(UTC)
+                )
+                await session.commit()
+            return await self.get_orchestration(orchestration_id)
+
+        # extra_research: manual supplemental round (bounded; reuse K2 resume).
+        await self._closure_service.resolve_review(
+            request.backflow_human_request_id,
+            decision=BACKFLOW_DECISION_EXTRA_RESEARCH,
+            comment=comment,
+        )
+        if self._orchestration_runner is None or self._execution_manager is None:
+            raise RuntimeError("orchestration resume runner not bound")
+        self._execution_manager.schedule_resume(orchestration_id, RESUME_KIND_SUPPLEMENTAL_RESEARCH)
+        return await self.get_orchestration(orchestration_id)
+
+    async def _acceptance_barriers(self, orchestration_id: UUID) -> list[str]:
+        """accept 的确定性守卫：返回不可接受的中文 barrier 列表（空 → 可接受）。
+
+        只允许 non-critical evidence gap / wording / optional context / non-critical
+        研究局限；拒绝 unsupported numeric claim / provenance violation / critical
+        evidence missing / confirmed material numeric conflict / deterministic
+        integrity check failure。**模型不参与**——只读 verified Check + verified
+        Audit issues。
+        """
+        barriers: list[str] = []
+        checkpoint = await self._orchestration_runner.read_orchestration_checkpoint(
+            orchestration_id
+        )
+        attempt_no = (checkpoint.get("backflow_round") or 0) + 1
+        async with self._sessionmaker() as session:
+            child = await ResearchOrchestrationChildRepository(session).get_child(
+                orchestration_id, ChildStage.STAGE5.value, attempt_no
+            )
+        if child is None:
+            return ["无法定位当前报告，不能接受"]
+        if self._stage5_runner is None:
+            raise RuntimeError("stage5 runner not bound for acceptance guard")
+        stage5_state = await self._stage5_runner.read_checkpoint_state(child.workflow_run_id)
+        audit_id = _uuid_or_none(stage5_state.get("audit_id"))
+        check_result_id = _uuid_or_none(stage5_state.get("check_result_id"))
+        if audit_id is None or check_result_id is None:
+            return ["缺少审核/校验记录，不能接受当前报告"]
+        if self._report_check_service is None or self._report_audit_service is None:
+            raise RuntimeError("acceptance guard services not bound")
+        check = await self._report_check_service.verify_check_result_integrity(check_result_id)
+        if check.status != CHECK_STATUS_PASS:
+            barriers.append("存在确定性校验失败（integrity check），不能接受当前报告")
+        verified = await self._report_audit_service.verify_audit_integrity(audit_id)
+        for issue in verified.issues:
+            if issue.severity == AUDIT_SEVERITY_CRITICAL:
+                barriers.append("存在 critical 审核问题，不能接受当前报告")
+            elif (
+                "unresolved_conflict" == issue.issue_type and issue.severity == AUDIT_SEVERITY_HIGH
+            ):
+                barriers.append("存在待裁决的高危数字冲突，不能接受当前报告")
+            elif (
+                "unsupported_by_evidence" == issue.issue_type
+                and issue.severity == AUDIT_SEVERITY_HIGH
+            ):
+                barriers.append("存在缺乏证据支撑的数值主张，不能接受当前报告")
+        return barriers
 
     # ------------------------------------------------------------------ internal
 

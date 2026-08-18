@@ -92,6 +92,11 @@ def _create_research_orchestration(
         orchestration_runner=orchestration_runner,
         execution_manager=execution_manager,
         source_preparation=source_preparation,
+        # P0 backflow manual closure：accept 守卫 + closure 持久化（生产绑定；
+        # unit 测试不触发）。
+        report_audit_service=deps.stage5_runner.dependencies.report_audit_service,
+        report_check_service=deps.stage5_runner.dependencies.report_check_service,
+        closure_service=deps.closure_service,
     )
 
 

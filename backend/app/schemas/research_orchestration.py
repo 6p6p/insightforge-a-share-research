@@ -55,3 +55,26 @@ class ResearchOrchestrationActionRequest(BaseModel):
 
     action: ORCHESTRATION_ACTION
     comment: str | None = None
+
+
+class BackflowReviewActionRequest(BaseModel):
+    """backflow manual closure action（P0：accept / extra_research / cancel）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    action: Literal["accept", "extra_research", "cancel"]
+    comment: str | None = None
+
+
+class BackflowReviewResponse(BaseModel):
+    """backflow manual closure 只读投影（request + decision + accept 禁用理由）。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    orchestration_id: UUID
+    backflow_human_request_id: UUID | None = None
+    reason: str | None = None
+    decision: str | None = None
+    comment: str | None = None
+    decided_at: datetime | None = None
+    acceptance_barriers: list[str] = []

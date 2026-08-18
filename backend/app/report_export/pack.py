@@ -30,6 +30,7 @@ from app.schemas.company import CompanyIdentityResponse
 
 # 人工批准路径的 audit note（spec I：固定文案，不随 comment 变化）。
 AUDIT_NOTE_HUMAN_APPROVED = "本报告存在经人工确认接受的审核冲突"
+AUDIT_NOTE_BACKFLOW_ACCEPTED = "本报告经人工确认接受（补充研究已达上限，保留非关键审核提醒）"
 
 # Provenance 判别常量（schemas/citation.py 的 origin_type）。
 _ORIGIN_DOCUMENT = "document_chunk"

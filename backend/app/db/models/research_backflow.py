@@ -233,3 +233,96 @@ class ResearchBackflowPlanModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class BackflowHumanReviewRequestModel(Base):
+    """`backflow_human_review_requests`：backflow manual closure 的人工审核请求（P0）。
+
+    - 一个 orchestration 至多一个 request（UNIQUE(orchestration_id)）；request
+      由 `research_backflow_manual` 终止节点幂等创建（等价持久化对象，不单独改
+      orchestration status）；
+    - `request_fingerprint` = schema + orchestration + reason + normalized payload 的
+      SHA-256（不含 request id / created_at）。
+    """
+
+    __tablename__ = "backflow_human_review_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "request_schema_version >= 1",
+            name="ck_backflow_human_review_requests_request_schema_version",
+        ),
+        CheckConstraint(
+            "btrim(reason) <> ''",
+            name="ck_backflow_human_review_requests_reason_not_blank",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(request_payload) = 'object'",
+            name="ck_backflow_human_review_requests_payload_object",
+        ),
+        CheckConstraint(
+            f"request_fingerprint {_SHA256_CHECK}",
+            name="ck_backflow_human_review_requests_request_fingerprint",
+        ),
+        UniqueConstraint(
+            "orchestration_id",
+            name="uq_backflow_human_review_requests_orchestration_id",
+        ),
+    )
+
+    backflow_human_request_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    orchestration_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("research_orchestration_runs.orchestration_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class BackflowHumanReviewDecisionModel(Base):
+    """`backflow_human_review_decisions`：closure request 的一次 immutable 人工裁决。
+
+    decision ∈ {accept / extra_research / cancel}；一个 request 至多一个 decision
+    （UNIQUE(backflow_human_request_id)），replay 语义（服务层判定）。
+    """
+
+    __tablename__ = "backflow_human_review_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "decision_schema_version >= 1",
+            name="ck_backflow_human_review_decisions_decision_schema_version",
+        ),
+        CheckConstraint(
+            "decision IN ('accept','extra_research','cancel')",
+            name="ck_backflow_human_review_decisions_decision",
+        ),
+        CheckConstraint(
+            f"decision_fingerprint {_SHA256_CHECK}",
+            name="ck_backflow_human_review_decisions_decision_fingerprint",
+        ),
+        UniqueConstraint(
+            "backflow_human_request_id",
+            name="uq_backflow_human_review_decisions_backflow_human_request_id",
+        ),
+    )
+
+    backflow_human_decision_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    backflow_human_request_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("backflow_human_review_requests.backflow_human_request_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision: Mapped[str] = mapped_column(String(24), nullable=False)
+    comment: Mapped[str | None] = mapped_column(String, nullable=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decision_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
