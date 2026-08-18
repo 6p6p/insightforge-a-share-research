@@ -16,10 +16,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.draft_section.errors import DraftSectionModelUnavailable
-from app.stage5.nodes import make_build_report_draft_node, make_assemble_report_node
-from app.report_outline.contracts import SECTION_TYPE_THEME, OutlineSection
 from app.report.contracts import ReportAssemblyDraft, ReportResult
-
+from app.report_outline.contracts import SECTION_TYPE_THEME, OutlineSection
+from app.stage5.nodes import make_assemble_report_node, make_build_report_draft_node
 
 _NEXT_UUID = uuid4()
 
@@ -219,10 +218,12 @@ async def test_all_sections_degraded_raises() -> None:
     # assemble_report with all degraded → raises
     assemble_node = make_assemble_report_node(deps)
     with pytest.raises(Exception) as excinfo:
-        await assemble_node({
-            "outline_id": str(uuid4()),
-            "sections": result["sections"],
-        })
+        await assemble_node(
+            {
+                "outline_id": str(uuid4()),
+                "sections": result["sections"],
+            }
+        )
     assert "degraded" in str(excinfo.value).lower()
 
 
@@ -239,10 +240,12 @@ async def test_assemble_skips_degraded_sections() -> None:
     build_result = await build_node({"synthesis_result_id": str(uuid4())})
 
     assemble_node = make_assemble_report_node(deps)
-    assemble_result = await assemble_node({
-        "outline_id": str(deps.report_outline_service._outline_id),
-        "sections": build_result["sections"],
-    })
+    assemble_result = await assemble_node(
+        {
+            "outline_id": str(deps.report_outline_service._outline_id),
+            "sections": build_result["sections"],
+        }
+    )
 
     # assemble should have called report_service with 2 valid sections (not 3)
     assert assemble_result["assembled_section_count"] == 2
