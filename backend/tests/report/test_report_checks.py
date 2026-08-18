@@ -181,6 +181,50 @@ def test_check_conflict_gap_preservation_missing_gap() -> None:
     assert preservation[0].section_id == "S3"
 
 
+def test_check_conflict_gap_preservation_zero_links_still_fails() -> None:
+    """P0.5：S3（risks_and_gaps）0 claim + 0 evidence 且 outline 声明了
+    conflict/gap indexes 时，报告未引用 → 必须仍 FAIL。
+    structural finding 本就不带 claim/evidence 链接（0 links 是预期，
+    不是 audit linkage bug）。"""
+    scenario = make_scenario()
+    payload = copy.deepcopy(scenario.report_payload())
+    for section in payload["sections"]:
+        if section["section_id"] == "S3":
+            for paragraph in section["paragraphs"]:
+                paragraph["conflict_indexes"] = []
+                paragraph["evidence_gap_indexes"] = []
+    findings = run_checks(scenario.check_input(report_payload=payload))
+    preservation = [f for f in findings if f.code == "conflict_gap_preservation"]
+    assert preservation
+    assert preservation[0].section_id == "S3"
+    assert preservation[0].related_claim_ids == ()
+    assert preservation[0].related_evidence_card_ids == ()
+
+
+def test_check_conflict_gap_preservation_empty_outline_ok() -> None:
+    """P0.5：outline 未声明任何 conflict/gap index → 报告 0 引用 → 不 FAIL。"""
+    from dataclasses import replace
+
+    scenario = make_scenario()
+    outline = scenario.outline
+    rebuilt = []
+    for s in outline.sections:
+        if s.section_id == "S3":
+            rebuilt.append(replace(s, conflict_indexes=(), evidence_gap_indexes=()))
+        else:
+            rebuilt.append(s)
+    outline = replace(outline, sections=tuple(rebuilt))
+    payload = copy.deepcopy(scenario.report_payload())
+    for section in payload["sections"]:
+        if section["section_id"] == "S3":
+            for paragraph in section["paragraphs"]:
+                paragraph["conflict_indexes"] = []
+                paragraph["evidence_gap_indexes"] = []
+    findings = run_checks(scenario.check_input(report_payload=payload, verified_outline=outline))
+    preservation = [f for f in findings if f.code == "conflict_gap_preservation"]
+    assert not preservation
+
+
 # ---------------------------------------------------------------- empty section
 
 
