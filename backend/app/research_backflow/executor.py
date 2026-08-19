@@ -123,10 +123,12 @@ class ResearchBackflowExecutor:
         retrieval_service: RetrievalService,
         extractor_model: EvidenceExtractionModel,
         index_builder: IndexBuilder | None = None,
+        recovery_alias_model=None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._retrieval = retrieval_service
         self._extractor_model = extractor_model
+        self._recovery_alias_model = recovery_alias_model
         self._index_builder = index_builder
 
     # ------------------------------------------------------------ 主入口
