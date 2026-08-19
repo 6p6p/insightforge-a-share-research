@@ -4,7 +4,11 @@ from uuid import uuid4
 
 import pytest
 
-from app.core.errors import CompanyIdentityAmbiguous, CompanyIdentityNotFound
+from app.core.errors import (
+    CompanyIdentityAmbiguous,
+    CompanyIdentityMismatch,
+    CompanyIdentityNotFound,
+)
 from app.db.models.company import CompanyModel
 from app.repositories.company_repository import CompanyRepository
 from app.services.company_identity_service import CompanyIdentityService
@@ -367,6 +371,89 @@ async def test_resolve_direct_fallback_ambiguous(monkeypatch) -> None:
 
     with pytest.raises(CompanyIdentityAmbiguous):
         await service.resolve("名称")
+
+
+@pytest.mark.asyncio
+async def test_resolve_combined_name_and_code_same_company(monkeypatch) -> None:
+    """P3.3 组合查询：名称+代码两侧都唯一且指向同一公司（security_code 600519）。"""
+    company = _company()  # security_code=600519
+    service = CompanyIdentityService(_SessionMaker())
+
+    async def fake_alias(self, normalized):
+        assert normalized == "贵州茅台"
+        return [(company, "short_name")]
+
+    async def fake_direct(self, normalized):
+        return []
+
+    async def fake_code(self, code):
+        assert code == "600519"
+        return [company]
+
+    monkeypatch.setattr(CompanyRepository, "find_by_normalized_alias", fake_alias)
+    monkeypatch.setattr(CompanyRepository, "find_by_direct_name", fake_direct)
+    monkeypatch.setattr(CompanyRepository, "find_by_security_code", fake_code)
+
+    result = await service.resolve("贵州茅台600519")
+
+    assert result.company.company_id == company.company_id
+    assert result.company.security_code == "600519"
+    assert result.match_type.value == "short_name"
+    assert result.matched_value == "贵州茅台"
+
+
+@pytest.mark.asyncio
+async def test_resolve_combined_name_code_conflict_raises_mismatch(monkeypatch) -> None:
+    """P3.3 组合查询：名称解析与代码解析指向不同公司 → CompanyIdentityMismatch。"""
+    company = _company()  # security_code=600519
+    other = _company(
+        exchange="SZSE",
+        security_code="000001",
+        identity_key="SZSE:000001",
+        board="szse_main",
+    )
+    service = CompanyIdentityService(_SessionMaker())
+
+    async def fake_alias(self, normalized):
+        assert normalized == "贵州茅台"
+        return [(company, "short_name")]
+
+    async def fake_direct(self, normalized):
+        return []
+
+    async def fake_code(self, code):
+        assert code == "000001"
+        return [other]
+
+    monkeypatch.setattr(CompanyRepository, "find_by_normalized_alias", fake_alias)
+    monkeypatch.setattr(CompanyRepository, "find_by_direct_name", fake_direct)
+    monkeypatch.setattr(CompanyRepository, "find_by_security_code", fake_code)
+
+    with pytest.raises(CompanyIdentityMismatch):
+        await service.resolve("贵州茅台000001")
+
+
+@pytest.mark.asyncio
+async def test_resolve_combined_only_name_code_mismatch_raises(monkeypatch) -> None:
+    """P3.3 组合查询：仅名称解析到，但其 security_code 与所给代码不同 → mismatch。"""
+    company = _company()  # security_code=600519
+    service = CompanyIdentityService(_SessionMaker())
+
+    async def fake_alias(self, normalized):
+        return [(company, "short_name")]
+
+    async def fake_direct(self, normalized):
+        return []
+
+    async def fake_code(self, code):
+        return []  # 代码侧无匹配
+
+    monkeypatch.setattr(CompanyRepository, "find_by_normalized_alias", fake_alias)
+    monkeypatch.setattr(CompanyRepository, "find_by_direct_name", fake_direct)
+    monkeypatch.setattr(CompanyRepository, "find_by_security_code", fake_code)
+
+    with pytest.raises(CompanyIdentityMismatch):
+        await service.resolve("贵州茅台000001")
 
 
 @pytest.mark.asyncio

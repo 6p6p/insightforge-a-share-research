@@ -73,6 +73,15 @@ class CompanyIdentityAmbiguous(DomainError):
     message = "公司查询存在多个匹配"
 
 
+class CompanyIdentityMismatch(DomainError):
+    """P3.3 「名称+代码」组合查询：名称解析与代码解析指向不同公司（或任一侧
+    不唯一），或名称解析结果与所给证券代码不一致 → 无法确认同一身份。"""
+
+    code = "company_identity_mismatch"
+    http_status = 409
+    message = "公司名称与证券代码不匹配"
+
+
 class SourceProviderNotFound(DomainError):
     code = "source_provider_not_found"
     http_status = 404

@@ -3,7 +3,7 @@
 import type { PublicTaskStatus, TaskStage, TaskStatus } from '../types/task';
 import type { WorkflowRunStatus } from '../types/workflow';
 
-/** canonical public 五态（Product Consistency）：所有位置统一展示，不再由各
+/** canonical public 六态（Product Consistency）：所有位置统一展示，不再由各
  * 组件从 task.status / run.status / orchestration.status 分别推导。 */
 export const PUBLIC_STATUS_LABEL: Record<PublicTaskStatus, string> = {
   not_started: '未开始',
@@ -11,6 +11,7 @@ export const PUBLIC_STATUS_LABEL: Record<PublicTaskStatus, string> = {
   waiting_confirmation: '等待确认',
   completed: '已完成',
   failed: '失败',
+  cancelled: '已取消',
 };
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
@@ -88,7 +89,7 @@ export function taskStatusTone(status: TaskStatus): PresetStatus {
   }
 }
 
-/** canonical public 五态语义色。 */
+/** canonical public 六态语义色。 */
 export function publicStatusTone(status: PublicTaskStatus): PresetStatus {
   switch (status) {
     case 'in_progress':
@@ -98,6 +99,8 @@ export function publicStatusTone(status: PublicTaskStatus): PresetStatus {
     case 'failed':
       return 'error';
     case 'waiting_confirmation':
+      return 'warning';
+    case 'cancelled':
       return 'warning';
     case 'not_started':
       return 'default';

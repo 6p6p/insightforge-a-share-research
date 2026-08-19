@@ -104,3 +104,38 @@ def test_whitespace_stripped_from_security_code() -> None:
 def test_too_long_rejected() -> None:
     with pytest.raises(InvalidCompanyQuery):
         parse_company_query("x" * 201)
+
+
+# ------------------------------------------------------------------ P3.3 名称+代码组合
+
+
+def test_combined_name_and_code_splits_both_orders() -> None:
+    """「名称+代码」组合查询：名称放前或放后都拆成 name_text + security_code。"""
+    for query in ("贵州茅台600519", "600519贵州茅台"):
+        parsed = parse_company_query(query)
+        assert parsed.name_text == "贵州茅台"
+        assert parsed.security_code == "600519"
+        assert parsed.identity_key is None
+        assert parsed.explicit_exchange is None
+        assert parsed.explicit_symbol is False
+        assert parsed.original == query
+
+
+def test_combined_name_and_code_with_spaces() -> None:
+    """名称与代码间有空白也能拆分（NFKC 后按 token 切分）。"""
+    parsed = parse_company_query("贵州茅台 600519")
+    assert parsed.name_text == "贵州茅台"
+    assert parsed.security_code == "600519"
+
+
+def test_combined_english_name_and_code() -> None:
+    parsed = parse_company_query("Kweichow Moutai 600519")
+    assert parsed.name_text == "kweichowmoutai"
+    assert parsed.security_code == "600519"
+
+
+def test_pure_forms_have_no_name_text() -> None:
+    assert parse_company_query("贵州茅台").name_text is None
+    assert parse_company_query("600519").name_text is None
+    assert parse_company_query("SSE:600519").name_text is None
+    assert parse_company_query("600519.SH").name_text is None

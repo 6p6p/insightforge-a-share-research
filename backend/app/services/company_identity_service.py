@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.companies.normalization import parse_company_query
 from app.core.errors import (
     CompanyIdentityAmbiguous,
+    CompanyIdentityMismatch,
     CompanyIdentityNotFound,
 )
 from app.db.models.company import CompanyModel
@@ -48,6 +49,8 @@ class CompanyIdentityService:
                 )
                 matched_value = parsed.normalized if parsed.explicit_symbol else parsed.identity_key
                 return self._response(company, match_type, matched_value)
+            if parsed.security_code is not None and parsed.name_text is not None:
+                return await self._resolve_combined(repo, parsed)
             if parsed.security_code is not None:
                 companies = await repo.find_by_security_code(parsed.security_code)
                 return self._resolve_many(
@@ -62,6 +65,53 @@ class CompanyIdentityService:
                 # Catches cases like whitespace artifacts in source data.
                 rows = await repo.find_by_direct_name(parsed.normalized)
             return self._resolve_by_alias(rows, parsed.normalized)
+
+    async def _resolve_combined(
+        self,
+        repo: CompanyRepository,
+        parsed,
+    ) -> CompanyResolutionResponse:
+        """P3.3 「名称+代码」组合解析（name_text + security_code 同时存在）。
+
+        名称侧走 alias + direct-name fallback，代码侧走 security_code；两侧唯一且
+        指向同一公司 → 返回；任一侧不唯一或指向不同公司 → CompanyIdentityMismatch；
+        仅代码侧解析到 → 代码分支；仅名称侧解析到 → 校验其 security_code 与所给
+        代码一致，否则 mismatch。
+        """
+        name_rows = await repo.find_by_normalized_alias(parsed.name_text)
+        if not name_rows:
+            name_rows = await repo.find_by_direct_name(parsed.name_text)
+        name_unique: list[CompanyModel] = []
+        for company, _alias_type in name_rows:
+            if not any(c.company_id == company.company_id for c in name_unique):
+                name_unique.append(company)
+        code_companies = await repo.find_by_security_code(parsed.security_code)
+
+        # 两侧都解析到：必须都唯一且同一公司。
+        if name_unique and code_companies:
+            if (
+                len(name_unique) == 1
+                and len(code_companies) == 1
+                and name_unique[0].company_id == code_companies[0].company_id
+            ):
+                return self._resolve_by_alias(name_rows, parsed.name_text)
+            raise CompanyIdentityMismatch()
+
+        # 仅代码侧解析到 → 代码分支（含其自身的 nothing-found / ambiguous 语义）。
+        if code_companies:
+            return self._resolve_many(
+                code_companies,
+                CompanyMatchType.SECURITY_CODE,
+                parsed.security_code,
+            )
+
+        # 仅名称侧解析到：所给代码必须与公司 security_code 一致，否则 mismatch。
+        if name_unique:
+            if name_unique[0].security_code != parsed.security_code:
+                raise CompanyIdentityMismatch()
+            return self._resolve_by_alias(name_rows, parsed.name_text)
+
+        raise CompanyIdentityNotFound()
 
     async def get_company(self, company_id: UUID) -> CompanyIdentityResponse:
         async with self._sessionmaker() as session:

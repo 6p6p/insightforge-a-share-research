@@ -64,6 +64,12 @@ const HUMAN_DECISION_COLOR: Record<string, string> = {
   reject: 'red',
 };
 
+/** P3.1 人工处理决策 → 中文（产品语义，不暴露内部枚举）。 */
+const HUMAN_DECISION_LABEL: Record<string, string> = {
+  approve: '已接受当前报告',
+  reject: '已退回',
+};
+
 interface Props {
   taskId: string;
   /** 「定位报告」→ 切到报告 tab 并滚动到该 section/paragraph。 */
@@ -140,7 +146,7 @@ function ReviewsContent({
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <Card title="审核概览">
         <Descriptions size="small" column={2}>
-          <Descriptions.Item label="审核状态">
+          <Descriptions.Item label="自动审核">
             {data.audit_status ? (AUDIT_STATUS_LABEL[data.audit_status] ?? data.audit_status) : '—'}
           </Descriptions.Item>
           <Descriptions.Item label="建议路由">
@@ -149,6 +155,18 @@ function ReviewsContent({
               : '—'}
           </Descriptions.Item>
           <Descriptions.Item label="问题数">{data.issue_count}</Descriptions.Item>
+          {data.human_review?.decision ? (
+            <>
+              <Descriptions.Item label="人工处理">
+                {HUMAN_DECISION_LABEL[data.human_review.decision] ?? data.human_review.decision}
+              </Descriptions.Item>
+              <Descriptions.Item label="最终结果">
+                {data.human_review.decision === 'approve'
+                  ? '已完成'
+                  : (HUMAN_DECISION_LABEL[data.human_review.decision] ?? data.human_review.decision)}
+              </Descriptions.Item>
+            </>
+          ) : null}
         </Descriptions>
       </Card>
       <Card title={`审核问题（${data.issue_count}）`}>
@@ -206,7 +224,7 @@ function ReviewsContent({
             <Descriptions.Item label="决策">
               {data.human_review.decision ? (
                 <Tag color={HUMAN_DECISION_COLOR[data.human_review.decision] ?? 'default'}>
-                  {data.human_review.decision}
+                  {HUMAN_DECISION_LABEL[data.human_review.decision] ?? data.human_review.decision}
                 </Tag>
               ) : (
                 '待处理'

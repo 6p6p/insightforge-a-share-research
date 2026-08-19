@@ -21,8 +21,11 @@ export function progressStatus(runStatus: string, latestProgress: number): strin
   if (runStatus === 'completed') {
     return '已完成';
   }
-  if (runStatus === 'failed' || runStatus === 'cancelled') {
+  if (runStatus === 'failed') {
     return '失败';
+  }
+  if (runStatus === 'cancelled') {
+    return '已取消';
   }
   if (runStatus === 'waiting_human') {
     return '等待确认';

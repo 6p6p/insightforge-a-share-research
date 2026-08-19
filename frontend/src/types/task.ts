@@ -47,13 +47,14 @@ export interface TaskCreateRequest {
 }
 
 /** canonical public status（后端 task_status_projection 推导）：未开始/进行中/
- * 等待确认/已完成/失败。所有前端位置统一读取，不再各自推导。 */
+ * 等待确认/已完成/失败/已取消。所有前端位置统一读取，不再各自推导。 */
 export const PUBLIC_TASK_STATUS = [
   'not_started',
   'in_progress',
   'waiting_confirmation',
   'completed',
   'failed',
+  'cancelled',
 ] as const;
 export type PublicTaskStatus = (typeof PUBLIC_TASK_STATUS)[number];
 
