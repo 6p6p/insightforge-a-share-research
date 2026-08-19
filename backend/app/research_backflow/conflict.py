@@ -213,8 +213,7 @@ def adjudicate_deterministic(
             kind=ConflictResolutionKind.UNRESOLVED,
             preferred_evidence_id=None,
             reasoning=(
-                f"指标不一致（{a.metric_code} vs {b.metric_code}），"
-                "无法按同一指标确定性仲裁"
+                f"指标不一致（{a.metric_code} vs {b.metric_code}），无法按同一指标确定性仲裁"
             ),
         )
     # 规则 2：单位换算为 CNY 后数值相同 + 同一期间 + 同一口径 -> 重复提取（假冲突）。
@@ -287,9 +286,7 @@ def adjudicate_deterministic(
 class ConflictAdjudicationModel(Protocol):
     """LLM 仲裁协议：接收 JSON-safe 候选视图 list，返回 dict（只评判，不出数值）。"""
 
-    async def adjudicate(
-        self, candidates: list[dict], hint: str | None = None
-    ) -> dict: ...
+    async def adjudicate(self, candidates: list[dict], hint: str | None = None) -> dict: ...
 
 
 def numeric_candidate_view(candidate: NumericCandidate) -> dict:
@@ -382,6 +379,4 @@ class ConflictAdjudicator:
                     "LLM 仲裁 preferred_evidence_id 必须是两个候选之一"
                 )
         reason = str(response.get("reason") or "").strip()[:300]
-        return ConflictAdjudication(
-            kind=kind, preferred_evidence_id=preferred_id, reasoning=reason
-        )
+        return ConflictAdjudication(kind=kind, preferred_evidence_id=preferred_id, reasoning=reason)

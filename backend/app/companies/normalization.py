@@ -105,7 +105,7 @@ def parse_company_query(value: str) -> ParsedCompanyQuery:
     # 代码 token）：拆分为 name_text（其余部分规范化）+ security_code。
     code_token = _CODE_TOKEN_RE.search(normalized)
     if code_token is not None:
-        name_part = normalized[: code_token.start()] + normalized[code_token.end():]
+        name_part = normalized[: code_token.start()] + normalized[code_token.end() :]
         return ParsedCompanyQuery(
             original=value,
             normalized=normalize_company_text(normalized),
