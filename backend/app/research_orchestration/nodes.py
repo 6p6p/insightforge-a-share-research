@@ -463,7 +463,7 @@ def make_run_or_resume_stage5_node(deps: ResearchOrchestrationDependencies):
                 await deps.stage5_runner.execute_stage5(run_id, stage5_request)
             elif run.status == WorkflowRunStatus.FAILED.value:
                 # request 用于"crash 在 execute_stage5 前"的 run（无 checkpoint）：
-            # resume 方法复用同 run/thread 重新首启。
+                # resume 方法复用同 run/thread 重新首启。
                 await deps.stage5_runner.resume_stage5_for_recovery(run_id, request=stage5_request)
         except _AUDIT_TERMINAL_ERRORS as exc:
             # P0 degradation: audit 创建失败, 不再把整个 Stage5 打成 execution_failed;

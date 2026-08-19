@@ -830,6 +830,7 @@ async def test_stage5_cancelled_marks_orchestration_cancelled(monkeypatch) -> No
     assert harness.terminal_status == "cancelled"
     assert final["current_phase"] == OrchestrationPhase.STAGE5.value
 
+
 @pytest.mark.asyncio
 async def test_stage5_audit_validation_degraded_routes_to_human_closure(monkeypatch) -> None:
     """P0 degradation：Stage5 child 执行中 audit 创建失败（有界纠正重试耗尽 →

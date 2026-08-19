@@ -16,10 +16,10 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
 
+from alembic import command
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
@@ -33,6 +33,7 @@ ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 
 _TABLES = ("backflow_human_review_decisions", "backflow_human_review_requests")
 
+
 def _parse_db_url(url: str) -> dict:
     parsed = urlparse(url.replace("+psycopg", "", 1))
     return {
@@ -43,12 +44,14 @@ def _parse_db_url(url: str) -> dict:
         "dbname": parsed.path.lstrip("/"),
     }
 
+
 def _create_temp_db(db_name: str) -> None:
     params = _parse_db_url(get_settings().database_url)
     params["dbname"] = "postgres"
     with psycopg.connect(**params, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(f'CREATE DATABASE "{db_name}"')
+
 
 def _drop_temp_db(db_name: str) -> None:
     params = _parse_db_url(get_settings().database_url)
@@ -57,17 +60,24 @@ def _drop_temp_db(db_name: str) -> None:
         with conn.cursor() as cur:
             cur.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
 
+
 def _temp_url(base: str, db_name: str) -> str:
     return base.rsplit("/", 1)[0] + f"/{db_name}"
+
 
 async def _version(temp_url: str) -> str:
     manager = DatabaseManager(database_url=temp_url, echo=False, connect_timeout_seconds=5)
     try:
         sessionmaker = manager.session_factory()
         async with sessionmaker() as session:
-            return str((await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one())
+            return str(
+                (
+                    await session.execute(text("SELECT version_num FROM alembic_version"))
+                ).scalar_one()
+            )
     finally:
         await manager.dispose()
+
 
 async def _table_exists(temp_url: str, table: str) -> bool:
     manager = DatabaseManager(database_url=temp_url, echo=False, connect_timeout_seconds=5)
@@ -75,12 +85,14 @@ async def _table_exists(temp_url: str, table: str) -> bool:
         sessionmaker = manager.session_factory()
         async with sessionmaker() as session:
             row = await session.execute(
-                text("SELECT 1 FROM information_schema.tables WHERE table_name = :t")
-                .bindparams(t=table),
+                text("SELECT 1 FROM information_schema.tables WHERE table_name = :t").bindparams(
+                    t=table
+                ),
             )
             return row.scalar_one_or_none() is not None
     finally:
         await manager.dispose()
+
 
 @pytest.mark.asyncio
 async def test_0052_upgrade_creates_closure_tables(monkeypatch) -> None:
@@ -101,6 +113,7 @@ async def test_0052_upgrade_creates_closure_tables(monkeypatch) -> None:
             _drop_temp_db(temp_db)
         finally:
             get_settings.cache_clear()
+
 
 @pytest.mark.asyncio
 async def test_0052_downgrade_drops_tables_when_empty(monkeypatch) -> None:
