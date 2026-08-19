@@ -7,6 +7,8 @@ integrity / not-found 错误由上游（Review / Report / Synthesis）服务抛�
 传播，本模块只定义 Backflow 层的协调 / 验证错误。
 """
 
+from app.core.errors import DomainError
+
 
 class ResearchBackflowError(Exception):
     """Research Backflow 域稳定错误基类。"""
@@ -141,3 +143,32 @@ class ResearchBackflowPersistenceFailed(ResearchBackflowError):
 
     code = "research_backflow_persistence_failed"
     message = "research backflow persistence failed"
+
+
+# ------------------------------------------------------------------ conflict (P1.7/P1.8)
+
+
+class ConflictAdjudicationError(DomainError):
+    """冲突仲裁域错误基类（DomainError -> 统一错误信封）。
+
+    LLM 仲裁输出不可信时的两类具体失败：resolution 不在 8 种仲裁结果内 /
+    preferred_evidence_id 不是 a/b 之一。**不静默降级、不自动修正**。
+    """
+
+    code = "conflict_adjudication_error"
+    http_status = 422
+    message = "conflict adjudication failed"
+
+
+class ConflictInvalidPreferredEvidenceId(ConflictAdjudicationError):
+    """LLM 返回的 preferred_evidence_id 不属于两个候选之一（拒绝）。"""
+
+    code = "conflict_invalid_preferred_evidence_id"
+    message = "preferred evidence id must be one of the two candidates"
+
+
+class ConflictMalformedOutput(ConflictAdjudicationError):
+    """LLM 仲裁输出结构 / 取值不合法（resolution 不在 8 种分类内等）。"""
+
+    code = "conflict_malformed_output"
+    message = "conflict adjudication model output is malformed"
