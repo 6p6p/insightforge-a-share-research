@@ -19,6 +19,7 @@ def test_state_keys_exact() -> None:
         "current_child_run_id",
         "synthesis_result_id",
         "stage5_run_status",
+        "stage5_retry_count",
         "research_request_id",
         "backflow_round",
         "backflow_plan_id",

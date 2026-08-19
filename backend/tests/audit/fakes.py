@@ -38,14 +38,16 @@ class FakeAuditModel:
         self._model_id = model_id
         self._error = error
         self._decision_factory = decision_factory
+        self.call_hints: list[str | None] = []
         self.calls: list[AuditPack] = []
 
     @property
     def model_id(self) -> str:
         return self._model_id
 
-    async def audit(self, pack: AuditPack) -> AuditDecision | dict:
+    async def audit(self, pack: AuditPack, hint: str | None = None) -> AuditDecision | dict:
         self.calls.append(pack)
+        self.call_hints.append(hint)
         if self._error is not None:
             raise self._error()
         if self._decision_factory is not None:

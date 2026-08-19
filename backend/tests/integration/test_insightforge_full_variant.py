@@ -895,7 +895,7 @@ class _E2eAuditModel:
     def model_id(self) -> str:
         return f"{self._provider}:{self._model_id}"
 
-    async def audit(self, pack):
+    async def audit(self, pack, hint: str | None = None):
         self.calls += 1
         await _record(self._observer, "audit", provider=self._provider, model_id=self._model_id)
         return self._decision_factory(pack)

@@ -46,14 +46,14 @@ class DeepSeekAuditModel:
         """稳定 identifier：provider:model（无 immutable revision，不伪造 @rev）。"""
         return self._model_id
 
-    async def audit(self, pack: AuditPack) -> AuditDecision:
+    async def audit(self, pack: AuditPack, hint: str | None = None) -> AuditDecision:
         try:
             from langchain_core.exceptions import OutputParserException  # noqa: F401
             from langchain_deepseek import ChatDeepSeek
         except ImportError as exc:
             raise ReportAuditModelUnavailable("langchain-deepseek 未安装") from exc
 
-        messages = build_audit_messages(pack)
+        messages = build_audit_messages(pack, hint=hint)
         api_key = self._settings.deepseek_api_key
         llm = ChatDeepSeek(
             model=self._settings.llm_model,

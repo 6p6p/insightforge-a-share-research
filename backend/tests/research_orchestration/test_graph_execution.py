@@ -24,9 +24,14 @@ from uuid import UUID, uuid4
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
+from app.audit.errors import (
+    ReportAuditModelUnavailable,
+    ReportAuditValidationError,
+)
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
     RESUME_KIND_PREPARE,
+    RESUME_KIND_STAGE5_RETRY,
     RESUME_KIND_SUPPLEMENTAL_RESEARCH,
     OrchestrationPhase,
     OrchestrationStatus,
@@ -148,10 +153,15 @@ class _FakeStage4Runner:
 
 
 class _FakeStage5Runner:
-    def __init__(self, runs: _Runs, stage5_run_id: UUID, *, outcome: str) -> None:
+    def __init__(
+        self, runs: _Runs, stage5_run_id: UUID, *, outcome: str, raise_on_execute=None
+    ) -> None:
         self._runs = runs
         self._run_id = stage5_run_id
         self.outcome = outcome  # 测试可翻转 → 模拟人工裁决
+        # P0：模拟 audit 终态失败（execute 时抛并给 child run 打 failed，镜像
+        # 生产 stage5 runner `_mark_failed` 后重抛）。
+        self.raise_on_execute = raise_on_execute
         self.execute_calls = 0
         self.resume_calls = 0
         self.captured_request = None
@@ -174,6 +184,9 @@ class _FakeStage5Runner:
     async def execute_stage5(self, run_id, request) -> None:
         self.execute_calls += 1
         self.captured_request = request
+        if self.raise_on_execute is not None:
+            self._runs.set_status(run_id, "failed")
+            raise self.raise_on_execute
         self._runs.set_status(run_id, _STAGE5_OUTCOME_STATUS[self.outcome])
 
     async def resume_stage5_for_recovery(self, run_id) -> None:
@@ -816,3 +829,86 @@ async def test_stage5_cancelled_marks_orchestration_cancelled(monkeypatch) -> No
 
     assert harness.terminal_status == "cancelled"
     assert final["current_phase"] == OrchestrationPhase.STAGE5.value
+
+@pytest.mark.asyncio
+async def test_stage5_audit_validation_degraded_routes_to_human_closure(monkeypatch) -> None:
+    """P0 degradation：Stage5 child 执行中 audit 创建失败（有界纠正重试耗尽 →
+    ReportAuditValidationError；report+check 已生成）→ **不**把 orchestration 打
+    成 failed：路由 research_backflow_manual 人工闭环（reason=report_audit_unavailable，
+    前端三按钮；接受被确定性拒绝，因无 audit 记录）。"""
+    harness = _Harness(stage5_outcome="waiting_human")
+    harness.stage5_runner.raise_on_execute = ReportAuditValidationError("issue E12 未绑定")
+    harness.bind(monkeypatch)
+    final = await harness.runner().run_orchestration(_ORCH_ID)
+
+    assert harness.terminal_status is None
+    assert harness.failed is None
+    assert harness.progress[-1] == (
+        OrchestrationStatus.WAITING_HUMAN.value,
+        OrchestrationPhase.RESEARCH_BACKFLOW.value,
+    )
+    assert final["stage5_run_status"] == "audit_degraded"
+    assert final["backflow_manual_reason"] == "report_audit_unavailable"
+    assert final["current_phase"] == OrchestrationPhase.RESEARCH_BACKFLOW.value
+    assert harness.stage5_runner.execute_calls == 1
+    assert harness.child_service.stage5_attempts == [1]
+
+
+@pytest.mark.asyncio
+async def test_stage5_audit_model_unavailable_degraded_reason(monkeypatch) -> None:
+    """P0：模型不可用（ReportAuditModelUnavailable，重试耗尽）→ 同一降级闭环，
+    reason=report_audit_model_unavailable（前端可区分）。"""
+    harness = _Harness(stage5_outcome="waiting_human")
+    harness.stage5_runner.raise_on_execute = ReportAuditModelUnavailable()
+    harness.bind(monkeypatch)
+    final = await harness.runner().run_orchestration(_ORCH_ID)
+
+    assert harness.terminal_status is None
+    assert final["stage5_run_status"] == "audit_degraded"
+    assert final["backflow_manual_reason"] == "report_audit_model_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stage5_degraded_retry_resumes_new_attempt_then_completes(monkeypatch) -> None:
+    """P0：audit-degraded 后人工"再次补充研究"（RESUME_KIND_STAGE5_RETRY）→ 新
+    Stage5 attempt（retry_count+1）重跑；本次 audit 成功 → 正常 complete。"""
+    harness = _Harness(stage5_outcome="failed")
+    harness.stage5_runner.raise_on_execute = ReportAuditValidationError("bad ref")
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert final["backflow_manual_reason"] == "report_audit_unavailable"
+
+    # 人工再次补充研究 → 重跑 Stage5（attempt 2）；本次成功完成。
+    harness.stage5_runner.raise_on_execute = None
+    harness.stage5_runner.outcome = "completed"
+    harness.runs.set_status(harness.stage5_run_id, "pending")
+    final2 = await runner.resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_STAGE5_RETRY)
+
+    assert harness.terminal_status == "completed"
+    assert harness.child_service.stage5_attempts == [1, 2]
+    assert final2.get("stage5_retry_count") == 1
+    assert harness.stage5_runner.execute_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stage5_degraded_retry_bounded_cap(monkeypatch) -> None:
+    """P0：STAGE5_RETRY 有界（MAX_STAGE5_DEGRADED_RETRY_ROUNDS=3）——第 4 次
+    再次补充研究被 InvalidAction 稳定拒绝，不产生无限循环。"""
+    harness = _Harness(stage5_outcome="failed")
+    harness.stage5_runner.raise_on_execute = ReportAuditValidationError("bad")
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+    await runner.run_orchestration(_ORCH_ID)
+
+    for attempt in (2, 3, 4):
+        harness.runs.set_status(harness.stage5_run_id, "pending")
+        final = await runner.resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_STAGE5_RETRY)
+        assert harness.child_service.stage5_attempts[-1] == attempt
+        assert final.get("stage5_retry_count") == attempt - 1
+        assert harness.terminal_status is None
+        assert final["backflow_manual_reason"] == "report_audit_unavailable"
+
+    harness.runs.set_status(harness.stage5_run_id, "pending")
+    with pytest.raises(ResearchOrchestrationInvalidAction):
+        await runner.resume_after_source_acquisition(_ORCH_ID, RESUME_KIND_STAGE5_RETRY)

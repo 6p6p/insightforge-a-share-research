@@ -111,15 +111,16 @@ class FakeOrchestrationRow:
 
 
 class FakeClosureRequest:
-    def __init__(self, request_id):
+    def __init__(self, request_id, reason="research_backflow_limit_reached"):
         self.backflow_human_request_id = request_id
+        self.reason = reason
 
 
 class FakeClosureService:
-    def __init__(self):
+    def __init__(self, reason="research_backflow_limit_reached"):
         self.resolved = []
         self.request_id = uuid.uuid4()
-        self.request = FakeClosureRequest(self.request_id)
+        self.request = FakeClosureRequest(self.request_id, reason=reason)
 
     async def get_request_for_orchestration(self, orchestration_id):
         return self.request
@@ -297,6 +298,26 @@ async def test_extra_research_schedules_bounded_round(monkeypatch):
     await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_EXTRA_RESEARCH)
     assert closure.resolved[-1][1] == BACKFLOW_DECISION_EXTRA_RESEARCH
     assert scheduled and scheduled[0][1] == RESUME_KIND_SUPPLEMENTAL_RESEARCH
+
+
+@pytest.mark.asyncio
+async def test_extra_research_audit_degraded_schedules_stage5_retry(monkeypatch):
+    """P0：audit-degraded reason（report_audit_unavailable）的"再次补充研究"调度
+    RESUME_KIND_STAGE5_RETRY（重试 Stage5 新 attempt），不是补充研究轮。"""
+    from app.research_orchestration.contracts import RESUME_KIND_STAGE5_RETRY
+
+    service = _build_service(monkeypatch, check_status="pass", issues=[])
+    closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_EXTRA_RESEARCH)
+    closure.request.reason = "report_audit_unavailable"
+    scheduled = []
+    service._execution_manager = type(
+        "FakeExecutionManager",
+        (),
+        {"schedule_resume": lambda self, orch_id, kind: scheduled.append((orch_id, kind))},
+    )()
+    await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_EXTRA_RESEARCH)
+    assert closure.resolved[-1][1] == BACKFLOW_DECISION_EXTRA_RESEARCH
+    assert scheduled and scheduled[0][1] == RESUME_KIND_STAGE5_RETRY
 
 
 @pytest.mark.asyncio

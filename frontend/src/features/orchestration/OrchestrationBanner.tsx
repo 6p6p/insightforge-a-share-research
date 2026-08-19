@@ -93,6 +93,9 @@ const MANUAL_REASON_LABELS: Record<string, string> = {
   research_backflow_no_progress: '未能获取新的补充资料，需要人工确认',
   index_not_ready: '资料尚未处理完成，请稍后重试或重新补充',
   evidence_not_extracted: '资料已入库但未能提取证据，需要人工确认',
+  report_audit_unavailable: '报告已生成但审计未通过校验，需要人工确认',
+  report_audit_model_unavailable: '报告已生成但审计模型暂不可用，需要人工确认',
+  report_audit_malformed_output: '报告已生成但审计输出无效，需要人工确认',
 };
 
 function reasonLabel(reason: string | null | undefined): string {

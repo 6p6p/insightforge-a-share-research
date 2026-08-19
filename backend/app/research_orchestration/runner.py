@@ -30,8 +30,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.research_backflow.errors import ResearchBackflowNoProgress
 from app.research_orchestration.contracts import (
+    MAX_STAGE5_DEGRADED_RETRY_ROUNDS,
     RESEARCH_BACKFLOW_NO_PROGRESS,
     RESUME_KIND_PREPARE,
+    RESUME_KIND_STAGE5_RETRY,
     RESUME_KIND_SUPPLEMENTAL_RESEARCH,
     OrchestrationPhase,
     OrchestrationStatus,
@@ -187,6 +189,23 @@ class ResearchOrchestrationRunner:
                 config,
                 {"current_phase": OrchestrationPhase.RESEARCH_BACKFLOW.value},
                 as_node="plan_supplemental_research",
+            )
+        elif kind == RESUME_KIND_STAGE5_RETRY:
+            # P0 audit-degraded "再次补充研究"：attempt = stage5_retry_count + 1（新
+            prev_retries = int(prior.values.get("stage5_retry_count") or 0)
+            if prev_retries >= MAX_STAGE5_DEGRADED_RETRY_ROUNDS:
+                raise ResearchOrchestrationInvalidAction(
+                    "stage5 degraded retry limit reached (“人工再次补充研究”超上限)"
+                )
+            await graph.aupdate_state(
+                config,
+                {
+                    "current_phase": OrchestrationPhase.STAGE5.value,
+                    "stage5_retry_count": prev_retries + 1,
+                },
+                # 从 collect_synthesis 重入（纯只读 replay，幂等）→ 条件边自然流到
+                # ensure_stage5_child（新 attempt 新 child run）+ 审计重试；有界。
+                as_node="collect_synthesis",
             )
         else:
             raise ResearchOrchestrationInvalidAction(f"unsupported resume kind: {kind}")

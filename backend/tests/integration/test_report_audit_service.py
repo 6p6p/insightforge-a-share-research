@@ -53,6 +53,7 @@ from app.audit.errors import (
     ReportAuditParagraphOmitted,
     ReportAuditPersistenceFailed,
     ReportAuditUnknownRef,
+    ReportAuditValidationError,
 )
 from app.audit.prompt import build_audit_messages
 from app.audit.service import ReportAuditService
@@ -644,6 +645,102 @@ async def test_audit_unbound_evidence_reject(env, monkeypatch, connection_uri) -
         await service.create_or_get_audit(
             ReportAuditRequest(report_id=report_id, check_result_id=check_result_id)
         )
+    assert await _audit_count(env["sessionmaker"]) == 0
+
+
+# ------------------------------------- corrective validation retry（P0，不降低校验）
+
+
+async def test_audit_validation_corrective_retry_with_hint_succeeds(
+    env, monkeypatch, connection_uri
+) -> None:
+    """P0：模型首次违反 evidence 绑定校验（unbound E）→ 带矫正提示重试一次即
+    通过（校验仍严格；不吞错误；reject 只驱动有界重试）。"""
+    check_service, check_result_id, report_id = await _build_minimal_chain(
+        env, monkeypatch, connection_uri
+    )
+
+    counter = {"n": 0}
+
+    def _flaky(pack):
+        counter["n"] += 1
+        paragraph = pack.paragraphs[0]
+        if counter["n"] == 1:
+            claim_ids = {str(cid) for cid in paragraph.claim_ids}
+            other = next(
+                item
+                for item in pack.evidence
+                if not (set(str(cid) for cid, _ in item.claim_relations) & claim_ids)
+            )
+            return AuditDecision(
+                reviewed_paragraph_refs=_all_refs(pack),
+                issues=[
+                    AuditIssueCandidate(
+                        issue_type="wording_overclaim",
+                        severity="normal",
+                        section_ref=paragraph.section_ref,
+                        paragraph_ref=paragraph.paragraph_ref,
+                        claim_refs=list(paragraph.claim_refs),
+                        evidence_refs=[other.evidence_ref],
+                        message="首次故意输出未绑定 evidence，触发矫正重试",
+                    )
+                ],
+            )
+        return pass_decision(pack)
+
+    fake = FakeAuditModel(decision_factory=_flaky)
+    service = _audit_service(env, fake, check_service)
+    result = await service.create_or_get_audit(
+        ReportAuditRequest(report_id=report_id, check_result_id=check_result_id)
+    )
+    assert result.audit_id is not None
+    assert counter["n"] == 2  # 第 2 次调用通过
+    assert fake.call_hints[0] is None  # 首次正常调用不带 hint
+    assert fake.call_hints[1] is not None
+    assert "上一次审核决策被 hard validation 拒绝" in fake.call_hints[1]
+
+
+async def test_audit_validation_retry_exhausted_raises_validation_failed(
+    env, monkeypatch, connection_uri
+) -> None:
+    """模型恒输出越界引用 → 5 次带矫正提示重试仍违规 → 终态
+    ReportAuditValidationError（ReportAuditUnknownRef 子类，0 写；校验未放松，
+    不静默忽略）。"""
+    check_service, check_result_id, report_id = await _build_minimal_chain(
+        env, monkeypatch, connection_uri
+    )
+
+    def _factory(pack):
+        paragraph = pack.paragraphs[0]
+        claim_ids = {str(cid) for cid in paragraph.claim_ids}
+        other = next(
+            item
+            for item in pack.evidence
+            if not (set(str(cid) for cid, _ in item.claim_relations) & claim_ids)
+        )
+        return AuditDecision(
+            reviewed_paragraph_refs=_all_refs(pack),
+            issues=[
+                AuditIssueCandidate(
+                    issue_type="wording_overclaim",
+                    severity="normal",
+                    section_ref=paragraph.section_ref,
+                    paragraph_ref=paragraph.paragraph_ref,
+                    claim_refs=list(paragraph.claim_refs),
+                    evidence_refs=[other.evidence_ref],
+                    message="未绑定 claim 的 evidence 引用（恒违规）",
+                )
+            ],
+        )
+
+    fake = FakeAuditModel(decision_factory=_factory)
+    service = _audit_service(env, fake, check_service)
+    with pytest.raises(ReportAuditValidationError):
+        await service.create_or_get_audit(
+            ReportAuditRequest(report_id=report_id, check_result_id=check_result_id)
+        )
+    assert len(fake.calls) == 5  # 有界重试上限
+    assert all(hint is not None for hint in fake.call_hints[1:])
     assert await _audit_count(env["sessionmaker"]) == 0
 
 

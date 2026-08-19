@@ -24,12 +24,14 @@ class AuditModel(Protocol):
 
     model_id: str
 
-    async def audit(self, pack: AuditPack) -> AuditDecision:
+    async def audit(self, pack: AuditPack, hint: str | None = None) -> AuditDecision:
         """基于已验证 audit pack 生成结构化审核决策。
 
-        - 返回必须可通过 pydantic 解析为 `AuditDecision`；解析失败 / 模型异常 →
-          上层（adapters / service）捕获并归一化为 `ReportAuditModelUnavailable`
-          或 `ReportAuditMalformedOutput`；
+        - `hint`：可选的**矫正提示**（上次 hard validation 拒绝原因，由 service
+          在重试时传入）；None → 正常调用。hint 是程序到模型的纠正指令，不是
+          pack 数据；
+        - 返回必须可通过 pydantic 解析为 `AuditDecision`；解析失败 / 模型异
+          常 → 上层抛 `ReportAuditModelUnavailable` 或 `ReportAuditMalformedOutput`；
         - **不持久化**；persisted auditor_model_id 由 service 读取 `self.model_id`。
         """
         raise NotImplementedError

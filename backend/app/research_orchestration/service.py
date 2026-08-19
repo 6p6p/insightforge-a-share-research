@@ -65,7 +65,9 @@ from app.research_orchestration.contracts import (
     RESEARCH_BACKFLOW_LIMIT_REACHED,
     RESUME_BACKFLOW_MANUAL_REASONS,
     RESUME_KIND_PREPARE,
+    RESUME_KIND_STAGE5_RETRY,
     RESUME_KIND_SUPPLEMENTAL_RESEARCH,
+    STAGE5_AUDIT_DEGRADED_REASONS,
     ChildStage,
     OrchestrationPhase,
     OrchestrationStatus,
@@ -895,7 +897,10 @@ class ResearchOrchestrationService:
                 await session.commit()
             return await self.get_orchestration(orchestration_id)
 
-        # extra_research: manual supplemental round (bounded; reuse K2 resume).
+        # extra_research: manual continuation（bounded）：
+        # - 常规 backflow → K2 补充研究轮（reuse RESUME_KIND_SUPPLEMENTAL_RESEARCH）；
+        # - P0 audit-degraded（report_audit_* reasons）→ 重试 Stage5（新 attempt，
+        #   RESUME_KIND_STAGE5_RETRY；draft/assemble fingerprint replay + 审计重试）。
         await self._closure_service.resolve_review(
             request.backflow_human_request_id,
             decision=BACKFLOW_DECISION_EXTRA_RESEARCH,
@@ -903,7 +908,12 @@ class ResearchOrchestrationService:
         )
         if self._orchestration_runner is None or self._execution_manager is None:
             raise RuntimeError("orchestration resume runner not bound")
-        self._execution_manager.schedule_resume(orchestration_id, RESUME_KIND_SUPPLEMENTAL_RESEARCH)
+        kind = (
+            RESUME_KIND_STAGE5_RETRY
+            if request.reason in STAGE5_AUDIT_DEGRADED_REASONS
+            else RESUME_KIND_SUPPLEMENTAL_RESEARCH
+        )
+        self._execution_manager.schedule_resume(orchestration_id, kind)
         return await self.get_orchestration(orchestration_id)
 
     async def _acceptance_barriers(self, orchestration_id: UUID) -> list[str]:

@@ -115,11 +115,12 @@ def _render_gap(item) -> str:
     return "\n".join(lines)
 
 
-def build_audit_messages(pack: AuditPack) -> list[dict[str, str]]:
-    """构建 [system, user] 两条消息：Audit Pack 只进入 user（data delimiter 内）。
+def build_audit_messages(pack: AuditPack, hint: str | None = None) -> list[dict[str, str]]:
+    """构建 [system, user(, user-hint)] 消息：Audit Pack 只进入 user（data delimiter 内）。
 
     system 内容 == AUDIT_SYSTEM_PROMPT（固定、无插值）；user payload = S/P/C/E/X/G
-    packs，全部在 AUDIT_INPUT delimiter 内。
+    packs，全部在 AUDIT_INPUT delimiter 内。`hint`（矫正提示）追加为**独立的最后一条
+    user 消息**——它是程序到模型的纠正指令，不是 untrusted DATA，不得混入 delimiter。
     """
     claim_ref_by_id = {str(item.claim_id): item.claim_ref for item in pack.claims}
 
@@ -158,10 +159,15 @@ def build_audit_messages(pack: AuditPack) -> list[dict[str, str]]:
             lines.append(_render_gap(item))
     lines.append(AUDIT_PACK_END)
 
-    return [
+    messages: list[dict[str, str]] = [
         {"role": "system", "content": AUDIT_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(lines)},
     ]
+    if hint:
+        # 矫正提示是程序到模型的指令（不在 DATA delimiter 内）；只重申引用规则
+        # 与上次拒绝原因，便于模型在下一轮修正引用范围。
+        messages.append({"role": "user", "content": hint})
+    return messages
 
 
 def extract_audit_pack_data(user_content: str) -> str:

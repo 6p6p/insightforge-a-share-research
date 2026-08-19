@@ -24,9 +24,17 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.audit.errors import (
+    ReportAuditMalformedOutput,
+    ReportAuditModelUnavailable,
+    ReportAuditValidationError,
+)
 from app.domain.tasks import WorkflowRunStatus
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
+    BACKFLOW_REASON_AUDIT_MALFORMED_OUTPUT,
+    BACKFLOW_REASON_AUDIT_MODEL_UNAVAILABLE,
+    BACKFLOW_REASON_AUDIT_VALIDATION_FAILED,
     MAX_BACKFLOW_RESEARCH_ROUNDS,
     RESEARCH_BACKFLOW_LIMIT_REACHED,
     RESEARCH_BACKFLOW_NO_PROGRESS,
@@ -280,6 +288,10 @@ STAGE5_ROUTE_WAITING_HUMAN = "waiting_human"
 STAGE5_ROUTE_RESEARCH_REQUIRED = "research_required"
 STAGE5_ROUTE_FAILED = "failed"
 STAGE5_ROUTE_CANCELLED = "cancelled"
+# P0 degradation: audit 创建失败（有界纠正重试耗尽 / 模型不可用 / 输出畸形；
+# report+check 已生成）→ 路由到 research_backflow_manual 人工闭环（接受被
+# 确定性拒绝——无 audit 记录；可再次补充研究 = 重试 Stage5，或取消）。
+STAGE5_ROUTE_AUDIT_DEGRADED = "audit_degraded"
 _STAGE5_ROUTE_VALUES = frozenset(
     {
         STAGE5_ROUTE_COMPLETED,
@@ -287,8 +299,25 @@ _STAGE5_ROUTE_VALUES = frozenset(
         STAGE5_ROUTE_RESEARCH_REQUIRED,
         STAGE5_ROUTE_FAILED,
         STAGE5_ROUTE_CANCELLED,
+        STAGE5_ROUTE_AUDIT_DEGRADED,
     }
 )
+
+
+_AUDIT_TERMINAL_ERRORS = (
+    ReportAuditModelUnavailable,
+    ReportAuditMalformedOutput,
+    ReportAuditValidationError,
+)
+
+
+def _audit_degraded_reason(exc: Exception) -> str:
+    """audit 终态失败 → 稳定的 backflow_manual reason（前端 label + 幂等闭环）。"""
+    if isinstance(exc, ReportAuditValidationError):
+        return BACKFLOW_REASON_AUDIT_VALIDATION_FAILED
+    if isinstance(exc, ReportAuditMalformedOutput):
+        return BACKFLOW_REASON_AUDIT_MALFORMED_OUTPUT
+    return BACKFLOW_REASON_AUDIT_MODEL_UNAVAILABLE
 
 
 async def _stage5_request(deps: ResearchOrchestrationDependencies, state) -> Stage5WorkflowRequest:
@@ -328,7 +357,10 @@ async def _stage5_request_for_attempt(
             await service.build_stage5_continuation_request(UUID(state["fulfillment_id"])),
             state["backflow_round"] + 1,
         )
-    return (await _stage5_request(deps, state), 1)
+    # P0 degradation retry：audit 创建失败经人工"再次补充研究"重试 Stage5——新
+    # attempt = stage5_retry_count + 1（有界，MAX_STAGE5_DEGRADED_RETRY_ROUNDS）。
+    retry_count = state.get("stage5_retry_count") or 0
+    return (await _stage5_request(deps, state), 1 + retry_count)
 
 
 async def _stage5_outcome(
@@ -426,12 +458,21 @@ def make_run_or_resume_stage5_node(deps: ResearchOrchestrationDependencies):
             run = await WorkflowRunRepository(session).get_by_id(run_id)
         if run is None:
             raise ResearchOrchestrationIntegrityError("orchestration child run missing")
-        if run.status == WorkflowRunStatus.PENDING.value:
-            await deps.stage5_runner.execute_stage5(run_id, stage5_request)
-        elif run.status == WorkflowRunStatus.FAILED.value:
-            # request 用于"crash 在 execute_stage5 前"的 run（无 checkpoint）：
+        try:
+            if run.status == WorkflowRunStatus.PENDING.value:
+                await deps.stage5_runner.execute_stage5(run_id, stage5_request)
+            elif run.status == WorkflowRunStatus.FAILED.value:
+                # request 用于"crash 在 execute_stage5 前"的 run（无 checkpoint）：
             # resume 方法复用同 run/thread 重新首启。
-            await deps.stage5_runner.resume_stage5_for_recovery(run_id, request=stage5_request)
+                await deps.stage5_runner.resume_stage5_for_recovery(run_id, request=stage5_request)
+        except _AUDIT_TERMINAL_ERRORS as exc:
+            # P0 degradation: audit 创建失败, 不再把整个 Stage5 打成 execution_failed;
+            # 路由到 research_backflow_manual 人工闭环（接受被确定性拒绝）。
+            return {
+                "stage5_run_status": STAGE5_ROUTE_AUDIT_DEGRADED,
+                "backflow_manual_reason": _audit_degraded_reason(exc),
+                "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+            }
         # completed / waiting_human / cancelled / running：不重复执行。
 
         status, extra = await _stage5_outcome(deps, run_id)
@@ -471,6 +512,10 @@ def route_stage5_result(state) -> str:
         if (state.get("backflow_round") or 0) >= MAX_BACKFLOW_RESEARCH_ROUNDS:
             return "research_backflow_manual"
         return STAGE5_ROUTE_RESEARCH_REQUIRED
+    if status == STAGE5_ROUTE_AUDIT_DEGRADED:
+        # P0 degradation：audit 创建失败 → 复用 research_backflow_manual 人工闭环
+        # 节点（reason=backflow_manual_reason，由 run_or_resume_stage5 注入）。
+        return "research_backflow_manual"
     if status in _STAGE5_ROUTE_VALUES:
         return status
     raise ValueError(f"invalid stage5_run_status: {status}")

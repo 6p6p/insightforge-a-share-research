@@ -34,6 +34,9 @@ class ResearchOrchestrationState(TypedDict, total=False):
     # run_or_resume_stage5 投影的 Stage5 child 终态（route_stage5_result 只读
     # state，不碰 DB——续接 aupdate_state 注入 fresh 值后条件边重新判定）。
     stage5_run_status: str
+    # P0 audit-degraded retry：Stage5 audit 创建失败人工"再次补充研究"的次数
+    # （每次 +1 → 新 Stage5 child attempt；RESUME_KIND_STAGE5_RETRY，有界）。
+    stage5_retry_count: int
     # research_required terminal 时：Stage5 checkpoint 的 research_request_id
     # （backflow loop 的 input 唯一入口；Stage5 每轮 research_required 创建新
     # request，loop 用最新的，spec 7A.2B.3）。

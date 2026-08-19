@@ -131,7 +131,7 @@ class _GatedAudit(FakeAuditModel):
         super().__init__(decision_factory=human_review_decision)
         self._gate = gate
 
-    async def audit(self, pack: AuditPack) -> AuditDecision:
+    async def audit(self, pack: AuditPack, hint: str | None = None) -> AuditDecision:
         self.calls.append(pack)
         await self._gate.wait()  # 进程"卡死"在节点内，直到测试取消。
         if self._decision_factory is not None:

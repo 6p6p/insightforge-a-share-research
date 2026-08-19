@@ -70,6 +70,7 @@ from app.audit.errors import (
     ReportAuditModelUnavailable,
     ReportAuditNotFound,
     ReportAuditPersistenceFailed,
+    ReportAuditValidationError,
 )
 from app.audit.model import AuditModel
 from app.audit.packs import (
@@ -92,6 +93,30 @@ from app.db.models.report_audit import ReportAuditModel, ReviewIssueModel
 from app.report.check_service import ReportCheckService
 from app.report.contracts import VerifiedReport, VerifiedReportCheckResult
 from app.report.errors import ReportCheckNotFound
+
+# 有界纠正重试上限：模型输出违反 hard validation 时带 hint 重问（每次仍严格
+# 校验）；全部仍违规 → ReportAuditValidationFailed 终态（0 写）。
+_AUDIT_MAX_ATTEMPTS = 5
+
+
+def _audit_corrective_hint(rejection_reasons: list[str] | None) -> str | None:
+    """上次 validate_decision 拒绝原因 → 矫正提示（无拒绝 → None，不追加消息）。
+
+    prompt 契约：hint 是**程序→模型的纠正指令**，与 untrusted DATA 分隔；hint
+    只重申引用范围规则 + 列出上次拒绝原因。**不包含** evidence 正文 / prompt /
+    原始模型输出。
+    """
+    if not rejection_reasons:
+        return None
+    reasons = "；".join(rejection_reasons)
+    return (
+        "上一次审核决策被 hard validation 拒绝（未写入任何记录），拒绝原因如下："
+        f"{reasons}。请基于 AUDIT_INPUT 中真实存在的编号纠正引用范围："
+        "reviewed_paragraph_refs 必须恰好列出全部 P ref；issue 的 section_ref / "
+        "paragraph_ref / claim_refs / evidence_refs 只能引用真实存在且作用域正确的 "
+        "S/P/C/E 编号（evidence 必须绑定到该 issue 的任一 claim_refs 对应 Claims）；"
+        "然后**重新输出完整** AuditDecision（严格遵循系统提示词 schema，不要解释）。"
+    )
 
 
 @dataclass(frozen=True)
@@ -169,16 +194,21 @@ class ReportAuditService:
             )
             return self._result(existing, replayed=True)
 
-        # 6. 关闭 session → 调模型（structured output）。
-        # 有界重试：生产实测 DeepSeek 瞬时 5xx/超时——重试 2 次仍失败才
-        # 抛 ModelUnavailable（orchestration 可 retry；不写任何行）。
-        decision = None
-        for attempt in range(5):
+        # 6-7. 有界模型调用 + **完整 hard validation 一体化重试**（P0）：
+        # - ModelUnavailable / MalformedOutput：瞬时故障重试（最多 5 次）；
+        # - validate_decision 校验违规：把完整 hard validation 放进重试循环，
+        #   每次拒绝都携带矫正提示（hint）重问模型——**不降低校验、不静默忽略**：
+        #   单次输出仍走同一套 strict validation；连续 5 次仍违规 →
+        #   最后一次具体校验违规（不写任何行），由编排层识别降级。
+        resolved = None
+        rejection_reasons: list[str] = []
+        for attempt in range(_AUDIT_MAX_ATTEMPTS):
             try:
-                decision = await self._call_model(pack)
-                break
+                decision = await self._call_model(
+                    pack, hint=_audit_corrective_hint(rejection_reasons)
+                )
             except (ReportAuditModelUnavailable, ReportAuditMalformedOutput) as exc:
-                if attempt < 4:
+                if attempt < _AUDIT_MAX_ATTEMPTS - 1:
                     self._logger.warning(
                         "report_audit_model_retry",
                         attempt=attempt,
@@ -186,19 +216,23 @@ class ReportAuditService:
                     )
                     continue
                 raise
-            except ReportAuditError as exc:  # noqa: BLE001 - 校验违规（绑定/数字规则）
-                # 有界重试：生产实测模型偶发违反硬性校验，重试显著提高通过率。
-                if attempt < 4:
+            try:
+                resolved = validate_decision(pack, decision)
+                break
+            except ReportAuditValidationError as exc:  # noqa: BLE001 - 校验违规（绑定/覆盖）
+                rejection_reasons.append(str(exc)[:200])
+                if attempt < _AUDIT_MAX_ATTEMPTS - 1:
                     self._logger.warning(
                         "report_audit_validation_retry",
                         attempt=attempt,
                         reason=str(exc)[:200],
                     )
                     continue
+                # 校正重试耗尽：抛最后一次具体校验违规（严格校验未放松，0 写）——
+                # 不是吞错误，而是把可恢复的模型违规在有界重试后原样暴露给编排层
+                # 降级（ReportAuditUnknownRef / ParagraphOmitted 等具体类型不变）。
                 raise
-
-        # 7. hard validation → 解析为真实 ID → 按 spec R 排序确定 ordinal。
-        resolved = validate_decision(pack, decision)
+        assert resolved is not None and decision is not None
         ordinal_issues = self._sort_for_ordinal(resolved, pack)
 
         # 8. deterministic status / route（spec O，模型不决定 routing）。
@@ -543,11 +577,14 @@ class ReportAuditService:
             )
         return conflicts, gaps
 
-    async def _call_model(self, pack: AuditPack) -> AuditDecision:
-        """调用模型并归一到 AuditDecision（防御性 double-check）。"""
+    async def _call_model(self, pack: AuditPack, hint: str | None = None) -> AuditDecision:
+        """调用模型并归一到 AuditDecision（防御性 double-check）。
+
+        hint：矫正提示（上次 hard validation 拒绝原因）；None → 正常调用。
+        """
         if self._model is None:
             raise ReportAuditModelUnavailable()
-        raw = await self._model.audit(pack)
+        raw = await self._model.audit(pack, hint=hint)
         if isinstance(raw, AuditDecision):
             return raw
         try:

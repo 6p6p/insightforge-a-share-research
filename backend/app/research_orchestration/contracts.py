@@ -51,6 +51,21 @@ RESUME_BACKFLOW_MANUAL_REASONS = frozenset({"source_acquisition_required"})
 RESUME_KIND_PREPARE = "prepare"
 RESUME_KIND_SUPPLEMENTAL_RESEARCH = "supplemental_research"
 
+# Stage5 audit 降级人工闭环（P0，audit 创建失败不绕过闭环）：reason 写进
+# research_backflow_manual checkpoint + closure request；extra_research 对这些
+# reason 重试 Stage5（RESUME_KIND_STAGE5_RETRY，新 attempt，有界）。
+RESUME_KIND_STAGE5_RETRY = "stage5_retry"
+BACKFLOW_REASON_AUDIT_VALIDATION_FAILED = "report_audit_unavailable"
+BACKFLOW_REASON_AUDIT_MODEL_UNAVAILABLE = "report_audit_model_unavailable"
+BACKFLOW_REASON_AUDIT_MALFORMED_OUTPUT = "report_audit_malformed_output"
+STAGE5_AUDIT_DEGRADED_REASONS = frozenset({
+    BACKFLOW_REASON_AUDIT_VALIDATION_FAILED,
+    BACKFLOW_REASON_AUDIT_MODEL_UNAVAILABLE,
+    BACKFLOW_REASON_AUDIT_MALFORMED_OUTPUT,
+})
+# 人工"再次补充研究"重试 Stage5 的最大轮数（有界，防无限循环；每轮新 attempt）。
+MAX_STAGE5_DEGRADED_RETRY_ROUNDS = 3
+
 
 class OrchestrationStatus(StrEnum):
     """一次 top-level orchestration 的状态（独立表，不改 workflow_runs 语义）。"""
