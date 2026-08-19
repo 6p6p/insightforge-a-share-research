@@ -16,6 +16,12 @@ const mocks = vi.hoisted(() => ({
   importUrlSource: vi.fn(),
   uploadSourceFile: vi.fn(),
   resolveProvider: vi.fn(),
+  getTaskWorkspace: vi.fn(),
+  createUserSuppliedFinancialObservation: vi.fn(),
+}));
+
+vi.mock('../../api/financial', () => ({
+  createUserSuppliedFinancialObservation: mocks.createUserSuppliedFinancialObservation,
 }));
 
 vi.mock('../../api/orchestrations', () => ({
@@ -42,6 +48,7 @@ vi.mock('../../api/sources', () => ({
 }));
 
 vi.mock('../../api/tasks', () => ({
+  getTaskWorkspace: mocks.getTaskWorkspace,
   taskKeys: {
     all: ['tasks'],
     workspace: (id: string) => ['tasks', 'workspace', id],
@@ -392,5 +399,38 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     await userEvent.click(screen.getByRole('button', { name: '上传并保存' }));
 
     expect(await screen.findByText('文件过大：单个 PDF 不能超过 100MB')).toBeInTheDocument();
+  });
+  it('backflow 闭环：可选面板默认折叠；再次补充研究留空仍发 extra_research（纯自动默认路径）', async () => {
+    mocks.getBackflowReview.mockResolvedValue({
+      orchestration_id: 'orch-1',
+      backflow_human_request_id: 'req-1',
+      reason: 'research_backflow_limit_reached',
+      decision: null,
+      comment: null,
+      decided_at: null,
+      acceptance_barriers: [],
+    });
+    mocks.getTaskWorkspace.mockResolvedValue({
+      resolved_company: { company_id: 'c1' },
+    });
+    mocks.actOnBackflowReview.mockResolvedValue({ orchestration_id: 'orch-1' });
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'research_backflow',
+          manual_reason: 'research_backflow_limit_reached',
+        })}
+        companyId="c1"
+      />,
+    );
+    expect(await screen.findByText('自动补充研究已达到上限')).toBeInTheDocument();
+    // 可选面板默认折叠标题存在
+    expect(screen.getByText('补充资料（可选 / 附加证据供交叉验证）')).toBeInTheDocument();
+    expect(screen.getByText('补充财务数据（可选）')).toBeInTheDocument();
+    // 留空直接「再次补充研究」→ 仍触发 extra_research（纯自动）。
+    await userEvent.click(screen.getByRole('button', { name: '再次补充研究' }));
+    await waitFor(() =>
+      expect(mocks.actOnBackflowReview).toHaveBeenCalledWith('orch-1', 'extra_research'),
+    );
   });
 });

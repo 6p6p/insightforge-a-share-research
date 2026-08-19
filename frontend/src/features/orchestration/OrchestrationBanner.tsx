@@ -10,7 +10,7 @@
 默认 UI 回答三件事：发生了什么、为什么、用户下一步可以做什么。
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Alert,
@@ -59,6 +59,7 @@ import {
   type SourceDocumentType,
 } from '../../types/source';
 import { needCodeLabel } from '../../utils/needCode';
+import { FinancialObservationForm } from '../financial/FinancialObservationForm';
 
 const { Text } = Typography;
 
@@ -258,7 +259,7 @@ export function OrchestrationBanner({
         ) : null}
 
         {backflowClosure ? (
-          <BackflowClosureCard orchestration={orchestration} />
+          <BackflowClosureCard orchestration={orchestration} companyId={companyId} />
         ) : null}
 
         {status === 'waiting_human' &&
@@ -758,13 +759,95 @@ function OrchestrationHumanActionCard({
 
 // ------------------------------------------------------------------ P0 backflow 人工闭环
 
+/** 可选面板中用户附带的证据（文件 / 原始链接 + 自动推导的上传所需字段）。 */
+interface PendingEvidence {
+  file: File | null;
+  url: string;
+  /** 自动默认第一个启用来源机构（尽力而为上传需要 provider_key）。 */
+  providerKey: string;
+  title: string;
+}
+
+const EMPTY_EVIDENCE: PendingEvidence = {
+  file: null,
+  url: '',
+  providerKey: '',
+  title: '',
+};
+
+/** 补充资料（可选）面板：复用既有 uploadSourceFile / importUrlSource 能力。只捕获，
+ *  不留存动作；随后的「再次补充研究」动作会先用它尽力上传/导入（best-effort）。 */
+function BackflowSupplementPanel({
+  companyId,
+  evidence,
+  onEvidenceChange,
+}: {
+  companyId: string | null;
+  evidence: PendingEvidence;
+  onEvidenceChange: (e: PendingEvidence) => void;
+}): React.JSX.Element {
+  const providersQuery = useQuery({
+    queryKey: sourceKeys.providers(),
+    queryFn: () => listSourceProviders({ enabledOnly: true }),
+    staleTime: 60_000,
+  });
+  const providerOptions =
+    providersQuery.data?.items.map((provider) => ({
+      value: provider.provider_key,
+      label: `${provider.display_name}（${provider.provider_key}）`,
+    })) ?? [];
+
+  // 自动默认来源机构，减少用户选择负担（上传/导入需要 provider_key）。
+  useEffect(() => {
+    if (!evidence.providerKey && providerOptions.length > 0) {
+      onEvidenceChange({ ...evidence, providerKey: providerOptions[0].value });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerOptions, evidence.providerKey]);
+
+  if (!companyId) {
+    return (
+      <Alert type="warning" showIcon message="公司尚未解析，暂无法补充资料" />
+    );
+  }
+
+  return (
+    <Space direction="vertical" style={{ width: '100%' }} size="small">
+      <Text type="secondary">
+        可附加证据文件与官方链接，供交叉验证；留空则继续全自动补充研究。
+      </Text>
+      <Upload
+        accept=".pdf,application/pdf"
+        maxCount={1}
+        beforeUpload={(f) => {
+          onEvidenceChange({ ...evidence, file: f as File });
+          return false;
+        }}
+        onRemove={() => onEvidenceChange({ ...evidence, file: null })}
+        fileList={evidence.file ? [{ uid: evidence.file.name, name: evidence.file.name }] : []}
+      >
+        <Button icon={<UploadOutlined />}>选择附加文件（可选）</Button>
+      </Upload>
+      <Input
+        placeholder="原始链接（可选，官方披露链接）"
+        value={evidence.url}
+        maxLength={2000}
+        onChange={(e) => onEvidenceChange({ ...evidence, url: e.target.value })}
+      />
+    </Space>
+  );
+}
+
 /** research_backflow 已达上限/无进展：人工闭环（接受 / 再次补充研究 / 取消）。 */
 function BackflowClosureCard({
   orchestration,
+  companyId,
 }: {
   orchestration: ResearchOrchestrationResponse;
+  companyId: string | null;
 }): React.JSX.Element {
   const queryClient = useQueryClient();
+  const [evidence, setEvidence] = useState<PendingEvidence>(EMPTY_EVIDENCE);
   const reviewQuery = useQuery({
     queryKey: ['backflow-review', orchestration.orchestration_id],
     queryFn: () => getBackflowReview(orchestration.orchestration_id),
@@ -799,6 +882,46 @@ function BackflowClosureCard({
   const submitting = mutation.isPending;
   const done = review?.decision != null;
 
+  /** 尽力而为：把用户在可选面板中附带的资料先上传/导入，失败也不阻断动作。 */
+  const flushEvidenceBestEffort = async (): Promise<void> => {
+    const { file, url, providerKey, title } = evidence;
+    const trimmedUrl = url.trim();
+    if (!file && !trimmedUrl) {
+      return;
+    }
+    if (!companyId || !providerKey) {
+      return;
+    }
+    try {
+      if (file) {
+        await uploadSourceFile({
+          company_id: companyId,
+          provider_key: providerKey,
+          document_type: 'annual_report',
+          title: title.trim() || file.name,
+          source_url: trimmedUrl || null,
+          file,
+        });
+      } else {
+        await importUrlSource({
+          company_id: companyId,
+          provider_key: providerKey,
+          document_type: 'annual_report',
+          title: title.trim() || '补充资料',
+          source_url: trimmedUrl,
+        });
+      }
+    } catch {
+      // best-effort：附加资料失败不阻断「再次补充研究」。
+    }
+  };
+
+  /** 再次补充研究：先尽力附带可选资料，再触发与今天一致的 extra_research 动作。 */
+  const handleExtraResearch = async (): Promise<void> => {
+    await flushEvidenceBestEffort();
+    mutation.mutate('extra_research');
+  };
+
   return (
     <Card title="需要人工确认" type="inner" size="small">
       <Space direction="vertical" style={{ width: '100%' }}>
@@ -816,6 +939,33 @@ function BackflowClosureCard({
             description={barriers.join('；')}
           />
         ) : null}
+        <Collapse
+          size="small"
+          defaultActiveKey={[]}
+          items={[
+            {
+              key: 'supplement',
+              label: '补充资料（可选 / 附加证据供交叉验证）',
+              children: (
+                <BackflowSupplementPanel
+                  companyId={companyId}
+                  evidence={evidence}
+                  onEvidenceChange={setEvidence}
+                />
+              ),
+            },
+            {
+              key: 'financial',
+              label: '补充财务数据（可选）',
+              children: (
+                <FinancialObservationForm
+                  taskId={orchestration.task_id}
+                  companyId={companyId}
+                />
+              ),
+            },
+          ]}
+        />
         <Space wrap>
           <Button
             type="primary"
@@ -829,7 +979,7 @@ function BackflowClosureCard({
           <Button
             loading={submitting}
             disabled={submitting || done}
-            onClick={() => mutation.mutate('extra_research')}
+            onClick={() => void handleExtraResearch()}
             data-action="extra_research"
           >
             再次补充研究
