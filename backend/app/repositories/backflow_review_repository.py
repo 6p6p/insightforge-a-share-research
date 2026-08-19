@@ -76,7 +76,7 @@ class BackflowReviewRepository:
         return result.scalar_one_or_none()
 
     async def create_or_get_decision(self, expected: BackflowHumanReviewDecisionModel):
-        excluded = {"decided_at", "backflow_human_decision_id"}
+        excluded = {"backflow_human_decision_id"}
         values = {
             column.key: getattr(expected, column.key)
             for column in BackflowHumanReviewDecisionModel.__table__.columns
