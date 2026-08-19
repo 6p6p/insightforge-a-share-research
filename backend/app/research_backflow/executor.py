@@ -40,6 +40,7 @@ from app.evidence.contracts import EvidenceOrigin
 from app.evidence.errors import EvidenceError
 from app.evidence.extractor.contracts import EvidenceExtractionModel
 from app.evidence.extractor.service import EvidenceExtractionService
+from app.financial.contracts import supported_metric_codes
 from app.rag.retrieval.contracts import RetrievalQuery
 from app.rag.retrieval.errors import RetrievalIndexNotReady
 from app.rag.retrieval.service import RetrievalService
@@ -53,7 +54,24 @@ from app.research_backflow.contracts import (
     ResearchBackflowNeedExecution,
     VerifiedResearchBackflowRequest,
 )
+from app.research_backflow.financial_recovery import (
+    METRIC_CODE_ALIASES,
+    FinancialRecoveryService,
+)
 from app.services.evidence_card_service import EvidenceCardService
+
+
+def detect_metric_codes(text: str | None) -> list[str]:
+    """确定性：从缺口/研究问题文本中识别 v1 metric_code（alias 命中）。"""
+    if not text:
+        return []
+    low = text
+    found: list[str] = []
+    for code in supported_metric_codes():
+        if any(alias.lower() in low.lower() for alias in METRIC_CODE_ALIASES.get(code, ())):
+            found.append(code.value)
+    return found
+
 
 # 单次检索 top_k（固定，不随业务参数变化；镜像 document executor）。
 _TOP_K = 5
@@ -200,6 +218,12 @@ class ResearchBackflowExecutor:
                     # manual_required / evidence_not_extracted 语义不变）。
                     continue
 
+        # P1 recovery 接线：普通检索+抽取未产出证据时，走财务证据恢复（真实 quote ->
+        # observation 回流同套 Evidence 库）；只在无 index 故障时触发。
+        if not (recorder.created or recorder.existing) and not not_indexable:
+            await self._run_financial_recovery(
+                verified_request, spec, research_question, recorder, allowed
+            )
         created = list(recorder.created)
         replayed = list(recorder.existing)
         if created or replayed:
@@ -223,6 +247,56 @@ class ResearchBackflowExecutor:
             created,
             replayed,
         )
+
+    async def _run_financial_recovery(
+        self,
+        verified_request,
+        spec: dict,
+        research_question: str,
+        recorder: _RecordingCardService,
+        allowed: list[str],
+    ) -> None:
+        """P1.3 接线：对研究问题中识别的财务指标尝试已存在来源数字恢复。
+
+        只消费真实来源 quote；income/cash-flow 指标若无可用期间（metrics_period）
+        则不硬造 —— create_observation 期校验会拒之，安全跳过，保持缺口诚实。"""
+        metric_codes = detect_metric_codes(research_question)
+        if not metric_codes:
+            return
+        period = spec.get("metrics_period") or {}
+        p_start = None
+        p_end = None
+        if isinstance(period.get("end"), str) and period["end"]:
+            try:
+                p_end = date.fromisoformat(period["end"][:10])
+            except ValueError:
+                p_end = None
+        if isinstance(period.get("start"), str) and period["start"]:
+            try:
+                p_start = date.fromisoformat(period["start"][:10])
+            except ValueError:
+                p_start = None
+        svc = FinancialRecoveryService(
+            self._sessionmaker,
+            self._retrieval,
+            model=self._recovery_alias_model,
+            card_service=recorder,
+        )
+        from app.financial.contracts import MetricCode
+
+        for code_value in metric_codes:
+            try:
+                await svc.recover_metric(
+                    company_id=verified_request.company_id,
+                    research_question=research_question,
+                    metric_code=MetricCode(code_value),
+                    period_start=p_start,
+                    period_end=p_end,
+                    analysis_as_of=verified_request.analysis_as_of,
+                    allowed_source_types=allowed,
+                )
+            except Exception:  # noqa: BLE001 - 单指标恢复失败不崩溃 backflow
+                continue
 
     async def _ensure_all_indexed(self, source_ids: list[UUID]) -> bool:
         if self._index_builder is None:
