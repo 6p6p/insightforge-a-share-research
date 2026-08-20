@@ -1213,3 +1213,74 @@ async def test_waiting_manual_task_shows_company_evidence(env, connection_uri) -
                 text("DELETE FROM research_plans WHERE company_id = :c"), {"c": company_id}
             )
             await session.commit()
+
+
+# ---------------------------------------------------------------- P0/P2 pending projection
+
+
+async def test_get_reviews_pending_human_review_when_no_audit(env, connection_uri) -> None:
+    """P0 回归：waiting_human + research_backflow（audit-degraded，报告已出但无
+    report_audit 行）→ get_reviews 必须透出 pending_human_review（Reviews 页显示
+    「需要人工确认」而非误报「无审核记录」）。0 LLM、只读投影真实后台状态。
+    """
+    from datetime import UTC, datetime
+
+    from app.db.models.research_orchestration import ResearchOrchestrationModel
+    from app.research_backflow.closure import ResearchBackflowClosureService
+    from app.research_orchestration.contracts import (
+        ORCHESTRATION_SCHEMA_VERSION,
+        ORCHESTRATOR_NAME,
+        ORCHESTRATOR_VERSION,
+        OrchestrationPhase,
+        OrchestrationStatus,
+    )
+
+    sessionmaker = env["sessionmaker"]
+    task_id = env["task_id"]
+
+    async with sessionmaker() as session:
+        orchestration = ResearchOrchestrationModel(
+            orchestration_id=uuid4(),
+            task_id=task_id,
+            research_plan_id=None,
+            attempt_no=1,
+            retry_of_orchestration_id=None,
+            orchestration_schema_version=ORCHESTRATION_SCHEMA_VERSION,
+            orchestrator_name=ORCHESTRATOR_NAME,
+            orchestrator_version=ORCHESTRATOR_VERSION,
+            status=OrchestrationStatus.WAITING_HUMAN.value,
+            current_phase=OrchestrationPhase.RESEARCH_BACKFLOW.value,
+            input_fingerprint="1" * 64,
+            error_code=None,
+            error_message=None,
+            created_at=datetime.now(UTC),
+        )
+        session.add(orchestration)
+        await session.commit()
+        closure = ResearchBackflowClosureService(sessionmaker)
+        await closure.create_or_get_review(
+            orchestration.orchestration_id,
+            reason="report_audit_unavailable",
+            request_payload={
+                "backflow_round": 0,
+                "missing_need_codes": [],
+                "non_blocking_gap_count": 0,
+            },
+        )
+
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        artifact = _make_artifact_service(sessionmaker, manager)
+        reviews = await artifact.get_reviews(task_id)
+        assert isinstance(reviews, ReviewsArtifactResponse)
+        assert reviews.audit_id is None, "本场景确实无 report_audit 行"
+        assert reviews.pending_human_review is not None
+        assert reviews.pending_human_review.reason == "report_audit_unavailable"
+        assert reviews.pending_human_review.decision is None
+    finally:
+        await manager.close()
+        async with sessionmaker() as session:
+            await session.execute(text("DELETE FROM backflow_human_review_requests"))
+            await session.execute(text("DELETE FROM research_orchestration_runs"))
+            await session.commit()
