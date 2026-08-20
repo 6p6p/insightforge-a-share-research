@@ -111,8 +111,16 @@ _URL_R = "https://www.xinhuanet.com/2026/0809/s4rsk.htm"
 
 async def _cleanup(sessionmaker) -> None:
     async with sessionmaker() as session:
+        # orchestration 层先于 workflow_runs 删除（FK RESTRICT 链：child_runs
+        # 引用 workflow_runs；backflow_human_review_* 引用 orchestration 行）。
+        await session.execute(text("DELETE FROM backflow_human_review_decisions"))
+        await session.execute(text("DELETE FROM backflow_human_review_requests"))
+        await session.execute(text("DELETE FROM research_orchestration_child_runs"))
+        await session.execute(text("DELETE FROM research_orchestration_runs"))
         await session.execute(text("DELETE FROM workflow_events"))
         await session.execute(text("DELETE FROM workflow_runs"))
+        await session.execute(text("DELETE FROM research_plan_routes"))
+        await session.execute(text("DELETE FROM research_plans"))
         await session.execute(text("DELETE FROM research_tasks"))
         await session.execute(text("DELETE FROM draft_sections"))
         await session.execute(text("DELETE FROM report_outlines"))

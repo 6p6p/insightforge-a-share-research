@@ -114,6 +114,11 @@ async def _cleanup_with_revisions(sessionmaker) -> None:
     async with sessionmaker() as session:
         # report_exports 以 RESTRICT 引用 reports / report_audits /
         # human_review_decisions —— 必须先删，否则后续 DELETE 会被 FK 拒绝。
+        # P0 closure 行先于 orchestration/workflow 删除（FK RESTRICT）。
+        await session.execute(text("DELETE FROM backflow_human_review_decisions"))
+        await session.execute(text("DELETE FROM backflow_human_review_requests"))
+        await session.execute(text("DELETE FROM research_orchestration_child_runs"))
+        await session.execute(text("DELETE FROM research_orchestration_runs"))
         await session.execute(text("DELETE FROM report_exports"))
         await session.execute(text("DELETE FROM research_backflow_plans"))
         await session.execute(text("DELETE FROM research_backflow_fulfillments"))
