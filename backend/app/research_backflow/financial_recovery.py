@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
@@ -240,6 +240,11 @@ def _number_to_decimal(token: str) -> str | None:
         return None
 
 
+def _eod_utc(d: date) -> datetime:
+    """analysis_as_of 当日 UTC 上界。"""
+    return datetime.combine(d, time.max, UTC)
+
+
 class FinancialRecoveryService:
     """P1.3：对单个财务指标执行已存在来源恢复（真实 quote -> 证据卡 -> observation）。"""
 
@@ -277,11 +282,15 @@ class FinancialRecoveryService:
             period_end.isoformat() if period_end else None,
         )
         query_text = " ".join(aliases[:6])
+        # P0 isolation：published_to=analysis_as_of 当日 UTC 上界（Chroma
+        # published_at_epoch 过滤），与下方 post-filter 双保险，杜绝未来
+        # 资料参与证据恢复。
         query = RetrievalQuery(
             company_id=company_id,
             query_text=query_text,
             top_k=8,
             document_types=allowed_source_types or list(_ALLOWED_DOCUMENT_TYPES),
+            published_to=_eod_utc(analysis_as_of) if analysis_as_of is not None else None,
         )
         hits = await self._retrieval_unchecked(query)
         if not hits:

@@ -36,6 +36,26 @@ class ClaimRepository:
         )
         return list(result.scalars().all())
 
+    async def mark_invalidated(
+        self,
+        claim_ids: list[UUID],
+        reason: str,
+    ) -> int:
+        """P0.5：把污染 claim 标记 invalid（不删除；synthesis 输入加载排除）。"""
+        if not claim_ids:
+            return 0
+        from datetime import UTC, datetime
+
+        from sqlalchemy import update
+
+        result = await self._session.execute(
+            update(ClaimModel)
+            .where(ClaimModel.claim_id.in_(claim_ids))
+            .where(ClaimModel.invalidated_at.is_(None))
+            .values(invalidated_at=datetime.now(UTC), invalidation_reason=reason)
+        )
+        return result.rowcount or 0
+
     async def list_by_company(
         self,
         company_id: UUID,

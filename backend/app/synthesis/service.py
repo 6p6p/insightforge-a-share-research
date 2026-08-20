@@ -43,6 +43,7 @@ from app.db.models.claim_synthesis_input_link import ClaimSynthesisInputLinkMode
 from app.db.models.claim_synthesis_run import ClaimSynthesisRunModel
 from app.db.models.evidence_card import EvidenceCardModel
 from app.financial.calculations.service import FinancialCalculationService
+from app.repositories.claim_repository import ClaimRepository
 from app.repositories.claim_synthesis_input_link_repository import (
     ClaimSynthesisInputLinkRepository,
 )
@@ -244,8 +245,15 @@ class SynthesisService:
         """
         gateway = self._gateway
         question_sha256 = compute_research_question_sha256(research_question)
+        claim_repo = ClaimRepository(session)
         verified: list[VerifiedSynthesisClaim] = []
         for claim_id in claim_ids:
+            claim_model = await claim_repo.get_by_id(claim_id)
+            if claim_model is None:
+                raise SynthesisClaimIntegrityError("input claim missing")
+            if claim_model.invalidated_at is not None:
+                # P0.5：已被 FutureEvidence 恢复排除的污染 claim，不进综合上下文。
+                continue
             claim = await gateway.verify_claim(session, claim_id)
             if claim.research_question_sha256 != question_sha256:
                 raise SynthesisResearchQuestionMismatch()
@@ -311,6 +319,69 @@ class SynthesisService:
                     raise SynthesisTemporalEvidenceInsufficient()
                 if availability.date() > cutoff:
                     raise SynthesisFutureEvidence()
+
+    async def find_future_evidence_claim_ids(
+        self,
+        session: AsyncSession,
+        claim_ids: list[UUID],
+        analysis_as_of: date,
+    ) -> list[UUID]:
+        """P0.5：找出 evidence availability / domain as_of > cutoff 的污染 claim。
+
+        与 `_check_temporal` 同一 policy，但**不 raise**：返回污染 claim_id 列表
+        （供 FutureEvidence 有界恢复 invalidate；已 invalidated 的不计入）。
+        """
+        gateway = self._gateway
+        claim_repo = ClaimRepository(session)
+        verified: list[VerifiedSynthesisClaim] = []
+        for claim_id in claim_ids:
+            model = await claim_repo.get_by_id(claim_id)
+            if model is None or model.invalidated_at is not None:
+                continue
+            claim = await gateway.verify_claim(session, claim_id)
+            verified.append(claim)
+        if not verified:
+            return []
+        card_ids = {card_id for claim in verified for card_id in claim.evidence_card_ids}
+        cards = await self._load_evidence_cards(session, card_ids)
+        source_ids = {card.source_id for card in cards.values() if card.source_id is not None}
+        snapshot_ids = {
+            card.macro_snapshot_id
+            for card in cards.values()
+            if card.origin_type == _ORIGIN_MACRO_OBSERVATION and card.macro_snapshot_id is not None
+        }
+        sources = await self._load_rows(session, SourceRecordRepository, source_ids)
+        snapshots = await self._load_rows(session, MacroSnapshotRepository, snapshot_ids)
+        offending: list[UUID] = []
+        for claim in verified:
+            if (
+                claim.domain_analysis_as_of is not None
+                and claim.domain_analysis_as_of > analysis_as_of
+            ):
+                offending.append(claim.claim_id)
+                continue
+            for card_id in claim.evidence_card_ids:
+                card = cards[card_id]
+                if card.origin_type == _ORIGIN_MACRO_OBSERVATION:
+                    snapshot = snapshots.get(card.macro_snapshot_id)
+                    availability = resolve_availability(
+                        origin_type=card.origin_type,
+                        snapshot_fetched_at=snapshot.fetched_at if snapshot else None,
+                        source_published_at=None,
+                        source_acquired_at=None,
+                    )
+                else:
+                    source = sources.get(card.source_id)
+                    availability = resolve_availability(
+                        origin_type=card.origin_type,
+                        snapshot_fetched_at=None,
+                        source_published_at=source.published_at if source else None,
+                        source_acquired_at=source.acquired_at if source else None,
+                    )
+                if availability is None or availability.date() > analysis_as_of:
+                    offending.append(claim.claim_id)
+                    break
+        return offending
 
     async def _load_evidence_cards(
         self, session: AsyncSession, card_ids: set[UUID]

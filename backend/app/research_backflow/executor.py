@@ -27,7 +27,7 @@ executor 不抛确定性错误（manual_required 承载失败语义）；`Eviden
 （stale / malformed 等）与 document executor 同语义向调用方传播。
 """
 
-from datetime import date
+from datetime import UTC, date, datetime, time
 from typing import Protocol
 from uuid import UUID
 
@@ -74,6 +74,11 @@ def detect_metric_codes(text: str | None) -> list[str]:
 
 
 # 单次检索 top_k（固定，不随业务参数变化；镜像 document executor）。
+def _eod_utc(d: date) -> datetime:
+    """analysis_as_of 当日 23:59:59.999999 UTC（published_to 上界，含当日）。"""
+    return datetime.combine(d, time.max, UTC)
+
+
 _TOP_K = 5
 
 
@@ -190,11 +195,16 @@ class ResearchBackflowExecutor:
         source_ids = [s.source_id for s in sources]
         research_question = verified_request.verified_source_synthesis.research_question
         for query_text in spec.get("retrieval_queries", []):
+            # P0 isolation：只检索 eligibility 内的 source（source_ids 已按
+            # availability <= analysis_as_of 过滤），并加 published_to 兜底
+            # （Chroma published_at_epoch 上界），杜绝未来资料进入补充研究上下文。
             query = RetrievalQuery(
                 company_id=verified_request.company_id,
                 query_text=query_text,
                 top_k=_TOP_K,
                 document_types=allowed,
+                source_ids=source_ids,
+                published_to=_eod_utc(verified_request.analysis_as_of),
             )
             try:
                 hits = await self._retrieval.retrieve(query)

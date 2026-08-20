@@ -62,5 +62,10 @@ Desktop.ini
 
 # --- benchmark 运行时产物（dataset / run 输出，可重建） ---
 /benchmark/
-
-
+backend/*.txt
+backend/_smoke*.py
+backend/_dbg.py
+backend/_l.py
+backend/_r.py
+backend/_tb.py
+docker/overlay.Dockerfile

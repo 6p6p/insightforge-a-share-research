@@ -31,6 +31,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -94,6 +95,8 @@ class DraftSectionModel(Base):
     writer_input_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     section_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     section_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="completed")
+    degraded_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

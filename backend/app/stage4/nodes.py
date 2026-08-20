@@ -159,6 +159,7 @@ def make_run_analysis_item_node(deps: Stage4AnalysisDependencies):
                         research_question=question,
                         calculation_ids=[UUID(c) for c in state["calculation_ids"]],
                         additional_evidence_ids=[UUID(c) for c in state["additional_evidence_ids"]],
+                        analysis_as_of=date.fromisoformat(state["analysis_as_of"]),
                     )
                 )
                 return [str(cid) for cid in result.claim_ids]
