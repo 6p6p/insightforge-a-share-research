@@ -70,6 +70,20 @@ const HUMAN_DECISION_LABEL: Record<string, string> = {
   reject: '已退回',
 };
 
+/** P0 修复：无 audit 行时的人工等待原因 → 产品中文（不暴露内部枚举）。 */
+const PENDING_MANUAL_REASON_LABEL: Record<string, string> = {
+  report_audit_unavailable: '自动审核失败（报告审计未完成），需要重新验证',
+  report_audit_model_unavailable: '自动审核模型暂不可用，需要重新验证',
+  report_audit_malformed_output: '自动审核输出无效，需要重新验证',
+  research_backflow_limit_reached: '自动补充研究已达到上限，需要人工确认',
+  research_backflow_no_progress: '未能获取新的补充资料，需要人工确认',
+  source_acquisition_required: '资料不足，需要补充资料',
+};
+function manualPendingLabel(reason: string | null): string {
+  if (!reason) return '需要人工处理';
+  return PENDING_MANUAL_REASON_LABEL[reason] ?? '需要人工处理（含技术细节请查看任务日志）';
+}
+
 interface Props {
   taskId: string;
   /** 「定位报告」→ 切到报告 tab 并滚动到该 section/paragraph。 */
@@ -90,6 +104,28 @@ export function ReviewsTab({ taskId, onLocateReport }: Props): React.JSX.Element
     return <Alert type="info" showIcon message="正在加载审核视图…" />;
   }
   if (!data.audit_id) {
+    // P0 修复：无 report_audit 行但后台确实在等待真实人工复核（audit-degraded /
+    // backflow manual closure / awaiting_stage5）→ 显示「需要人工处理 + 原因」，
+    // 绝不误报「无审核记录」；只有真的既无 audit 又无人工等待时才报无记录。
+    if (data.pending_human_review) {
+      return (
+        <Alert
+          type="warning"
+          showIcon
+          message="该报告需要人工确认"
+          description={
+            <Space direction="vertical" size={4}>
+              <Text>{manualPendingLabel(data.pending_human_review.reason)}</Text>
+              {data.pending_human_review.decision ? (
+                <Text type="secondary">已收到人工处理结果：{data.pending_human_review.decision}</Text>
+              ) : (
+                <Text type="secondary">请在上方「需要人工确认」面板完成接受 / 补充研究 / 取消操作。</Text>
+              )}
+            </Space>
+          }
+        />
+      );
+    }
     return <Alert type="info" showIcon message="该任务尚无审核记录（报告审核尚未完成）。" />;
   }
   return <ReviewsContent data={data} onLocateReport={onLocateReport} />;

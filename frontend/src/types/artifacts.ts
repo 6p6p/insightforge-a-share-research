@@ -215,6 +215,13 @@ export interface ResearchBackflowArtifact {
   new_synthesis_result_id: string | null;
 }
 
+export interface PendingHumanReviewArtifact {
+  /** 无 audit 行时的真实人工复核等待（P0）：reason + 可选裁决。 */
+  reason: string | null;
+  decision: string | null;
+  comment: string | null;
+  decided_at: string | null;
+}
 export interface ReviewsArtifactResponse {
   audit_id: string | null;
   report_id: string | null;
@@ -228,4 +235,5 @@ export interface ReviewsArtifactResponse {
   review_action: ReviewActionArtifact | null;
   human_review: HumanReviewArtifact | null;
   research_backflow: ResearchBackflowArtifact | null;
+  pending_human_review: PendingHumanReviewArtifact | null;
 }
