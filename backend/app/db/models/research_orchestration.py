@@ -135,6 +135,11 @@ class ResearchOrchestrationModel(Base):
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
+    # P0.5：FutureEvidence 有界恢复尝试计数（bounded retry 防无限）。
+    future_evidence_recovery_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
 
 class ResearchOrchestrationChildModel(Base):
     __tablename__ = "research_orchestration_child_runs"

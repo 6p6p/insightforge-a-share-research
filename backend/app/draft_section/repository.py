@@ -46,11 +46,18 @@ class DraftSectionRepository:
         唯一约束冲突，随后回查既有行即得真实行（相同指纹 ⟹ 相同内容）。
         """
         excluded = {"created_at"}
-        values = {
-            column.key: getattr(draft, column.key)
-            for column in DraftSectionModel.__table__.columns
-            if column.key not in excluded
-        }
+        values = {}
+        for column in DraftSectionModel.__table__.columns:
+            key = column.key
+            if key in excluded:
+                continue
+            value = getattr(draft, key)
+            # P1：server_default 列（status）未显式赋值时交给 DB 默认（保持
+            # status='completed'），避免显式传 None 违反 NOT NULL；显式 degraded
+            # 状态仍会写入。
+            if value is None and column.server_default is not None:
+                continue
+            values[key] = value
         stmt = (
             insert(DraftSectionModel)
             .values(**values)

@@ -44,6 +44,9 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
 )
+from app.research_orchestration.future_evidence_recovery import (
+    FutureEvidenceRecoveryService,
+)
 from app.research_orchestration.graph import (
     build_top_level_research_orchestration_graph,
 )
@@ -77,6 +80,17 @@ class ResearchOrchestrationRunner:
         self._sessionmaker = sessionmaker
         self._checkpoint_manager = checkpoint_manager
         self._dependencies = dependencies
+
+    def _recovery_service(self) -> FutureEvidenceRecoveryService:
+        """惰性构造 `FutureEvidenceRecoveryService`（runner 测试可能传 dependencies=None，
+        此时不触发 stage 依赖解引用）。"""
+        deps = self._dependencies
+        return FutureEvidenceRecoveryService(
+            self._sessionmaker,
+            deps.stage4_runner,
+            deps.synthesis_service,
+            orchestration_checkpoint_reader=self.read_orchestration_checkpoint,
+        )
 
     # ------------------------------------------------------------------ run
 
@@ -254,7 +268,13 @@ class ResearchOrchestrationRunner:
             )
             return await graph.aget_state(config)
         except Exception as exc:
-            await self._mark_orchestration_failed(UUID(config["configurable"]["thread_id"]), exc)
+            orchestration_id = UUID(config["configurable"]["thread_id"])
+            if self._dependencies is not None and await self._recovery_service().try_recover(
+                orchestration_id, exc
+            ):
+                # P0.5：污染 claim 已 invalidate → resume 顶层 graph（bounded）。
+                return await self._stream(graph, config, initial_state=None)
+            await self._mark_orchestration_failed(orchestration_id, exc)
             raise
 
     async def _mark_research_backflow_manual(self, orchestration_id: UUID) -> None:

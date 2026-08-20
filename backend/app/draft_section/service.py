@@ -54,6 +54,12 @@ from app.db.models.company import CompanyModel
 from app.db.models.draft_section import DraftSectionModel
 from app.db.models.evidence_card import EvidenceCardModel
 from app.draft_section.contracts import (
+    COMPLETED_SECTION_STATUS,
+    DEGRADED_NOTE_TEMPLATE,
+    DEGRADED_SECTION_STATUS,
+    DEGRADED_SECTION_WRITER_MODEL_ID,
+    DEGRADED_SECTION_WRITER_NAME,
+    DEGRADED_SECTION_WRITER_VERSION,
     DRAFT_SECTION_SCHEMA_VERSION,
     WRITER_NAME,
     WRITER_VERSION,
@@ -282,6 +288,140 @@ class DraftSectionService:
         # 11. 结果摘要（不含正文段落 / prompt / raw response）。
         return self._result(row, replayed=not was_created)
 
+    async def create_or_get_degraded_section(
+        self,
+        request: DraftSectionRequest,
+        reason: str,
+    ) -> DraftSectionResult:
+        """P1：模型不可用时确定性生成 degraded DraftSection（0 LLM）。
+
+        保留完整 DraftSection contract（status=degraded + degraded_reason），
+        正文是诚实说明（无 claim/数字/引文）；assembler 因此始终拿到 S1..S6。
+        """
+        self._check_request(request)
+        try:
+            verified = await self._outline_service.verify_outline_integrity(request.outline_id)
+        except ReportOutlineNotFound:
+            raise DraftSectionNotFound() from None
+        section = self._find_section(verified, request.section_id)
+        loaded = await self._load_section(verified, section, allow_empty_claims=True)
+        payload = self._degraded_payload(reason)
+        writer_input_fingerprint = compute_writer_input_fingerprint(
+            section_schema_version=DRAFT_SECTION_SCHEMA_VERSION,
+            outline_fingerprint=verified.outline_fingerprint,
+            section_id=section.section_id,
+            section_order=section.section_order,
+            section_type=section.section_type,
+            title=section.title,
+            claim_fingerprints=[claim.claim_fingerprint for claim in loaded.claims],
+            evidence_fingerprints=[item.evidence_fingerprint for item in loaded.evidence],
+            evidence_claim_relations=_evidence_claim_relations(loaded.evidence),
+            conflicts=_conflict_fingerprint_data(loaded.conflicts),
+            gaps=_gap_fingerprint_data(loaded.gaps),
+            writer_name=DEGRADED_SECTION_WRITER_NAME,
+            writer_version=DEGRADED_SECTION_WRITER_VERSION,
+            writer_model_id=DEGRADED_SECTION_WRITER_MODEL_ID,
+        )
+        section_fingerprint = compute_section_fingerprint(
+            writer_input_fingerprint=writer_input_fingerprint,
+            section_payload=payload,
+        )
+        expected = self._degraded_draft_model(
+            verified=verified,
+            section=section,
+            writer_input_fingerprint=writer_input_fingerprint,
+            payload=payload,
+            section_fingerprint=section_fingerprint,
+            reason=reason,
+        )
+        async with self._sessionmaker() as session:
+            try:
+                row, was_created = await DraftSectionRepository(session).create_or_get(expected)
+                await session.commit()
+            except SQLAlchemyError as exc:
+                await session.rollback()
+                raise DraftSectionPersistenceFailed() from exc
+        return self._result(row, replayed=not was_created)
+
+    async def _verify_degraded_section(self, row: DraftSectionModel) -> VerifiedDraftSection:
+        """degraded 行完整性校验（不重跑 LLM 内容 contract；只验诚实形状）。"""
+        if row.status != DEGRADED_SECTION_STATUS or not row.degraded_reason:
+            raise DraftSectionIntegrityError("degraded draft section status/reason invalid")
+        try:
+            verified = await self._outline_service.verify_outline_integrity(row.outline_id)
+        except ReportOutlineNotFound:
+            raise DraftSectionIntegrityError("draft section outline missing") from None
+        section = self._find_section(verified, row.section_id)
+        loaded = await self._load_section(verified, section)
+        identity_checks = [
+            (row.section_id, section.section_id, "section_id"),
+            (row.section_order, section.section_order, "section_order"),
+            (row.section_type, section.section_type, "section_type"),
+            (row.title, section.title, "title"),
+            (row.section_schema_version, DRAFT_SECTION_SCHEMA_VERSION, "section_schema_version"),
+            (row.writer_name, DEGRADED_SECTION_WRITER_NAME, "writer_name"),
+            (row.writer_version, DEGRADED_SECTION_WRITER_VERSION, "writer_version"),
+            (row.writer_model_id, DEGRADED_SECTION_WRITER_MODEL_ID, "writer_model_id"),
+        ]
+        for actual, want, field in identity_checks:
+            if actual != want:
+                raise DraftSectionIntegrityError(f"draft section {field} mismatch")
+        payload = row.section_payload
+        expected_note = DEGRADED_NOTE_TEMPLATE.format(reason=row.degraded_reason)
+        paragraphs = payload.get("paragraphs")
+        if not isinstance(paragraphs, list) or len(paragraphs) != 1:
+            raise DraftSectionIntegrityError("degraded draft section payload malformed")
+        para = paragraphs[0]
+        if (
+            para.get("text") != expected_note
+            or para.get("claim_refs")
+            or para.get("evidence_refs")
+            or para.get("conflict_refs")
+            or para.get("gap_refs")
+        ):
+            raise DraftSectionIntegrityError("degraded draft section payload invalid")
+        recomputed_input = compute_writer_input_fingerprint(
+            section_schema_version=DRAFT_SECTION_SCHEMA_VERSION,
+            outline_fingerprint=verified.outline_fingerprint,
+            section_id=section.section_id,
+            section_order=section.section_order,
+            section_type=section.section_type,
+            title=section.title,
+            claim_fingerprints=[claim.claim_fingerprint for claim in loaded.claims],
+            evidence_fingerprints=[item.evidence_fingerprint for item in loaded.evidence],
+            evidence_claim_relations=_evidence_claim_relations(loaded.evidence),
+            conflicts=_conflict_fingerprint_data(loaded.conflicts),
+            gaps=_gap_fingerprint_data(loaded.gaps),
+            writer_name=DEGRADED_SECTION_WRITER_NAME,
+            writer_version=DEGRADED_SECTION_WRITER_VERSION,
+            writer_model_id=DEGRADED_SECTION_WRITER_MODEL_ID,
+        )
+        if recomputed_input != row.writer_input_fingerprint:
+            raise DraftSectionIntegrityError("draft section writer_input_fingerprint mismatch")
+        recomputed_section = compute_section_fingerprint(
+            writer_input_fingerprint=recomputed_input,
+            section_payload=payload,
+        )
+        if recomputed_section != row.section_fingerprint:
+            raise DraftSectionIntegrityError("draft section section_fingerprint mismatch")
+        return VerifiedDraftSection(
+            draft_section_id=row.draft_section_id,
+            outline_id=row.outline_id,
+            section_id=row.section_id,
+            section_order=row.section_order,
+            section_type=row.section_type,
+            title=row.title,
+            section_schema_version=row.section_schema_version,
+            writer_name=row.writer_name,
+            writer_version=row.writer_version,
+            writer_model_id=row.writer_model_id,
+            writer_input_fingerprint=row.writer_input_fingerprint,
+            section_fingerprint=row.section_fingerprint,
+            paragraph_count=len(payload["paragraphs"]),
+            status=row.status,
+            degraded_reason=row.degraded_reason,
+        )
+
     async def verify_draft_section_integrity(self, draft_section_id: UUID) -> VerifiedDraftSection:
         """public read-only 校验：完整重建输入并重放验证（spec E，Stage 5C 用）。
 
@@ -298,6 +438,9 @@ class DraftSectionService:
             row = await DraftSectionRepository(session).get_by_id(draft_section_id)
         if row is None:
             raise DraftSectionNotFound(f"draft section {draft_section_id} not found")
+        if getattr(row, "status", COMPLETED_SECTION_STATUS) == DEGRADED_SECTION_STATUS:
+            return await self._verify_degraded_section(row)
+
         if row.writer_version != WRITER_VERSION:
             raise DraftSectionLegacyVersionUnsupported(
                 f"draft section writer_version={row.writer_version} not supported "
@@ -511,7 +654,11 @@ class DraftSectionService:
         return conflicts, gaps
 
     async def _load_section(
-        self, verified: VerifiedReportOutline, section: OutlineSection
+        self,
+        verified: VerifiedReportOutline,
+        section: OutlineSection,
+        *,
+        allow_empty_claims: bool = False,
     ) -> _LoadedSection:
         """短 DB session：company + allowed Claims + 真实绑定 Evidence（0 LLM）。"""
         synthesis_result = verified.verified_synthesis_result
@@ -522,7 +669,9 @@ class DraftSectionService:
             if company is None:
                 raise DraftSectionIntegrityError("outline company missing")
             company_name = company.short_name or company.official_name
-            claims = await self._load_claims(session, allowed_claim_ids)
+            claims = await self._load_claims(
+                session, allowed_claim_ids, allow_empty=allow_empty_claims
+            )
             evidence = await self._load_evidence(session, allowed_claim_ids)
         return _LoadedSection(
             company_name=company_name,
@@ -532,9 +681,14 @@ class DraftSectionService:
             gaps=gaps,
         )
 
-    async def _load_claims(self, session, allowed_claim_ids: list[UUID]) -> list[LoadedClaim]:
-        """加载 section 允许的 Claims（含 fingerprint，供输入指纹用）。"""
-        if not allowed_claim_ids:
+    async def _load_claims(
+        self, session, allowed_claim_ids: list[UUID], *, allow_empty: bool = False
+    ) -> list[LoadedClaim]:
+        """加载 section 允许的 Claims（含 fingerprint，供输入指纹用）。
+
+        allow_empty：degraded / 无数据 section 合法地无 claims —— 不抛完整性错误。
+        """
+        if not allowed_claim_ids and not allow_empty:
             raise DraftSectionIntegrityError("section allowed claim set is empty")
         result = await session.execute(
             select(ClaimModel).where(ClaimModel.claim_id.in_(allowed_claim_ids))
@@ -686,6 +840,49 @@ class DraftSectionService:
         )
         if recomputed != row.section_fingerprint:
             raise DraftSectionIntegrityError("draft section section_fingerprint mismatch")
+
+    @staticmethod
+    def _degraded_payload(reason: str) -> dict:
+        """degraded 正文：诚实说明，无 claim/数字/引文（无 fake content）。"""
+        return {
+            "paragraphs": [
+                {
+                    "text": DEGRADED_NOTE_TEMPLATE.format(reason=reason),
+                    "claim_refs": [],
+                    "evidence_refs": [],
+                    "conflict_refs": [],
+                    "gap_refs": [],
+                }
+            ]
+        }
+
+    def _degraded_draft_model(
+        self,
+        *,
+        verified: VerifiedReportOutline,
+        section: OutlineSection,
+        writer_input_fingerprint: str,
+        payload: dict,
+        section_fingerprint: str,
+        reason: str,
+    ) -> DraftSectionModel:
+        return DraftSectionModel(
+            draft_section_id=uuid.uuid4(),
+            outline_id=verified.outline_id,
+            section_id=section.section_id,
+            section_order=section.section_order,
+            section_type=section.section_type,
+            title=section.title,
+            section_schema_version=DRAFT_SECTION_SCHEMA_VERSION,
+            writer_name=DEGRADED_SECTION_WRITER_NAME,
+            writer_version=DEGRADED_SECTION_WRITER_VERSION,
+            writer_model_id=DEGRADED_SECTION_WRITER_MODEL_ID,
+            writer_input_fingerprint=writer_input_fingerprint,
+            section_payload=payload,
+            section_fingerprint=section_fingerprint,
+            status=DEGRADED_SECTION_STATUS,
+            degraded_reason=reason,
+        )
 
     def _draft_model(
         self,

@@ -26,6 +26,11 @@ ACTIVE_ORCHESTRATION_STATUSES = frozenset({"pending", "running", "waiting_human"
 # 达到上限仍未 resolved → waiting_human / manual_required，稳定 reason
 # research_backflow_limit_reached（防无限循环）。
 MAX_BACKFLOW_RESEARCH_ROUNDS = 2
+# P3：用户手动「再次补充研究」(extra_research) 轮的有界上限。当前架构每个
+# orchestration 至多一个 closure request/decision（backflow_human_review_requests
+# UNIQUE(orchestration_id)），即单次手动补充轮；与自动轮上限
+# （MAX_BACKFLOW_RESEARCH_ROUNDS）共同构成多轮闭环的有界语义。
+MAX_SUPPLEMENTAL_RESEARCH_ROUNDS = 1
 
 # backflow terminal 的稳定 reason（写进 checkpoint state + observability）。
 RESEARCH_BACKFLOW_LIMIT_REACHED = "research_backflow_limit_reached"

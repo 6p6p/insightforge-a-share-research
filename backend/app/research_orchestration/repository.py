@@ -168,7 +168,13 @@ class ResearchOrchestrationRepository:
         # orchestration_id 的 default=uuid.uuid4 是 Python-side：逐列取值会显式传
         # None 绕过默认 → 排除 PK，让 Core INSERT 应用列默认。created_at /
         # updated_at 有 server_default now()，同样排除。
-        excluded = {"created_at", "updated_at", "orchestration_id"}
+        excluded = {
+            "created_at",
+            "updated_at",
+            "orchestration_id",
+            # P0.5：server_default 列（recovery attempts）由 DB 填充，不显式传 None。
+            "future_evidence_recovery_attempts",
+        }
         values = {
             column.key: getattr(orchestration, column.key)
             for column in ResearchOrchestrationModel.__table__.columns
@@ -235,6 +241,18 @@ class ResearchOrchestrationRepository:
         return await self._set_terminal(
             orchestration_id, "cancelled", completed_at, error_code=None, error_message=None
         )
+
+    async def increment_future_recovery_attempts(self, orchestration_id: UUID) -> int:
+        """P0.5：FutureEvidence 恢复尝试计数 +1（bounded retry）。"""
+        result = await self._session.execute(
+            update(ResearchOrchestrationModel)
+            .where(ResearchOrchestrationModel.orchestration_id == orchestration_id)
+            .values(
+                future_evidence_recovery_attempts=ResearchOrchestrationModel.future_evidence_recovery_attempts
+                + 1,
+            )
+        )
+        return result.rowcount or 0
 
     async def mark_failed(
         self,

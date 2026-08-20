@@ -68,6 +68,15 @@ WRITER_NAME = "evidence_bound_section_writer"
 WRITER_VERSION_V1 = 1
 WRITER_VERSION = 4
 
+# P1 degraded section closure：模型不可用时确定性生成 degraded DraftSection
+# （保留完整 contract；正文是诚实说明，无 claim/数字/引文；不走 LLM）。
+DEGRADED_SECTION_WRITER_NAME = "degraded_section_writer"
+DEGRADED_SECTION_WRITER_VERSION = 1
+DEGRADED_SECTION_WRITER_MODEL_ID = "deterministic"
+DEGRADED_SECTION_STATUS = "degraded"
+COMPLETED_SECTION_STATUS = "completed"
+DEGRADED_NOTE_TEMPLATE = "本节因{reason}未能生成分析内容。本报告未包含任何数据、引文或结论。"
+
 # 段落数量边界（spec J：1..10）。
 MIN_PARAGRAPHS = 1
 MAX_PARAGRAPHS = 10
@@ -205,6 +214,8 @@ class VerifiedDraftSection:
     writer_input_fingerprint: str
     section_fingerprint: str
     paragraph_count: int
+    status: str = COMPLETED_SECTION_STATUS
+    degraded_reason: str | None = None
 
 
 def compute_writer_input_fingerprint(
