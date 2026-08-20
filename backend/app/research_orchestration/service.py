@@ -942,7 +942,12 @@ class ResearchOrchestrationService:
         audit_id = _uuid_or_none(stage5_state.get("audit_id"))
         check_result_id = _uuid_or_none(stage5_state.get("check_result_id"))
         if audit_id is None or check_result_id is None:
-            return ["缺少审核/校验记录，不能接受当前报告"]
+            # P0 UX 修复：守卫仍严格拒绝（无 audit/check 不可接受），但理由必须可理解：
+            # 当前处于「自动审核失败 / 审核未完成」而非神秘「缺记录」。
+            return [
+                "当前报告尚未完成自动审核（审核记录未生成），暂不能接受；"
+                "请选择「再次补充研究」重新验证，或取消研究。"
+            ]
         if self._report_check_service is None or self._report_audit_service is None:
             raise RuntimeError("acceptance guard services not bound")
         check = await self._report_check_service.verify_check_result_integrity(check_result_id)
