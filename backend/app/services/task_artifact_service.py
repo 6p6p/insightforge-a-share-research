@@ -65,8 +65,11 @@ from app.repositories.evidence_card_repository import EvidenceCardRepository
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.repositories.source_record_repository import SourceRecordRepository
 from app.repositories.workflow_run_repository import WorkflowRunRepository
+from app.research_backflow.closure import ResearchBackflowClosureService
 from app.research_backflow.errors import ResearchBackflowError
 from app.research_backflow.repository import ResearchBackflowRepository
+from app.research_orchestration.contracts import OrchestrationPhase, OrchestrationStatus
+from app.research_orchestration.repository import ResearchOrchestrationRepository
 from app.review.contracts import VerifiedHumanReviewDecision
 from app.review.errors import ReviewError
 from app.schemas.artifact import (
@@ -77,6 +80,7 @@ from app.schemas.artifact import (
     EvidenceArtifactListResponse,
     EvidenceArtifactResponse,
     HumanReviewArtifact,
+    PendingHumanReviewArtifact,
     ReportArtifactResponse,
     ReportCheckArtifact,
     ReportParagraphArtifact,
@@ -383,7 +387,13 @@ class TaskArtifactService:
         anchor = await self._anchor(task_id)
         audit = await self._resolve_reviews(anchor)
         if audit is None:
-            return ReviewsArtifactResponse()
+            # 无 report_audit 行：若正在等待真实人工复核（P0，research_backflow
+            # manual closure / audit-degraded），Reviews 页必须显示「需要人工处理」
+            # 而非误报「无审核记录」。只读投影真实后台状态，不伪造 audit。
+            pending = await self._resolve_pending_manual_review(task_id)
+            if pending is None:
+                return ReviewsArtifactResponse()
+            return ReviewsArtifactResponse(pending_human_review=pending)
         check = audit.verified_check
         resp = ReviewsArtifactResponse(
             audit_id=audit.audit_id,
@@ -668,6 +678,42 @@ class TaskArtifactService:
             _AUDIT_VERIFY_ERRORS,
             "audit",
         )
+
+    async def _resolve_pending_manual_review(
+        self, task_id: UUID
+    ) -> PendingHumanReviewArtifact | None:
+        # P0-projection: 无 report_audit 行时若正等待真实人工复核，Reviews 页显示
+        # 「需要人工处理」而非误报「无审核记录」。只读 0-LLM，绝不伪造 audit。
+        try:
+            orchestration = None
+            async with self._sessionmaker() as session:
+                orchestration = await ResearchOrchestrationRepository(session).get_latest_for_task(
+                    task_id
+                )
+            if orchestration is None:
+                return None
+            if orchestration.status != OrchestrationStatus.WAITING_HUMAN.value:
+                return None
+            phase = OrchestrationPhase(orchestration.current_phase)
+            if phase not in (
+                OrchestrationPhase.RESEARCH_BACKFLOW,
+                OrchestrationPhase.AWAITING_STAGE5,
+            ):
+                return None
+            closure = ResearchBackflowClosureService(self._sessionmaker)
+            request = await closure.get_request_for_orchestration(orchestration.orchestration_id)
+            if request is None:
+                return None
+            decision = await closure.get_decision_for_request(request.backflow_human_request_id)
+            return PendingHumanReviewArtifact(
+                reason=request.reason,
+                decision=decision.decision if decision else None,
+                comment=decision.comment if decision else None,
+                decided_at=decision.decided_at if decision else None,
+            )
+        except BaseException:  # noqa: BLE001 -- projection degrade to null, not 500
+            logger.warning("artifact_pending_manual_unavailable", exc_info=True)
+            return None
 
     async def _resolve_review_action(self, anchor: _Anchor) -> ReviewActionArtifact | None:
         review_action_id = self._state_uuid(anchor.stage5_state, "review_action_id")

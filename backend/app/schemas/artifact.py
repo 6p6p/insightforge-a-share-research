@@ -302,6 +302,22 @@ class ResearchBackflowArtifact(BaseModel):
     new_synthesis_result_id: UUID | None = None
 
 
+class PendingHumanReviewArtifact(BaseModel):
+    """无 audit 行时的真实人工处理投影（P0/P2 一致性修复）。
+
+    仅当 orchestration 处于 waiting_human 且 phase 属于人工复核（research_backflow /
+    awaiting_stage5）而 stage5 checkpoint 尚无 audit_id 时填充：reason=该人工等待的
+    真实原因（report_audit_unavailable / research_backfill_limit_reached 等）；
+    decision/comment/decided_at=人工裁决（若有）。这一层反映真实后台状态，绝非伪造
+    audit 行；Reviews 页据其显示「需要人工处理」而不误报「无审核记录」。
+    """
+
+    reason: str | None = None
+    decision: str | None = None
+    comment: str | None = None
+    decided_at: datetime | None = None
+
+
 class ReviewsArtifactResponse(BaseModel):
     """任务的最新审核视图（stage 6B.1 spec J 分层投影）。
 
@@ -322,3 +338,6 @@ class ReviewsArtifactResponse(BaseModel):
     review_action: ReviewActionArtifact | None = None
     human_review: HumanReviewArtifact | None = None
     research_backflow: ResearchBackflowArtifact | None = None
+    # P0/P2: 未生成 report_audit 行时的人工处理层（research_backflow manual closure /
+    # awaiting_stage5 但 audit 尚未就绪）。只读投影真实人工等待状态，绝不伪造 audit。
+    pending_human_review: PendingHumanReviewArtifact | None = None
