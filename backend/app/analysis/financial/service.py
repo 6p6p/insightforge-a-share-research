@@ -132,7 +132,6 @@ class FinancialAnalysisService:
                 reason_code=FinancialAnalysisReason.INSUFFICIENT_CALCULATIONS,
             )
 
-
         # 3. DB session 已关闭（上面的 context manager 退出）；构造 C/E alias。
         calculation_pack = build_calculation_pack(calculation_sources)
         evidence_pack = build_evidence_pack_allowing_empty(evidence_sources)

@@ -89,9 +89,11 @@ def test_tracker_counts():
     assert d["unresolved"] == 1
     assert d["initial_issue_count"] == 5
 
+
 def test_executor_constructor_exposes_recovery_alias_model():
     # 回归：真实管线 AttributeError: '_recovery_alias_model'（构造函数多行锚点静默失败）。
     from app.research_backflow.executor import ResearchBackflowExecutor
+
     ex = ResearchBackflowExecutor(None, None, None)  # 仅构造，不触碰真实依赖
     assert hasattr(ex, "_recovery_alias_model")
     assert ex._recovery_alias_model is None

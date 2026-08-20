@@ -59,11 +59,15 @@ class FakeConflictModel:
     """可记录调用 + 可注入响应（含非法响应）的 fake LLM 仲裁模型。"""
 
     def __init__(self, response: dict | None = None) -> None:
-        self.response = response if response is not None else {
-            "resolution": "true_conflict",
-            "preferred_evidence_id": None,
-            "reason": "两条证据数值确实不同",
-        }
+        self.response = (
+            response
+            if response is not None
+            else {
+                "resolution": "true_conflict",
+                "preferred_evidence_id": None,
+                "reason": "两条证据数值确实不同",
+            }
+        )
         self.calls: list[tuple[list[dict], str | None]] = []
 
     async def adjudicate(self, candidates: list[dict], hint: str | None = None) -> dict:
@@ -248,9 +252,7 @@ async def test_deterministic_unresolved_triggers_llm_adjudication():
         }
     )
     adjudicator = ConflictAdjudicator(model=model)
-    result = await adjudicator.adjudicate_conflict(
-        a, b, preferred_target_period_end=target
-    )
+    result = await adjudicator.adjudicate_conflict(a, b, preferred_target_period_end=target)
     assert result.kind == ConflictResolutionKind.TRUE_CONFLICT
     assert result.preferred_evidence_id == a_id
     # fake 模型收到两份 JSON-safe 候选视图，evidence_id 与 a/b 对齐。
@@ -286,9 +288,7 @@ async def test_llm_malformed_resolution_rejected():
     target = date(2024, 6, 30)
     a = _candidate(uuid.uuid4(), number="100000000", published_at=date(2024, 12, 31))
     b = _candidate(uuid.uuid4(), number="120000000", published_at=date(2025, 1, 1))
-    model = FakeConflictModel(
-        {"resolution": "magic_answer", "reason": "不是合法分类"}
-    )
+    model = FakeConflictModel({"resolution": "magic_answer", "reason": "不是合法分类"})
     adjudicator = ConflictAdjudicator(model=model)
     with pytest.raises(ConflictMalformedOutput) as exc:
         await adjudicator.adjudicate_conflict(a, b, preferred_target_period_end=target)
@@ -305,9 +305,7 @@ async def test_no_llm_returns_deterministic():
     assert deterministic.kind == ConflictResolutionKind.UNRESOLVED
 
     adjudicator = ConflictAdjudicator(model=None)
-    result = await adjudicator.adjudicate_conflict(
-        a, b, preferred_target_period_end=target
-    )
+    result = await adjudicator.adjudicate_conflict(a, b, preferred_target_period_end=target)
     assert result == deterministic
     assert result.kind == ConflictResolutionKind.UNRESOLVED
     assert result.preferred_evidence_id is None
