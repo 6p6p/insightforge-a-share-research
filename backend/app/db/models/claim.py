@@ -92,3 +92,6 @@ class ClaimModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # P0.5：FutureEvidence 有界恢复标记（invalidate 不删除；synthesis 输入排除）。
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

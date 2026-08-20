@@ -88,6 +88,18 @@ from app.repositories.financial_metric_observation_repository import (
 from app.services.financial_claim_service import FinancialClaimService
 
 
+def _question_sha(research_question: str) -> str:
+    """研究问题 -> sha256（与 evidence card 同一函数）。"""
+    from app.claims.contracts import compute_research_question_sha256
+
+    return compute_research_question_sha256(research_question)
+
+
+def _card_question_match(card: EvidenceCardModel, question_sha: str) -> bool:
+    """task-level 隔离：evidence card 必须属于当前研究问题。"""
+    return card.research_question_sha256 == question_sha
+
+
 class FinancialAnalysisService:
     def __init__(self, sessionmaker: async_sessionmaker, model: FinancialAnalysisModel) -> None:
         self._sessionmaker = sessionmaker
@@ -102,6 +114,24 @@ class FinancialAnalysisService:
         #    （任一 missing / company mismatch / corruption → 稳定错误，不调用 LLM）。
         calculation_sources = await self._load_calculation_sources(request)
         evidence_sources = await self._load_evidence_sources(request)
+
+        # P0 eligibility：时态隔离可能令请求的全部 calculation 不可用
+        # （观测均为未来/跨任务）→ 无任何可用的计算输入。此时**不调用 LLM**，
+        # 确定性降级为 0-claims 非相关结果（诚实 no-data，不崩溃、不引入
+        # 无来源数字）；缺失/损坏/跨公司的 calc 仍在上层 raise（数据完整性）。
+        if request.calculation_ids and not calculation_sources:
+            self._logger.warning(
+                "financial_analysis_temporal_degrade",
+                reason="no_eligible_calculation_after_temporal_isolation",
+            )
+            return FinancialAnalysisResult(
+                relevant=False,
+                claim_ids=[],
+                created_count=0,
+                replayed_count=0,
+                reason_code=FinancialAnalysisReason.INSUFFICIENT_CALCULATIONS,
+            )
+
 
         # 3. DB session 已关闭（上面的 context manager 退出）；构造 C/E alias。
         calculation_pack = build_calculation_pack(calculation_sources)
@@ -235,14 +265,30 @@ class FinancialAnalysisService:
                 if calc.company_id != request.company_id:
                     raise FinancialAnalysisCalculationCompanyMismatch()
                 rows = await input_repo.get_by_calculation_id(calc_id)
-                inputs: list[InputSummarySource] = []
+                obs_by_role: list[tuple[str, object]] = []
                 for row in rows:
                     obs = await obs_repo.get_by_id(row.metric_observation_id)
                     if obs is None or obs.company_id != request.company_id:
                         raise FinancialAnalysisCalculationCorrupted(
                             "financial analysis calculation input observation corrupted"
                         )
-                    inputs.append(InputSummarySource.from_model(row.input_role, obs))
+                    obs_by_role.append((row.input_role, obs))
+                # P0 isolation：analysis_as_of 已声明时，只允许 availability
+                # <= as_of 且属于当前研究问题的观测进入上下文；任一 input 为
+                # 未来/跨任务观测 → 该 calculation 对本任务不可用（跳过）。
+                if request.analysis_as_of is not None:
+                    from app.financial.availability import filter_observations_for_task
+
+                    question_sha = _question_sha(request.research_question)
+                    eligible_obs = await filter_observations_for_task(
+                        session,
+                        [o for _, o in obs_by_role],
+                        request.analysis_as_of,
+                        question_sha,
+                    )
+                    if len(eligible_obs) != len(obs_by_role):
+                        continue
+                inputs = [InputSummarySource.from_model(role, obs) for role, obs in obs_by_role]
                 sources.append(CalculationPackSource.from_model(calc, inputs))
             return sources
 
@@ -250,7 +296,11 @@ class FinancialAnalysisService:
         self, request: FinancialAnalysisRequest
     ) -> list[EvidencePackSource]:
         """加载 additional Evidence（document_chunk / macro_observation 皆可）；
-        缺失 / 跨公司 → CompanyMismatch。空 → []。"""
+        缺失 / 跨公司 → CompanyMismatch。空 → []。
+
+        P0 isolation：analysis_as_of 已声明时排除 availability > as_of 的卡；
+        task-level 隔离：evidence card 必须属于当前研究问题。
+        """
         if not request.additional_evidence_ids:
             return []
         async with self._sessionmaker() as session:
@@ -266,6 +316,38 @@ class FinancialAnalysisService:
         for card in by_id.values():
             if card.company_id != request.company_id:
                 raise FinancialAnalysisEvidenceCompanyMismatch()
+        ordered: list[EvidenceCardModel] = [by_id[cid] for cid in request.additional_evidence_ids]
+        if request.analysis_as_of is not None:
+            from app.claims.macro_policy import resolve_availability as _resolve_avail
+            from app.db.models.source_record import SourceRecordModel
+
+            async with self._sessionmaker() as session:
+                src_rows = (
+                    (
+                        await session.execute(
+                            select(SourceRecordModel).where(
+                                SourceRecordModel.source_id.in_(
+                                    {c.source_id for c in ordered if c.source_id is not None}
+                                )
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            src_by_card = {src.source_id: src for src in src_rows}
+            eligible: list[EvidenceCardModel] = []
+            for c in ordered:
+                src = src_by_card.get(c.source_id)
+                avail = _resolve_avail(
+                    origin_type=c.origin_type,
+                    snapshot_fetched_at=None,
+                    source_published_at=src.published_at if src else None,
+                    source_acquired_at=src.acquired_at if src else None,
+                )
+                if avail is not None and avail.date() <= request.analysis_as_of:
+                    eligible.append(c)
+            return [EvidencePackSource.from_model(c) for c in eligible]
         return [
             EvidencePackSource.from_model(by_id[card_id])
             for card_id in request.additional_evidence_ids

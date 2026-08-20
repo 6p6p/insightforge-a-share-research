@@ -16,6 +16,7 @@ Observation；不 fetch / 不下载披露。幂等：fingerprint replay → 第 
 0 新增写（spec Q）。executor 不抛确定性错误。
 """
 
+from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select
@@ -59,6 +60,15 @@ class _FinancialError(Exception):
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
         self.kind = kind
+
+
+def _question_sha(research_question: str | None) -> str | None:
+    """研究问题 -> sha256（与 evidence card 同一函数；None → None）。"""
+    if not research_question:
+        return None
+    from app.claims.contracts import compute_research_question_sha256
+
+    return compute_research_question_sha256(research_question)
 
 
 class FinancialNeedExecutor:
@@ -125,7 +135,11 @@ class FinancialNeedExecutor:
                 FulfillmentStatus.UNSUPPORTED,
                 error_code=FulfillmentErrorCode.UNSUPPORTED_NEED,
             )
-        by_metric = await self._load_observations_by_metric(context.company_id)
+        by_metric = await self._load_observations_by_metric(
+            context.company_id,
+            context.analysis_as_of,
+            _question_sha(context.research_question),
+        )
         try:
             inputs = self._resolve_inputs(code, fin_need, by_metric)
         except _FinancialError as exc:
@@ -134,7 +148,11 @@ class FinancialNeedExecutor:
                 # blocks → 指标 → 证据卡 + observation）；成功 → 重查重试一次。
                 if self._extraction is not None:
                     await self._try_auto_extract(context)
-                    by_metric = await self._load_observations_by_metric(context.company_id)
+                    by_metric = await self._load_observations_by_metric(
+                        context.company_id,
+                        context.analysis_as_of,
+                        _question_sha(context.research_question),
+                    )
                     try:
                         inputs = self._resolve_inputs(code, fin_need, by_metric)
                     except _FinancialError:
@@ -353,7 +371,10 @@ class FinancialNeedExecutor:
     # ------------------------------------------------------------ 数据
 
     async def _load_observations_by_metric(
-        self, company_id: UUID
+        self,
+        company_id: UUID,
+        analysis_as_of: date | None = None,
+        research_question_sha256: str | None = None,
     ) -> dict[str, list[FinancialMetricObservationModel]]:
         stmt = select(FinancialMetricObservationModel).where(
             FinancialMetricObservationModel.company_id == company_id
@@ -361,6 +382,13 @@ class FinancialNeedExecutor:
         async with self._sessionmaker() as session:
             rows = await session.execute(stmt)
             observations = list(rows.scalars().all())
+            # P0 isolation：只保留 availability <= analysis_as_of 的观测。
+            if analysis_as_of is not None:
+                from app.financial.availability import filter_observations_eligible
+
+                observations = await filter_observations_eligible(
+                    session, observations, analysis_as_of
+                )
         by_metric: dict[str, list[FinancialMetricObservationModel]] = {}
         for obs in observations:
             by_metric.setdefault(obs.metric_code, []).append(obs)

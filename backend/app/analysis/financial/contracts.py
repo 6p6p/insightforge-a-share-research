@@ -36,6 +36,7 @@ FinancialClaimService.create_claim_batch 原子持久化。
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -247,6 +248,7 @@ class FinancialAnalysisRequest:
     research_question: str
     calculation_ids: list[UUID]
     additional_evidence_ids: list[UUID] = field(default_factory=list)
+    analysis_as_of: date | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.company_id, bool) or not isinstance(self.company_id, UUID):
@@ -270,6 +272,9 @@ class FinancialAnalysisRequest:
                 f"additional_evidence_ids 最多 {MAX_EVIDENCE_PER_REQUEST} 条"
             )
         normalized_evidence = normalize_evidence_card_ids(self.additional_evidence_ids)
+        if self.analysis_as_of is not None and not isinstance(self.analysis_as_of, date):
+            raise FinancialAnalysisInputError("analysis_as_of 必须是 date 或 None")
+        object.__setattr__(self, "analysis_as_of", self.analysis_as_of)
         object.__setattr__(self, "research_question", question)
         object.__setattr__(self, "calculation_ids", normalized_calcs)
         object.__setattr__(self, "additional_evidence_ids", normalized_evidence)
