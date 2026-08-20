@@ -69,3 +69,4 @@ backend/_l.py
 backend/_r.py
 backend/_tb.py
 docker/overlay.Dockerfile
+frontend/*.txt
