@@ -24,7 +24,13 @@ from langgraph.types import interrupt
 
 from app.audit.contracts import ReportAuditRequest
 from app.draft_section.contracts import DraftSectionRequest
-from app.draft_section.errors import DraftSectionModelUnavailable
+from app.draft_section.errors import (
+    DraftSectionError,
+    DraftSectionIntegrityError,
+    DraftSectionModelUnavailable,
+    DraftSectionNotFound,
+    DraftSectionPersistenceFailed,
+)
 from app.report.contracts import CHECK_STATUS_PASS, ReportAssemblyDraft
 from app.review.contracts import (
     ACTION_TYPE_FINALIZE,
@@ -126,17 +132,56 @@ def make_build_report_draft_node(deps: Stage5WorkflowDependencies):
                         "section_status": "completed",
                     }
                 )
-            except DraftSectionModelUnavailable:
+            # 结构性/持久化错误 → fail-hard（不回退到降级段）。
+            except (DraftSectionNotFound, DraftSectionPersistenceFailed):
+                raise
+            # P1：重演内容（evidence 变化、前轮遗留）冲突 → 降级该段（诚实占位），
+            # 不中断整报告（threshold 仍 fail-safe）。
+            except DraftSectionIntegrityError:
                 degraded_count += 1
+                degraded = await deps.draft_section_service.create_or_get_degraded_section(
+                    DraftSectionRequest(
+                        outline_id=verified_outline.outline_id, section_id=section.section_id
+                    ),
+                    reason="replay_integrity_conflict",
+                )
                 sections.append(
                     {
                         "section_id": section.section_id,
                         "section_order": section.section_order,
                         "section_type": section.section_type,
                         "title": section.title,
-                        "draft_section_id": None,
+                        "draft_section_id": str(degraded.draft_section_id),
                         "section_status": "degraded",
-                        "degraded_reason": "model_unavailable",
+                        "degraded_reason": "replay_integrity_conflict",
+                    }
+                )
+            # P1：质量 guard 类（numeric grounding / forbidden / unbound /
+            # 一致性校验）或模型不可用 → **绝不写假稿**，确定性降级该段（节
+            # 保留完整 DraftSection contract；正文诚实，无 claim/数字/引文），
+            # assembler 仍拿到 S1..S6。
+            except DraftSectionError as exc:
+                degraded_count += 1
+                reason = (
+                    "model_unavailable"
+                    if isinstance(exc, DraftSectionModelUnavailable)
+                    else "draft_quality_guard"
+                )
+                degraded = await deps.draft_section_service.create_or_get_degraded_section(
+                    DraftSectionRequest(
+                        outline_id=verified_outline.outline_id, section_id=section.section_id
+                    ),
+                    reason=reason,
+                )
+                sections.append(
+                    {
+                        "section_id": section.section_id,
+                        "section_order": section.section_order,
+                        "section_type": section.section_type,
+                        "title": section.title,
+                        "draft_section_id": str(degraded.draft_section_id),
+                        "section_status": "degraded",
+                        "degraded_reason": reason,
                     }
                 )
         return {
@@ -162,11 +207,12 @@ def make_assemble_report_node(deps: Stage5WorkflowDependencies):
         if not outline_id or not sections:
             raise Stage5InvalidState("assemble_report 需要 outline_id + sections")
         ordered = sorted(sections, key=lambda s: s.get("section_order", 0))
-        valid = [s for s in ordered if s.get("draft_section_id") is not None]
+        # P1：degraded section 也是完整 DraftSection（status=degraded），一律进
+        # 装配；整体阈值仍 fail-safe（全部 degraded → 无法装配）。
         degraded = [s for s in ordered if s.get("section_status") == "degraded"]
-        if not valid:
+        if not ordered or len(degraded) == len(ordered):
             raise Stage5InvalidState(f"所有 {len(ordered)} 个 section 均 degraded，无法装配报告")
-        draft_section_ids = tuple(UUID(s["draft_section_id"]) for s in valid)
+        draft_section_ids = tuple(UUID(s["draft_section_id"]) for s in ordered)
         result = await deps.report_service.create_or_get_report(
             ReportAssemblyDraft(outline_id=UUID(outline_id), draft_section_ids=draft_section_ids)
         )

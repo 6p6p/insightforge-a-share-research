@@ -309,8 +309,10 @@ def build_audit_pack(
         for payload_section in verified_report.report_payload["sections"]:
             if payload_section.get("section_id") == section.section_id:
                 for index, paragraph in enumerate(payload_section["paragraphs"]):
-                    claim_ids = tuple(UUID(raw) for raw in paragraph["claim_ids"])
-                    evidence_card_ids = tuple(UUID(raw) for raw in paragraph["evidence_card_ids"])
+                    claim_ids = tuple(UUID(raw) for raw in paragraph.get("claim_ids", []) or [])
+                    evidence_card_ids = tuple(
+                        UUID(raw) for raw in paragraph.get("evidence_card_ids", []) or []
+                    )
                     paragraphs.append(
                         AuditPackParagraph(
                             paragraph_ref=f"P{len(paragraphs) + 1}",

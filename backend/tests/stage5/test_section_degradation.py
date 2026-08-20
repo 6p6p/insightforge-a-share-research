@@ -15,7 +15,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.draft_section.errors import DraftSectionModelUnavailable
+from app.draft_section.errors import (
+    DraftSectionModelUnavailable,
+    DraftSectionNumericGroundingError,
+)
 from app.report.contracts import ReportAssemblyDraft, ReportResult
 from app.report_outline.contracts import SECTION_TYPE_THEME, OutlineSection
 from app.stage5.nodes import make_assemble_report_node, make_build_report_draft_node
@@ -68,16 +71,32 @@ class _FakeVerifiedOutline:
 class _FakeDraftService:
     """Fake that raises DraftSectionModelUnavailable for configured section IDs."""
 
-    def __init__(self, fail_ids: set[str]):
+    def __init__(self, fail_ids: set[str], error_cls=None):
         self._fail_ids = fail_ids
+        self._error_cls = error_cls or DraftSectionModelUnavailable
         self.call_count = 0
         self.success_count = 0
 
     async def create_or_get_section(self, request):
         self.call_count += 1
         if str(request.section_id) in self._fail_ids:
-            raise DraftSectionModelUnavailable("test: model unavailable")
+            raise self._error_cls("test: section guard failure")
         self.success_count += 1
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeResult:
+            draft_section_id: UUID
+            replayed: bool = False
+            outline_id: UUID = uuid4()
+            section_fingerprint: str = "test-fp"
+            writer_input_fingerprint: str = "test-input-fp"
+            paragraph_count: int = 1
+
+        return FakeResult(draft_section_id=uuid4())
+
+    async def create_or_get_degraded_section(self, request, reason):
+        # P1：degraded section 也保留完整 DraftSection contract（status=degraded）。
         from dataclasses import dataclass
 
         @dataclass
@@ -114,13 +133,13 @@ class _FakeReportService:
         )
 
 
-def _make_deps(sections: list[dict], fail_ids: set[str] | None = None):
+def _make_deps(sections: list[dict], fail_ids: set[str] | None = None, error_cls=None):
     """Build a plain object that quacks like Stage5WorkflowDependencies."""
     if fail_ids is None:
         fail_ids = set()
     d = type("FakeDeps", (), {})()
     d.report_outline_service = _FakeOutlineService(sections)
-    d.draft_section_service = _FakeDraftService(fail_ids)
+    d.draft_section_service = _FakeDraftService(fail_ids, error_cls=error_cls)
     d.report_service = _FakeReportService()
     d.sessionmaker = None
     d.report_check_service = None
@@ -175,7 +194,8 @@ async def test_one_section_degraded() -> None:
     assert completed[0]["section_id"] == "s1"
     assert completed[0]["draft_section_id"] is not None
     assert degraded[0]["section_id"] == "s2"
-    assert degraded[0]["draft_section_id"] is None
+    # P1：degraded section 保留完整 DraftSection（draft_section_id 非空）
+    assert degraded[0]["draft_section_id"] is not None
     assert degraded[0]["degraded_reason"] == "model_unavailable"
 
 
@@ -228,8 +248,8 @@ async def test_all_sections_degraded_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_assemble_skips_degraded_sections() -> None:
-    """Assemble report uses only completed sections."""
+async def test_assemble_includes_degraded_sections() -> None:
+    """P1：degraded section 也是完整 DraftSection → assemble 全量包含（不再 missing）。"""
     sections = [
         {"section_id": "s1", "section_order": 1, "title": "Theme 1"},
         {"section_id": "s2", "section_order": 2, "title": "Theme 2"},
@@ -247,11 +267,39 @@ async def test_assemble_skips_degraded_sections() -> None:
         }
     )
 
-    # assemble should have called report_service with 2 valid sections (not 3)
-    assert assemble_result["assembled_section_count"] == 2
+    # P1: 全部 (含 degraded) 都进装配 → assembled_section_count == 3
+    assert assemble_result["assembled_section_count"] == 3
     assert assemble_result["degraded_section_count"] == 1
     assert assemble_result["report_id"] is not None
-
-    # Verify report_service received only 2 draft_section_ids
     assert len(deps.report_service.calls) == 1
-    assert len(deps.report_service.calls[0].draft_section_ids) == 2
+    assert len(deps.report_service.calls[0].draft_section_ids) == 3
+
+
+@pytest.mark.asyncio
+async def test_quality_guard_error_degrades_not_crash() -> None:
+    """P1：validation-class DraftSectionError（numeric grounding guard）→ 该段
+    确定性降级（degraded_reason='draft_quality_guard'），报告仍可装配——
+    不写任何带无来源数字的假稿，guard 保留。"""
+    sections = [
+        {"section_id": "s1", "section_order": 1, "title": "Theme 1"},
+        {"section_id": "s2", "section_order": 2, "title": "Theme 2"},
+    ]
+    deps = _make_deps(sections, fail_ids={"s2"}, error_cls=DraftSectionNumericGroundingError)
+    node = make_build_report_draft_node(deps)
+    result = await node({"synthesis_result_id": str(uuid4())})
+
+    assert result["section_count"] == 2
+    assert result["degraded_section_count"] == 1
+    assert len(result["sections"]) == 2
+    degraded = [s for s in result["sections"] if s["section_status"] == "degraded"]
+    assert len(degraded) == 1
+    assert degraded[0]["section_id"] == "s2"
+    assert degraded[0]["draft_section_id"] is not None
+    assert degraded[0]["degraded_reason"] == "draft_quality_guard"
+
+    # 仍可装配（S1..S2 都在），不 stage5 中断
+    assemble_node = make_assemble_report_node(deps)
+    assemble_result = await assemble_node(
+        {"outline_id": str(uuid4()), "sections": result["sections"]}
+    )
+    assert assemble_result["degraded_section_count"] == 1

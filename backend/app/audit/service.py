@@ -441,9 +441,9 @@ class ReportAuditService:
         evidence_ids: set[UUID] = set()
         for section in verified.report_payload["sections"]:
             for paragraph in section["paragraphs"]:
-                for raw in paragraph["claim_ids"]:
+                for raw in paragraph.get("claim_ids", []) or []:
                     claim_ids.add(UUID(raw))
-                for raw in paragraph["evidence_card_ids"]:
+                for raw in paragraph.get("evidence_card_ids", []) or []:
                     evidence_ids.add(UUID(raw))
         return claim_ids, evidence_ids
 
