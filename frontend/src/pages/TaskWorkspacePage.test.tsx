@@ -442,7 +442,9 @@ describe('TaskWorkspacePage citation navigation（Stage 6B.2 spec O/P/Q）', () 
       review_action: null,
       human_review: null,
       research_backflow: null,
+      pending_human_review: null,
     };
+
     mocks.getTaskReviews.mockResolvedValue(reviewsData);
     mocks.getTaskReport.mockResolvedValue(reportData);
     renderPage();
