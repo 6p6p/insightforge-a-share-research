@@ -839,6 +839,15 @@ function BackflowSupplementPanel({
 }
 
 /** research_backflow 已达上限/无进展：人工闭环（接受 / 再次补充研究 / 取消）。 */
+
+/** P0 修复：backflow 人工闭环头部消息按真实原因区分（audit 失败 vs 补研上限）。 */
+function closureAlertMessage(reason: string | null): string {
+  if (!reason) return '需要人工确认';
+  if (reason.startsWith('report_audit_')) return '报告已生成但自动审核失败，需要重新验证';
+  if (reason === 'research_backflow_limit_reached') return '自动补充研究已达到上限';
+  if (reason === 'research_backflow_no_progress') return '未能获取新的补充资料';
+  return MANUAL_REASON_LABELS[reason] ?? '需要人工确认';
+}
 function BackflowClosureCard({
   orchestration,
   companyId,
@@ -928,7 +937,7 @@ function BackflowClosureCard({
         <Alert
           type="warning"
           showIcon
-          message="自动补充研究已达到上限"
+          message={closureAlertMessage(review?.reason ?? orchestration.manual_reason)}
           description="你可以接受当前报告、再次补充研究（有界），或取消研究。"
         />
         {!done && acceptDisabled && barriers.length > 0 ? (
