@@ -47,6 +47,7 @@ from app.research_orchestration.service import ChildRunResult
 from app.stage5.contracts import (
     STAGE5_TERMINAL_CANCELLED,
     STAGE5_TERMINAL_FINALIZE,
+    STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS,
     STAGE5_TERMINAL_RESEARCH_REQUIRED,
 )
 from tests.research_orchestration.fakes import (
@@ -75,6 +76,7 @@ _STAGE4_STATE = {
 _STAGE5_OUTCOME_STATUS = {
     "waiting_human": "waiting_human",
     "completed": "completed",
+    "completed_with_warnings": "completed",
     "research_required": "completed",
     "failed": "failed",
     "cancelled": "cancelled",
@@ -170,6 +172,7 @@ class _FakeStage5Runner:
         return {
             "waiting_human": {"terminal": None},
             "completed": {"terminal": STAGE5_TERMINAL_FINALIZE},
+            "completed_with_warnings": {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS},
             "research_required": {
                 "terminal": STAGE5_TERMINAL_RESEARCH_REQUIRED,
                 "research_request_id": str(_RESEARCH_REQUEST_ID),
@@ -357,6 +360,11 @@ class _Harness:
         self.orchestration.status = "completed"
         return self.orchestration
 
+    async def mark_completed_with_warnings(self, orchestration_id, completed_at):
+        self.terminal_status = "completed_with_warnings"
+        self.orchestration.status = "completed_with_warnings"
+        return self.orchestration
+
     async def mark_failed(self, orchestration_id, completed_at, *, error_code, error_message=None):
         self.terminal_status = "failed"
         self.orchestration.status = "failed"
@@ -380,6 +388,11 @@ class _Harness:
             ResearchOrchestrationRepository, "update_progress", self.update_progress
         )
         monkeypatch.setattr(ResearchOrchestrationRepository, "mark_completed", self.mark_completed)
+        monkeypatch.setattr(
+            ResearchOrchestrationRepository,
+            "mark_completed_with_warnings",
+            self.mark_completed_with_warnings,
+        )
         monkeypatch.setattr(ResearchOrchestrationRepository, "mark_failed", self.mark_failed)
         monkeypatch.setattr(ResearchOrchestrationRepository, "mark_cancelled", self.mark_cancelled)
         monkeypatch.setattr(WorkflowRunRepository, "get_by_id", self.get_workflow_run)
@@ -470,6 +483,27 @@ async def test_continuation_reenters_run_or_resume_stage5_node(monkeypatch) -> N
     # terminal orchestration → runner 拒绝续接（不重跑）。
     with pytest.raises(ResearchOrchestrationAlreadyFinished):
         await runner.run_orchestration(_ORCH_ID)
+    assert harness.stage4_runner.execute_calls == 1
+    assert harness.stage5_runner.execute_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_finalize_with_warnings_marks_completed_with_warnings(monkeypatch) -> None:
+    """v1.2.2：Stage5 child terminal = finalize_with_warnings（人工批准带警告完成）
+    → orchestration status=completed_with_warnings（不是 failed，也不是普通 completed）。
+
+    复现 bug 场景的**修复后**路径：S5 degraded（model_unavailable）→ 人工批准 →
+    check 非 pass 但全部 findings 归因 degraded → terminal finalize_with_warnings
+    → 顶层 orchestration 投影 completed_with_warnings。
+    """
+    harness = _Harness(stage5_outcome="completed_with_warnings")
+    harness.bind(monkeypatch)
+    runner = harness.runner()
+
+    final = await runner.run_orchestration(_ORCH_ID)
+    assert harness.terminal_status == "completed_with_warnings"
+    assert final["current_phase"] == OrchestrationPhase.COMPLETED.value
+    assert final["stage5_run_status"] == "completed_with_warnings"
     assert harness.stage4_runner.execute_calls == 1
     assert harness.stage5_runner.execute_calls == 1
 

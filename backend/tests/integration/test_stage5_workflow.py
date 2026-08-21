@@ -33,6 +33,7 @@ from app.core.runtime import configure_asyncio_runtime
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
 from app.domain.tasks import WorkflowEventType
+from app.draft_section.errors import DraftSectionModelUnavailable
 from app.draft_section.service import DraftSectionService
 from app.report.check_service import ReportCheckService
 from app.report.contracts import ReportAssemblyDraft
@@ -46,6 +47,7 @@ from app.stage5.contracts import (
     MAX_STAGE5_REVISION_ROUNDS,
     STAGE5_TERMINAL_CANCELLED,
     STAGE5_TERMINAL_FINALIZE,
+    STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS,
     STAGE5_TERMINAL_RESEARCH_REQUIRED,
     STAGE5_TERMINAL_REVISION_LIMIT_EXCEEDED,
     Stage5WorkflowRequest,
@@ -476,3 +478,98 @@ async def test_approve_requires_pass_check(env, monkeypatch, connection_uri) -> 
     node = make_finalize_on_approve_node(deps)
     with pytest.raises(Stage5ApproveRequiresPassCheck):
         await node({"check_result_id": str(check.check_result_id)})
+
+
+# ---------------------------------------------------------------- degrade approve（v1.2.2 §2 B）
+
+
+async def test_approve_degraded_section_finalizes_with_warnings(
+    env, monkeypatch, connection_uri
+) -> None:
+    """Check=fail 但全部 findings 归因 degraded section（model_unavailable 占位）
+    → 人工 approve 被接受 → terminal finalize_with_warnings（不再是 run FAILED）。
+    """
+    from app.draft_section.contracts import DraftSectionRequest
+
+    outline_id = await _create_outline(env, monkeypatch, connection_uri, _two_theme_models())
+    fake = FakeDraftSectionModel(decision_factory=valid_decision_for)
+    draft_service = DraftSectionService(env["sessionmaker"], fake)
+    # S3（risks_and_gaps）标记 degraded：deterministic 诚实占位（0 LLM）。
+    degraded = await draft_service.create_or_get_degraded_section(
+        DraftSectionRequest(outline_id=outline_id, section_id="S3"),
+        reason="model_unavailable",
+    )
+    # S1/S2 正常，S3 degraded → assemble 完整 Report（含诚实占位段落）。
+    draft_ids: dict[str, UUID] = {}
+    for section_id in ("S1", "S2"):
+        result = await DraftSectionService(
+            env["sessionmaker"], FakeDraftSectionModel(decision_factory=valid_decision_for)
+        ).create_or_get_section(DraftSectionRequest(outline_id=outline_id, section_id=section_id))
+        draft_ids[section_id] = result.draft_section_id
+    draft_ids["S3"] = degraded.draft_section_id
+
+    report_service = ReportService(env["sessionmaker"], draft_service)
+    report = await report_service.create_or_get_report(
+        ReportAssemblyDraft(outline_id=outline_id, draft_section_ids=tuple(draft_ids.values()))
+    )
+    check_service = ReportCheckService(env["sessionmaker"], report_service)
+    check = await check_service.run_report_checks(report.report_id)
+    assert check.status == "fail"
+
+    deps = _stage5_deps(
+        env["sessionmaker"],
+        draft_model=fake,
+        audit_model=FakeAuditModel(decision_factory=pass_decision),
+        revision_model=FakeRevisionWriterModel(),
+    )
+    node = make_finalize_on_approve_node(deps)
+    result = await node({"check_result_id": str(check.check_result_id)})
+    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS
+
+
+def _degrade_risks_gap_factory() -> object:
+    """Factory: S2(risks_and_gaps) 抛 DraftSectionModelUnavailable，其余段正常。
+    → drafting node 对该段确定性降级（reason=model_unavailable），S1/S2 正常。
+    """
+    from app.draft_section.packs import SectionInputPack
+
+    def factory(pack: SectionInputPack):
+        if pack.section_id == "S2":
+            raise DraftSectionModelUnavailable()
+        return valid_decision_for(pack)
+
+    return factory
+
+
+async def test_approve_degraded_workflow_completes_with_warnings(
+    env, monkeypatch, connection_uri
+) -> None:
+    """全链路 Case2（§6）：degraded section + audit human_review → 人工 approve
+    → run **completed**（terminal finalize_with_warnings），不再是 FAILED。
+    """
+    synthesis_result_id = await _seed_synthesis(env, monkeypatch, connection_uri)
+    request = _request(env, synthesis_result_id)
+    deps = _stage5_deps(
+        env["sessionmaker"],
+        draft_model=FakeDraftSectionModel(decision_factory=_degrade_risks_gap_factory()),
+        audit_model=FakeAuditModel(decision_factory=human_review_decision),
+        revision_model=FakeRevisionWriterModel(),
+    )
+    manager = LangGraphCheckpointManager(connection_uri)
+    await manager.setup()
+    try:
+        runner = Stage5WorkflowRunner(env["sessionmaker"], manager, deps)
+        run = await runner.create_stage5_run(request)
+        result = await runner.execute_stage5(run.run_id, request)
+        assert (await runner.get_run(run.run_id)).status.value == "waiting_human"
+        assert result["route"] == "human_review"
+
+        runner_b = Stage5WorkflowRunner(env["sessionmaker"], manager, deps)
+        result = await runner_b.resume_stage5_human(run.run_id, "approve", comment=" 人工确认占位 ")
+    finally:
+        await manager.close()
+
+    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS
+    assert result["human_decision"] == "approve"
+    assert (await runner.get_run(run.run_id)).status.value == "completed"
+    assert await _run_count(env["sessionmaker"], "human_review_decisions") == 1

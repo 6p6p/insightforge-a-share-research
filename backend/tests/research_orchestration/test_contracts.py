@@ -87,6 +87,7 @@ def test_enum_values_stable() -> None:
         "running",
         "waiting_human",
         "completed",
+        "completed_with_warnings",
         "failed",
         "cancelled",
     }

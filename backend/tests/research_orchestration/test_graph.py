@@ -35,6 +35,7 @@ _EXPECTED_NODES = {
     "run_or_resume_stage5",
     "awaiting_stage5",
     "complete_orchestration",
+    "complete_orchestration_with_warnings",
     "stage5_failed",
     "stage5_cancelled",
     "waiting_manual",
