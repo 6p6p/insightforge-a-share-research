@@ -58,7 +58,13 @@ def main():
         status = orch.get("status")
         phase = orch.get("current_phase")
         print(f"[{tag}] poll: status={status} phase={phase}")
-        if status in ("completed", "failed", "cancelled", "waiting_human"):
+        if status in (
+            "completed",
+            "completed_with_warnings",
+            "failed",
+            "cancelled",
+            "waiting_human",
+        ):
             break
         time.sleep(15)
     else:

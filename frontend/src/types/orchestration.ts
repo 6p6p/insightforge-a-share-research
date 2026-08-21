@@ -10,6 +10,7 @@ export const ORCHESTRATION_STATUS = [
   'running',
   'waiting_human',
   'completed',
+  'completed_with_warnings',
   'failed',
   'cancelled',
 ] as const;

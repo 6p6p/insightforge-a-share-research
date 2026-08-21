@@ -114,6 +114,17 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     expect(screen.getByText('研究完成')).toBeInTheDocument();
   });
 
+  it('completed_with_warnings → 研究完成（包含审核提醒）', () => {
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({ status: 'completed_with_warnings', current_phase: 'completed' })}
+        companyId="c1"
+      />,
+    );
+    expect(screen.getByText('研究完成')).toBeInTheDocument();
+    expect(screen.getByText(/报告已生成（包含审核提醒）/)).toBeInTheDocument();
+  });
+
   it('运行中 phase → 显示阶段文案，不渲染人工操作', () => {
     renderWithProviders(
       <OrchestrationBanner

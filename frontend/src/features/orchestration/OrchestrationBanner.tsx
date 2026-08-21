@@ -82,6 +82,7 @@ const STATUS_LABELS: Record<string, string> = {
   running: '进行中',
   waiting_human: '等待人工介入',
   completed: '研究完成',
+  completed_with_warnings: '研究完成（包含审核提醒）',
   failed: '已失败',
   cancelled: '已取消',
 };
@@ -142,13 +143,17 @@ export function OrchestrationBanner({
 
   const { status, current_phase } = orchestration;
 
-  if (status === 'completed') {
+  if (status === 'completed' || status === 'completed_with_warnings') {
     return (
       <Alert
-        type="success"
+        type={status === 'completed_with_warnings' ? 'warning' : 'success'}
         showIcon
         message="研究完成"
-        description="报告已生成，可在「报告」标签页查看并导出。"
+        description={
+          status === 'completed_with_warnings'
+            ? '报告已生成（包含审核提醒）——部分章节因模型不可用等原因以占位内容完成，已由人工确认；请在「报告」标签页查看各章节的说明。'
+            : '报告已生成，可在「报告」标签页查看并导出。'
+        }
       />
     );
   }
