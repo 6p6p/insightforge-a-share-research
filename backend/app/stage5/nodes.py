@@ -23,6 +23,10 @@ from uuid import UUID
 from langgraph.types import interrupt
 
 from app.audit.contracts import ReportAuditRequest
+from app.audit.severity import (
+    AuditSeverity,
+    classify_report_severity,
+)
 from app.draft_section.contracts import DEGRADED_SECTION_STATUS, DraftSectionRequest
 from app.draft_section.errors import (
     DraftSectionError,
@@ -31,7 +35,7 @@ from app.draft_section.errors import (
     DraftSectionNotFound,
     DraftSectionPersistenceFailed,
 )
-from app.report.contracts import CHECK_STATUS_PASS, ReportAssemblyDraft
+from app.report.contracts import ReportAssemblyDraft
 from app.review.contracts import (
     ACTION_TYPE_FINALIZE,
     ACTION_TYPE_HUMAN_REVIEW,
@@ -471,17 +475,20 @@ def _findings_all_attributable_to_degraded(verified, degraded_section_ids: froze
 
 
 def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
-    """finalize_on_approve：spec R——approve 只能 finalize 当前 Report 且前提
-    deterministic Check=pass（Gate 0 不被人工裁决覆盖）。
+    """finalize_on_approve：spec R——approve 只能 finalize 当前 Report，且人工接受
+    受**确定性 severity 无条件守卫**约束（Gate 0 不被人工裁决覆盖、不因降级特判）。
 
-    v1.2.2 分级（§2 A/B）：
-    - Check=pass → finalize（无警告完成）；
-    - Check=fail 且**全部 findings 可归因于 degraded section**（S5 因
-      model_unavailable 等诚实降级；人工已显式审核该占位）→ 允许人工批准 →
-      terminal `finalize_with_warnings`（带警告完成，不再是 run FAILED）；
-    - Check=fail 且存在**不可归因 finding**（真实内容瑕疵 / 证据链断 / 未来
-      证据等阻断级问题）→ 仍 `Stage5ApproveRequiresPassCheck`（run FAILED），
-      人工批准被拒绝，需补充研究或取消，绝不静默放行。
+    v1.2.3 分级（§2/§3/§4，确定性分类，LLM 不裁决接受级别）：
+    - severity=WARNING（degraded 占位 / model_unavailable / conflict_gap 讨论不足 /
+      explicit 标记不完整 / 非关键缺失）→ 允许人工批准 → terminal `finalize_with_warnings`
+      （带警告完成 → orchestration completed_with_warnings，不再是 run FAILED）；
+    - severity=CRITICAL（未来证据 / 时间对齐 / 引用或溯源失败 / 数字接地失败 /
+      数据真实性无法确认 / 确定性完整性失败）→ 仍 `Stage5ApproveRequiresPassCheck`
+      （run FAILED），人工批准被拒绝，需补充研究或取消；
+    - severity=INFO → finalize（无警告完成）。
+
+    说明：不再特判 degraded section 特别放行；degenerated 章节的 findings 同步归入
+    WARNING，保持 v1.2.2 退化场景不被破坏。
     """
 
     async def finalize_on_approve(state) -> dict:
@@ -491,10 +498,25 @@ def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
         verified = await deps.report_check_service.verify_check_result_integrity(
             UUID(check_result_id)
         )
-        if verified.status != CHECK_STATUS_PASS:
-            degraded_section_ids = _degraded_section_ids(verified)
-            if _findings_all_attributable_to_degraded(verified, degraded_section_ids):
-                return {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS}
+        raw_audit_id = state.get("audit_id")
+        audit_id: UUID | None = None
+        if raw_audit_id:
+            audit_id = (
+                UUID(str(raw_audit_id)) if not isinstance(raw_audit_id, UUID) else raw_audit_id
+            )
+        issues: list[object] = []
+        if audit_id is not None:
+            audit = await deps.report_audit_service.verify_audit_integrity(audit_id)
+            issues = list(audit.issues)
+        severity = classify_report_severity(
+            finding_codes=[f.code for f in verified.findings],
+            finding_section_ids=[f.section_id for f in verified.findings],
+            issues=issues,
+            degraded_section_ids=_degraded_section_ids(verified),
+        )
+        if severity is AuditSeverity.WARNING:
+            return {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS}
+        if severity is AuditSeverity.CRITICAL:
             raise Stage5ApproveRequiresPassCheck()
         return {"terminal": STAGE5_TERMINAL_FINALIZE}
 

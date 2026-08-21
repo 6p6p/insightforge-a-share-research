@@ -48,7 +48,10 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.audit.contracts import AUDIT_SEVERITY_CRITICAL, AUDIT_SEVERITY_HIGH
+from app.audit.severity import (
+    AuditSeverity,
+    classify_report_severity,
+)
 from app.core.errors import ActiveWorkflowRunExists
 from app.core.logging import get_logger
 from app.db.models.research_orchestration import (
@@ -56,7 +59,7 @@ from app.db.models.research_orchestration import (
     ResearchOrchestrationModel,
 )
 from app.domain.tasks import ACTIVE_WORKFLOW_RUN_STATUSES
-from app.report.contracts import CHECK_STATUS_PASS
+from app.draft_section.contracts import DEGRADED_SECTION_STATUS
 from app.repositories.workflow_run_repository import WorkflowRunRepository
 from app.research_orchestration.contracts import (
     ORCHESTRATION_SCHEMA_VERSION,
@@ -115,6 +118,19 @@ def _uuid_or_none(value) -> UUID | None:
         return UUID(str(value))
     except (ValueError, TypeError):
         return None
+
+
+def _degraded_draft_ids(verified) -> frozenset[str]:
+    """从 verified CheckResult 派生 degraded DraftSection id 集合（v1.2.3）。
+
+    degraded 章节的 findings 一律归入 WARNING（与 finalize_on_approve 同规则）：
+    半实证占位不因内容本身升级 critical。
+    """
+    return frozenset(
+        draft.section_id
+        for draft in verified.verified_report.verified_drafts
+        if draft.status == DEGRADED_SECTION_STATUS
+    )
 
 
 _ACTIVE_RUN_VALUES = {status.value for status in ACTIVE_WORKFLOW_RUN_STATUSES}
@@ -956,21 +972,15 @@ class ResearchOrchestrationService:
         if self._report_check_service is None or self._report_audit_service is None:
             raise RuntimeError("acceptance guard services not bound")
         check = await self._report_check_service.verify_check_result_integrity(check_result_id)
-        if check.status != CHECK_STATUS_PASS:
-            barriers.append("存在确定性校验失败（integrity check），不能接受当前报告")
         verified = await self._report_audit_service.verify_audit_integrity(audit_id)
-        for issue in verified.issues:
-            if issue.severity == AUDIT_SEVERITY_CRITICAL:
-                barriers.append("存在 critical 审核问题，不能接受当前报告")
-            elif (
-                "unresolved_conflict" == issue.issue_type and issue.severity == AUDIT_SEVERITY_HIGH
-            ):
-                barriers.append("存在待裁决的高危数字冲突，不能接受当前报告")
-            elif (
-                "unsupported_by_evidence" == issue.issue_type
-                and issue.severity == AUDIT_SEVERITY_HIGH
-            ):
-                barriers.append("存在缺乏证据支撑的数值主张，不能接受当前报告")
+        severity = classify_report_severity(
+            finding_codes=[f.code for f in check.findings],
+            finding_section_ids=[f.section_id for f in check.findings],
+            issues=list(verified.issues),
+            degraded_section_ids=_degraded_draft_ids(check),
+        )
+        if severity is AuditSeverity.CRITICAL:
+            barriers.append("存在关键审核问题，不能接受当前报告")
         return barriers
 
     # ------------------------------------------------------------------ internal

@@ -27,6 +27,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
+from app.audit.contracts import ReportAuditRequest
 from app.audit.service import ReportAuditService
 from app.core.config import get_settings
 from app.core.runtime import configure_asyncio_runtime
@@ -75,7 +76,6 @@ from tests.integration.test_report_audit_service import (
 )
 from tests.integration.test_report_check_integrity import (
     _draft_mixed_sections,
-    _risks_gap_omitted_decision,
 )
 from tests.integration.test_revision_service import _cleanup_with_revisions
 from tests.integration.test_stage4_workflow import _seed_research_task
@@ -343,7 +343,7 @@ async def test_human_interrupt_approve_durable_resume(env, monkeypatch, connecti
     finally:
         await manager.close()
 
-    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE
+    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS
     assert result["human_decision"] == "approve"
     assert (await runner.get_run(run.run_id)).status.value == "completed"
     assert await _revision_count(env["sessionmaker"]) == 0
@@ -388,7 +388,7 @@ async def test_human_interrupt_resume_rewrite_then_approve(
     finally:
         await manager.close()
 
-    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE
+    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS
     assert result["human_decision"] == "approve"
     assert (await runner.get_run(run.run_id)).status.value == "completed"
     assert await _revision_count(env["sessionmaker"]) == 1
@@ -455,29 +455,46 @@ async def test_research_route_terminal(env, monkeypatch, connection_uri) -> None
 
 
 async def test_approve_requires_pass_check(env, monkeypatch, connection_uri) -> None:
-    """Check=fail 时 approve 不能 finalize → Stage5ApproveRequiresPassCheck。"""
+    """v1.2.3 Case2/3：critical 严重度时 approve 必须拒绝 finalize。
+
+    正常 Report（Check=pass）+ critical 审计 issue（unsupported_by_evidence →
+    数据真实性无法确认）→ 即使人工 approve 也不能服务式接受，Stage5ApproveRequiresPassCheck 必须
+    保持（​不删除【定性保护】。
+    """
     outline_id = await _create_outline(env, monkeypatch, connection_uri, _two_theme_models())
-    s3_fake = FakeDraftSectionModel(decision_factory=_risks_gap_omitted_decision)
-    draft_ids = await _draft_mixed_sections(env, outline_id, s3_fake)
+    fake = FakeDraftSectionModel(decision_factory=valid_decision_for)
+    draft_ids = await _draft_mixed_sections(
+        env, outline_id, FakeDraftSectionModel(decision_factory=valid_decision_for)
+    )
     report_service = ReportService(
-        env["sessionmaker"], DraftSectionService(env["sessionmaker"], s3_fake)
+        env["sessionmaker"], DraftSectionService(env["sessionmaker"], fake)
     )
     report = await report_service.create_or_get_report(
         ReportAssemblyDraft(outline_id=outline_id, draft_section_ids=tuple(draft_ids.values()))
     )
     check_service = ReportCheckService(env["sessionmaker"], report_service)
     check = await check_service.run_report_checks(report.report_id)
-    assert check.status == "fail"
-
+    assert check.status == "pass"
+    # 对应 审计：critical issue（unsupported_by_evidence → 数据真实性无法确认/critical）。
+    audit_model = FakeAuditModel(decision_factory=research_decision)
+    audit_service = ReportAuditService(env["sessionmaker"], audit_model, check_service)
+    audit = await audit_service.create_or_get_audit(
+        ReportAuditRequest(report_id=report.report_id, check_result_id=check.check_result_id)
+    )
     deps = _stage5_deps(
         env["sessionmaker"],
-        draft_model=s3_fake,
-        audit_model=FakeAuditModel(decision_factory=pass_decision),
+        draft_model=fake,
+        audit_model=audit_model,
         revision_model=FakeRevisionWriterModel(),
     )
     node = make_finalize_on_approve_node(deps)
     with pytest.raises(Stage5ApproveRequiresPassCheck):
-        await node({"check_result_id": str(check.check_result_id)})
+        await node(
+            {
+                "check_result_id": str(check.check_result_id),
+                "audit_id": str(audit.audit_id),
+            }
+        )
 
 
 # ---------------------------------------------------------------- degrade approve（v1.2.2 §2 B）

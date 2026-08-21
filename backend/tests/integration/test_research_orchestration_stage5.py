@@ -567,9 +567,9 @@ async def test_case2_waiting_human_approve_same_run(env, monkeypatch, connection
         # approve → same Stage5 run resume → orchestration complete。
         service = _bound_service(sessionmaker, deps, runner)
         result = await service.act_on_orchestration(orchestration_id, "approve", "审核通过")
-        assert result.status == "completed"
+        assert result.status == "completed_with_warnings"
         row = await _get_orchestration_row(sessionmaker, orchestration_id)
-        assert row["status"] == "completed"
+        assert row["status"] == "completed_with_warnings"
         assert row["current_phase"] == "completed"
 
         # 无重复 Stage5：仍 1 个 stage5 run（same run_id）、completed。

@@ -140,8 +140,18 @@ class FakeIssue:
 
 
 class FakeCheck:
-    def __init__(self, status):
+    def __init__(self, status, findings=(), verified_drafts=()):
         self.status = status
+        self.findings = findings
+        self.verified_report = type(
+            "FakeVerifiedReport", (), {"verified_drafts": verified_drafts}
+        )()
+
+
+class FakeFinding:
+    def __init__(self, code, section_id):
+        self.code = code
+        self.section_id = section_id
 
 
 class FakeAudit:
@@ -149,7 +159,9 @@ class FakeAudit:
         self.issues = issues
 
 
-def _build_service(monkeypatch, *, check_status, issues, sessionmaker=None):
+def _build_service(
+    monkeypatch, *, check_status, issues, sessionmaker=None, findings=(), verified_drafts=()
+):
     """构造 ResearchOrchestrationService，patch repo 类 + 注入 fake 守卫服务。"""
 
     service = ResearchOrchestrationService(
@@ -201,7 +213,7 @@ def _build_service(monkeypatch, *, check_status, issues, sessionmaker=None):
 
     class FakeCheckService:
         async def verify_check_result_integrity(self, check_result_id):
-            return FakeCheck(check_status)
+            return FakeCheck(check_status, findings=findings, verified_drafts=verified_drafts)
 
     class FakeAuditService:
         async def verify_audit_integrity(self, audit_id):
@@ -235,11 +247,16 @@ def _bind_closure(service, monkeypatch, *, decision, with_view=False):
 
 @pytest.mark.asyncio
 async def test_accept_blocked_when_check_fails(monkeypatch):
-    service = _build_service(monkeypatch, check_status="fail", issues=[])
+    service = _build_service(
+        monkeypatch,
+        check_status="fail",
+        issues=[],
+        findings=[FakeFinding("numeric_grounding", "S1")],
+    )
     closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
     with pytest.raises(BackflowReviewNotAcceptable) as exc:
         await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
-    assert any("确定性校验失败" in b for b in exc.value.barriers)
+    assert any("关键审核问题" in b for b in exc.value.barriers)
     assert closure.resolved == []
 
 
@@ -253,20 +270,21 @@ async def test_accept_blocked_when_critical_issue(monkeypatch):
     _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
     with pytest.raises(BackflowReviewNotAcceptable) as exc:
         await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
-    assert any("critical" in b for b in exc.value.barriers)
+    assert any("关键审核问题" in b for b in exc.value.barriers)
 
 
 @pytest.mark.asyncio
-async def test_accept_blocked_when_high_unresolved_conflict(monkeypatch):
+async def test_accept_allowed_when_unresolved_conflict(monkeypatch):
+    # v1.2.3 Case4: unresolved_conflict(conflict_gap 讨论不足) → warning 允许人工接受。
     service = _build_service(
         monkeypatch,
         check_status="pass",
         issues=[FakeIssue("unresolved_conflict", "high")],
     )
-    _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
-    with pytest.raises(BackflowReviewNotAcceptable) as exc:
-        await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
-    assert any("数字冲突" in b for b in exc.value.barriers)
+    closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
+    result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
+    assert result == "completed"
+    assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
 
 
 @pytest.mark.asyncio
