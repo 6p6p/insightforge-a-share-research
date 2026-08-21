@@ -24,8 +24,8 @@ from langgraph.types import interrupt
 
 from app.audit.contracts import ReportAuditRequest
 from app.audit.severity import (
-    AuditSeverity,
-    classify_report_severity,
+    AuditImpactScope,
+    classify_report_scope,
 )
 from app.draft_section.contracts import DEGRADED_SECTION_STATUS, DraftSectionRequest
 from app.draft_section.errors import (
@@ -478,17 +478,18 @@ def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
     """finalize_on_approve：spec R——approve 只能 finalize 当前 Report，且人工接受
     受**确定性 severity 无条件守卫**约束（Gate 0 不被人工裁决覆盖、不因降级特判）。
 
-    v1.2.3 分级（§2/§3/§4，确定性分类，LLM 不裁决接受级别）：
-    - severity=WARNING（degraded 占位 / model_unavailable / conflict_gap 讨论不足 /
-      explicit 标记不完整 / 非关键缺失）→ 允许人工批准 → terminal `finalize_with_warnings`
-      （带警告完成 → orchestration completed_with_warnings，不再是 run FAILED）；
-    - severity=CRITICAL（未来证据 / 时间对齐 / 引用或溯源失败 / 数字接地失败 /
-      数据真实性无法确认 / 确定性完整性失败）→ 仍 `Stage5ApproveRequiresPassCheck`
-      （run FAILED），人工批准被拒绝，需补充研究或取消；
-    - severity=INFO → finalize（无警告完成）。
+    v1.2.4 impact scope（确定性分类，LLM 不裁决接受级别）：
+    - REPORT_BLOCKING（未来证据 / 时间穿越 / 伪造数字 / citation/provenance 严重失败 /
+      numeric grounding 无法确认关键财务事实 / 数据真实性无法确认）→ 阻断：
+      `Stage5ApproveRequiresPassCheck`（run FAILED），人工批准被拒绝；
+    - SECTION_WARNING / SECTION_UNAVAILABLE（章节级缺陷：degraded 占位 /
+      model_unavailable / draft_quality_guard / S5/S6 风险章节未生成 /
+      conflict_gap 讨论不足 / 非关键章节缺少分析）→ 允许人工批准 →
+      terminal `finalize_with_warnings`（带警告完成 → completed_with_warnings）；
+    - INFO → finalize（无警告完成）。
 
-    说明：不再特判 degraded section 特别放行；degenerated 章节的 findings 同步归入
-    WARNING，保持 v1.2.2 退化场景不被破坏。
+    说明：影响范围（REPORT vs SECTION）与 severity 正交；章节级缺陷不再阻断整个
+    报告，数据真实性 guard 保持（REPORT 级仍无条件阻断）。
     """
 
     async def finalize_on_approve(state) -> dict:
@@ -508,17 +509,19 @@ def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
         if audit_id is not None:
             audit = await deps.report_audit_service.verify_audit_integrity(audit_id)
             issues = list(audit.issues)
-        severity = classify_report_severity(
+        scope = classify_report_scope(
             finding_codes=[f.code for f in verified.findings],
             finding_section_ids=[f.section_id for f in verified.findings],
             issues=issues,
             degraded_section_ids=_degraded_section_ids(verified),
         )
-        if severity is AuditSeverity.WARNING:
-            return {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS}
-        if severity is AuditSeverity.CRITICAL:
+        if scope is AuditImpactScope.REPORT_BLOCKING:
+            # 只有破坏整体可信度（REPORT 级）才阻断人工批准
             raise Stage5ApproveRequiresPassCheck()
-        return {"terminal": STAGE5_TERMINAL_FINALIZE}
+        if scope is AuditImpactScope.INFO:
+            return {"terminal": STAGE5_TERMINAL_FINALIZE}
+        # SECTION_WARNING / SECTION_UNAVAILABLE：允许人工批准，带警告完成
+        return {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS}
 
     return finalize_on_approve
 

@@ -49,8 +49,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.severity import (
-    AuditSeverity,
-    classify_report_severity,
+    AuditImpactScope,
+    classify_report_scope,
 )
 from app.core.errors import ActiveWorkflowRunExists
 from app.core.logging import get_logger
@@ -220,6 +220,7 @@ class BackflowReviewView:
     decision: str | None = None
     comment: str | None = None
     decided_at: datetime | None = None
+    impact_scope: str | None = None  # v1.2.4 impact scope (REPORT/SECTION/INFO)
     acceptance_barriers: list[str] = field(default_factory=list)
 
 
@@ -828,12 +829,16 @@ class ResearchOrchestrationService:
             request.backflow_human_request_id,
         )
         barriers: list[str] = []
+        impact_scope: str | None = None
         if decision is None:
             try:
-                barriers = await self._acceptance_barriers(orchestration_id)
+                scope, barrier_list = await self._acceptance_evaluation(orchestration_id)
+                impact_scope = scope.value
+                barriers = barrier_list
             except RuntimeError:
-                # 守卫服务未绑定（unit 测试 / 只读场景）→ 不计算 barrier。
+                # 守卫服务未绑定（unit 测试 / 只读场景）→ 不计算 barrier/scope。
                 barriers = []
+                impact_scope = None
         return BackflowReviewView(
             orchestration_id=orchestration_id,
             backflow_human_request_id=request.backflow_human_request_id,
@@ -841,6 +846,7 @@ class ResearchOrchestrationService:
             decision=decision.decision if decision is not None else None,
             comment=decision.comment if decision is not None else None,
             decided_at=decision.decided_at if decision is not None else None,
+            impact_scope=impact_scope,
             acceptance_barriers=barriers,
         )
 
@@ -903,7 +909,7 @@ class ResearchOrchestrationService:
             return await self.cancel_orchestration(orchestration_id)
 
         if decision == BACKFLOW_DECISION_ACCEPT:
-            barriers = await self._acceptance_barriers(orchestration_id)
+            scope, barriers = await self._acceptance_evaluation(orchestration_id)
             if barriers:
                 raise BackflowReviewNotAcceptable(barriers)
             await self._closure_service.resolve_review(
@@ -911,11 +917,20 @@ class ResearchOrchestrationService:
                 decision=BACKFLOW_DECISION_ACCEPT,
                 comment=comment,
             )
-            async with self._sessionmaker() as session:
-                await ResearchOrchestrationRepository(session).mark_completed(
-                    orchestration_id, datetime.now(UTC)
-                )
-                await session.commit()
+            # v1.2.4：章节级缺陷（SECTION_WARNING / SECTION_UNAVAILABLE）接受 →
+            # completed_with_warnings；无影响（INFO）→ completed。
+            if scope is AuditImpactScope.INFO:
+                async with self._sessionmaker() as session:
+                    await ResearchOrchestrationRepository(session).mark_completed(
+                        orchestration_id, datetime.now(UTC)
+                    )
+                    await session.commit()
+            else:
+                async with self._sessionmaker() as session:
+                    await ResearchOrchestrationRepository(session).mark_completed_with_warnings(
+                        orchestration_id, datetime.now(UTC)
+                    )
+                    await session.commit()
             return await self.get_orchestration(orchestration_id)
 
         # extra_research: manual continuation（bounded）：
@@ -937,13 +952,18 @@ class ResearchOrchestrationService:
         self._execution_manager.schedule_resume(orchestration_id, kind)
         return await self.get_orchestration(orchestration_id)
 
-    async def _acceptance_barriers(self, orchestration_id: UUID) -> list[str]:
-        """accept 的确定性守卫：返回不可接受的中文 barrier 列表（空 → 可接受）。
+    async def _acceptance_evaluation(
+        self, orchestration_id: UUID
+    ) -> tuple[AuditImpactScope, list[str]]:
+        """accept 的确定性守卫：返回 (impact_scope, 不可接受的中文 barrier 列表)。
 
-        只允许 non-critical evidence gap / wording / optional context / non-critical
-        研究局限；拒绝 unsupported numeric claim / provenance violation / critical
-        evidence missing / confirmed material numeric conflict / deterministic
-        integrity check failure。**模型不参与**——只读 verified Check + verified
+        - scope=REPORT_BLOCKING → 不可接受（barriers 非空，阻断 accept）；
+        - scope=SECTION_WARNING / SECTION_UNAVAILABLE / INFO → 可接受（barriers 空，
+          允许人工接受，按 scope 决定带警告完成或正常完成）。
+
+        只拒绝 REPORT 级（unsupported numeric claim / provenance violation /
+        data-truth 失败 / 确定性完整性失败）；章节级缺陷（degraded / unavailable /
+        conflict_gap）不阻断。**模型不参与**——只读 verified Check + verified
         Audit issues。
         """
         barriers: list[str] = []
@@ -956,7 +976,7 @@ class ResearchOrchestrationService:
                 orchestration_id, ChildStage.STAGE5.value, attempt_no
             )
         if child is None:
-            return ["无法定位当前报告，不能接受"]
+            return (AuditImpactScope.REPORT_BLOCKING, ["无法定位当前报告，不能接受"])
         if self._stage5_runner is None:
             raise RuntimeError("stage5 runner not bound for acceptance guard")
         stage5_state = await self._stage5_runner.read_checkpoint_state(child.workflow_run_id)
@@ -965,23 +985,26 @@ class ResearchOrchestrationService:
         if audit_id is None or check_result_id is None:
             # P0 UX 修复：守卫仍严格拒绝（无 audit/check 不可接受），但理由必须可理解：
             # 当前处于「自动审核失败 / 审核未完成」而非神秘「缺记录」。
-            return [
-                "当前报告尚未完成自动审核（审核记录未生成），暂不能接受；"
-                "请选择「再次补充研究」重新验证，或取消研究。"
-            ]
+            return (
+                AuditImpactScope.REPORT_BLOCKING,
+                [
+                    "当前报告尚未完成自动审核（审核记录未生成），暂不能接受；"
+                    "请选择「再次补充研究」重新验证，或取消研究。"
+                ],
+            )
         if self._report_check_service is None or self._report_audit_service is None:
             raise RuntimeError("acceptance guard services not bound")
         check = await self._report_check_service.verify_check_result_integrity(check_result_id)
         verified = await self._report_audit_service.verify_audit_integrity(audit_id)
-        severity = classify_report_severity(
+        scope = classify_report_scope(
             finding_codes=[f.code for f in check.findings],
             finding_section_ids=[f.section_id for f in check.findings],
             issues=list(verified.issues),
             degraded_section_ids=_degraded_draft_ids(check),
         )
-        if severity is AuditSeverity.CRITICAL:
+        if scope is AuditImpactScope.REPORT_BLOCKING:
             barriers.append("存在关键审核问题，不能接受当前报告")
-        return barriers
+        return (scope, barriers)
 
     # ------------------------------------------------------------------ internal
 

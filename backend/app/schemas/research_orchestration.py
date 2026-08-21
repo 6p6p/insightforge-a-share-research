@@ -78,3 +78,5 @@ class BackflowReviewResponse(BaseModel):
     comment: str | None = None
     decided_at: datetime | None = None
     acceptance_barriers: list[str] = []
+    impact_scope: str | None = None  # v1.2.4 impact scope
+

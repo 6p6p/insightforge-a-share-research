@@ -80,6 +80,9 @@ export interface BackflowReview {
   decided_at: string | null;
   /** accept 被确定性守卫拒绝时的中文理由（空 → 可接受）。 */
   acceptance_barriers: string[];
+  /** v1.2.4 impact scope：report_blocking（暂不能接受）/ section_warning /
+   * section_unavailable（带审核提醒可接受）/ info。 */
+  impact_scope?: string | null;
 }
 
 /** backflow manual closure action（POST /backflow-review/actions）。 */

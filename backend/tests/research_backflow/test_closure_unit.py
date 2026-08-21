@@ -177,6 +177,7 @@ def _build_service(
     )
 
     orchestration = FakeOrchestrationRow()
+    service._fake_orchestration_row = orchestration
 
     class FakeRepo:
         def __init__(self, session):
@@ -187,6 +188,9 @@ def _build_service(
 
         async def mark_completed(self, orchestration_id, completed_at):
             orchestration.status = "completed"
+        async def mark_completed_with_warnings(self, orchestration_id, completed_at):
+            orchestration.status = "completed_with_warnings"
+
 
     class FakeChildRepo:
         def __init__(self, session):
@@ -275,7 +279,8 @@ async def test_accept_blocked_when_critical_issue(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_accept_allowed_when_unresolved_conflict(monkeypatch):
-    # v1.2.3 Case4: unresolved_conflict(conflict_gap 讨论不足) → warning 允许人工接受。
+    # v1.2.4：unresolved_conflict(conflict_gap 讨论不足) → SECTION_WARNING 允许人工接受
+    # （带警告完成 → completed_with_warnings，不再是普通 completed）。
     service = _build_service(
         monkeypatch,
         check_status="pass",
@@ -284,11 +289,13 @@ async def test_accept_allowed_when_unresolved_conflict(monkeypatch):
     closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
     result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
     assert result == "completed"
+    assert service._fake_orchestration_row.status == "completed_with_warnings"
     assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
 
 
 @pytest.mark.asyncio
 async def test_accept_allowed_for_non_critical_issues(monkeypatch):
+    # wording_overclaim → INFO → completed（无警告正常完成）。
     service = _build_service(
         monkeypatch,
         check_status="pass",
@@ -297,9 +304,9 @@ async def test_accept_allowed_for_non_critical_issues(monkeypatch):
     closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
     result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
     assert result == "completed"
+    assert service._fake_orchestration_row.status == "completed"
     assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
     # mark_completed 把 orchestration 行置为 completed（FakeRepo 已记录）。
-
 
 @pytest.mark.asyncio
 async def test_extra_research_schedules_bounded_round(monkeypatch):

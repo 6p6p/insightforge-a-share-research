@@ -6,9 +6,16 @@
 """
 
 from app.audit.severity import (
+    AuditImpactScope,
     AuditSeverity,
+    accepts_with_scope,
+    audit_issue_scope,
     audit_issue_severity,
+    check_finding_scope,
     check_finding_severity,
+    classify_check_scope,
+    classify_issue_scope,
+    classify_report_scope,
     classify_report_severity,
     severity_rank,
     stricter,
@@ -136,3 +143,200 @@ def test_classify_report_degraded_non_degraded_mix_keeps_critical() -> None:
         degraded_section_ids=frozenset({"S3"}),
     )
     assert sev is AuditSeverity.CRITICAL
+
+
+
+
+# ================================================================ v1.2.4 impact scope
+
+def test_scope_ranks_and_stricter() -> None:
+    from app.audit.severity import impact_scope_rank, stricter_scope
+
+    assert impact_scope_rank(AuditImpactScope.INFO) < impact_scope_rank(
+        AuditImpactScope.SECTION_UNAVAILABLE
+    )
+    assert impact_scope_rank(AuditImpactScope.SECTION_UNAVAILABLE) < impact_scope_rank(
+        AuditImpactScope.SECTION_WARNING
+    )
+    assert impact_scope_rank(AuditImpactScope.SECTION_WARNING) < impact_scope_rank(
+        AuditImpactScope.REPORT_BLOCKING
+    )
+    # stricter_scope 取更严
+    assert (
+        stricter_scope(AuditImpactScope.INFO, AuditImpactScope.REPORT_BLOCKING)
+        is AuditImpactScope.REPORT_BLOCKING
+    )
+    assert (
+        stricter_scope(
+            AuditImpactScope.SECTION_WARNING, AuditImpactScope.SECTION_UNAVAILABLE
+        )
+        is AuditImpactScope.SECTION_WARNING
+    )
+
+
+def test_scope_accepts() -> None:
+    assert not accepts_with_scope(AuditImpactScope.REPORT_BLOCKING)
+    assert accepts_with_scope(AuditImpactScope.SECTION_WARNING)
+    assert accepts_with_scope(AuditImpactScope.SECTION_UNAVAILABLE)
+    assert accepts_with_scope(AuditImpactScope.INFO)
+
+
+def test_check_finding_scope_report_codes() -> None:
+    for code in (
+        "numeric_grounding",
+        "citation_provenance_closure",
+        "claim_reference_closure",
+        "evidence_reference_closure",
+        "forbidden_investment_language",
+    ):
+        assert check_finding_scope(code) is AuditImpactScope.REPORT_BLOCKING, code
+
+
+def test_check_finding_scope_section_codes() -> None:
+    for code in (
+        "outline_section_coverage",
+        "draft_section_integrity",
+        "conflict_gap_preservation",
+        "empty_section",
+        "internal_alias_leak",
+    ):
+        assert check_finding_scope(code) is AuditImpactScope.SECTION_WARNING, code
+
+
+def test_check_finding_scope_unknown_conservative_blocking() -> None:
+    # 未知 code → 保守 REPORT_BLOCKING（绝不悄悄放行）
+    assert check_finding_scope("some_unknown_code") is AuditImpactScope.REPORT_BLOCKING
+
+
+def test_audit_issue_scope_report_types() -> None:
+    for t in (
+        "unsupported_by_evidence",
+        "stale_or_temporally_misaligned",
+        "evidence_mismatch",
+        "claim_misrepresentation",
+    ):
+        assert audit_issue_scope(t) is AuditImpactScope.REPORT_BLOCKING, t
+
+
+def test_audit_issue_scope_section_types() -> None:
+    for t in (
+        "weak_source_quality",
+        "omitted_counterevidence",
+        "causal_overreach",
+        "valuation_overreach",
+        "insufficient_evidence",
+        "unresolved_conflict",
+    ):
+        assert audit_issue_scope(t) is AuditImpactScope.SECTION_WARNING, t
+
+
+def test_audit_issue_scope_info_types() -> None:
+    assert audit_issue_scope("wording_overclaim") is AuditImpactScope.INFO
+
+
+def test_audit_issue_scope_unknown_conservative() -> None:
+    assert audit_issue_scope("unknown_type") is AuditImpactScope.REPORT_BLOCKING
+
+
+def test_scope_section_issue_allows_accept() -> None:
+    # §6(1) S5/S6 风险章节缺失 / model_unavailable → section 级 → 允许接受
+    scope = classify_report_scope(
+        finding_codes=["outline_section_coverage"],  # S5 未生成
+        finding_section_ids=["S5"],
+        issues=[],
+        degraded_section_ids=frozenset(),
+    )
+    assert scope is AuditImpactScope.SECTION_WARNING
+    assert accepts_with_scope(scope)
+
+
+def test_scope_degraded_section_unavailable_allows_accept() -> None:
+    # model_unavailable → degraded section → SECTION_UNAVAILABLE → 允许接受
+    scope = classify_report_scope(
+        finding_codes=["empty_section"],
+        finding_section_ids=["S3"],
+        issues=[FakeIssue("insufficient_evidence", "S3")],
+        degraded_section_ids=frozenset({"S3"}),
+    )
+    assert scope is AuditImpactScope.SECTION_UNAVAILABLE
+    assert accepts_with_scope(scope)
+
+
+def test_scope_numeric_grounding_blocks() -> None:
+    # §6(2) numeric grounding critical → REPORT_BLOCKING → 阻断接受
+    scope = classify_report_scope(
+        finding_codes=["numeric_grounding"],
+        finding_section_ids=["S1"],
+        issues=[],
+        degraded_section_ids=frozenset(),
+    )
+    assert scope is AuditImpactScope.REPORT_BLOCKING
+    assert not accepts_with_scope(scope)
+
+
+def test_scope_future_evidence_blocks() -> None:
+    # §6(3) 未来证据 / temporal violation → REPORT_BLOCKING → 阻断接受
+    scope = classify_report_scope(
+        finding_codes=[],
+        finding_section_ids=[],
+        issues=[FakeIssue("stale_or_temporally_misaligned", "S1")],
+        degraded_section_ids=frozenset(),
+    )
+    assert scope is AuditImpactScope.REPORT_BLOCKING
+    assert not accepts_with_scope(scope)
+
+
+def test_scope_unknown_issue_conservative_blocking() -> None:
+    # §6(4) 未知 issue type → 保守 REPORT_BLOCKING
+    scope = classify_report_scope(
+        finding_codes=[],
+        finding_section_ids=[],
+        issues=[FakeIssue("some_unknown_type", "S1")],
+        degraded_section_ids=frozenset(),
+    )
+    assert scope is AuditImpactScope.REPORT_BLOCKING
+
+
+def test_scope_report_beats_section() -> None:
+    # 一节 warning + 一节 report-blocking → REPORT_BLOCKING
+    scope = classify_report_scope(
+        finding_codes=["outline_section_coverage", "numeric_grounding"],
+        finding_section_ids=["S5", "S1"],
+        issues=[FakeIssue("unresolved_conflict", "S2")],
+        degraded_section_ids=frozenset({"S3"}),
+    )
+    assert scope is AuditImpactScope.REPORT_BLOCKING
+
+
+def test_scope_no_findings_info() -> None:
+    scope = classify_report_scope(
+        finding_codes=[],
+        finding_section_ids=[],
+        issues=[],
+        degraded_section_ids=frozenset(),
+    )
+    assert scope is AuditImpactScope.INFO
+
+
+def test_scope_degraded_report_critical_stays_non_blocking() -> None:
+    # v1.2.2-A 兼容：degraded 占位章节（model_unavailable 诚实占位，报告无数据/引文）
+    # findings 一律 SECTION_UNAVAILABLE，不阻断接受（与 v1.2.3 degraded->warning 一致）。
+    scope = classify_report_scope(
+        finding_codes=["numeric_grounding"],
+        finding_section_ids=["S3"],
+        issues=[],
+        degraded_section_ids=frozenset({"S3"}),
+    )
+    assert scope is AuditImpactScope.SECTION_UNAVAILABLE
+    assert accepts_with_scope(scope)
+
+
+def test_classify_check_scope_and_issue_scope_union() -> None:
+    assert classify_check_scope([], [], frozenset()) is AuditImpactScope.INFO
+    assert classify_issue_scope([], frozenset()) is AuditImpactScope.INFO
+    assert classify_check_scope(
+        ["empty_section"], ["S2"], frozenset()
+    ) is AuditImpactScope.SECTION_WARNING
+    assert classify_issue_scope(
+        [FakeIssue("unsupported_by_evidence", "S1")], frozenset()
+    ) is AuditImpactScope.REPORT_BLOCKING

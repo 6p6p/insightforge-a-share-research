@@ -280,6 +280,32 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     expect(screen.getByRole('button', { name: '再次补充研究' })).toBeEnabled();
   });
 
+  it('research_backflow + section_warning scope → 显示审核提醒且接受可用（v1.2.4）', async () => {
+    mocks.getBackflowReview.mockResolvedValue({
+      orchestration_id: 'orch-1',
+      backflow_human_request_id: 'req-1',
+      reason: 'research_backflow_limit_reached',
+      decision: null,
+      comment: null,
+      decided_at: null,
+      acceptance_barriers: [],
+      impact_scope: 'section_warning',
+    });
+    renderWithProviders(
+      <OrchestrationBanner
+        orchestration={withPhase({
+          current_phase: 'research_backflow',
+          manual_reason: 'research_backflow_limit_reached',
+        })}
+        companyId="c1"
+      />,
+    );
+    await screen.findByText('当前报告存在审核提醒');
+    expect(screen.getByText(/部分章节存在缺口，但其他内容仍可查看与接受/)).toBeInTheDocument();
+    expect(screen.queryByText('当前报告存在关键问题，暂不能接受')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '接受当前报告' })).toBeEnabled();
+  });
+
   it('research_backflow + structured_data_refresh_required → 显示结构化缺口警告，不显示补资料面板/继续研究', () => {
     renderWithProviders(
       <OrchestrationBanner

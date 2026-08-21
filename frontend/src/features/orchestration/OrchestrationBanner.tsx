@@ -895,6 +895,15 @@ function BackflowClosureCard({
   const acceptDisabled = barriers.length > 0 || mutation.isPending;
   const submitting = mutation.isPending;
   const done = review?.decision != null;
+  /** v1.2.4：impact scope（nullable，旧响应缺失时视为 blocked/unknown）。
+   * report_blocking → 暂不能接受（❌）；section_warning / section_unavailable →
+   * 带审核提醒可接受（⚠）；info / 缺省 → 无提醒。 */
+  const impactScope: string | null = review?.impact_scope ?? null;
+  const sectionWarning =
+    !done &&
+    impactScope != null &&
+    impactScope !== 'report_blocking' &&
+    impactScope !== 'info';
 
   /** 尽力而为：把用户在可选面板中附带的资料先上传/导入，失败也不阻断动作。 */
   const flushEvidenceBestEffort = async (): Promise<void> => {
@@ -951,6 +960,14 @@ function BackflowClosureCard({
             showIcon
             message="当前报告存在关键问题，暂不能接受"
             description={barriers.join('；')}
+          />
+        ) : null}
+        {sectionWarning ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="当前报告存在审核提醒"
+            description="部分章节存在缺口，但其他内容仍可查看与接受。"
           />
         ) : null}
         <Collapse
