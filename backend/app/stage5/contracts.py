@@ -34,12 +34,16 @@ STAGE5_GRAPH_VERSION = "1"
 
 # terminal 值（run 终态投影；run status 由 runner 映射）。
 STAGE5_TERMINAL_FINALIZE = "finalize"
+# v1.2.2：人工批准带警告完成——Check 非 pass 但全部 findings 均可归因于
+# degraded section（诚实占位，人工已显式审核）→ 允许 finalize 但保留警告语义。
+STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS = "finalize_with_warnings"
 STAGE5_TERMINAL_RESEARCH_REQUIRED = "research_required"
 STAGE5_TERMINAL_REVISION_LIMIT_EXCEEDED = "revision_limit_exceeded"
 STAGE5_TERMINAL_CANCELLED = "cancelled"
 
 STAGE5_TERMINAL_VALUES = (
     STAGE5_TERMINAL_FINALIZE,
+    STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS,
     STAGE5_TERMINAL_RESEARCH_REQUIRED,
     STAGE5_TERMINAL_REVISION_LIMIT_EXCEEDED,
     STAGE5_TERMINAL_CANCELLED,

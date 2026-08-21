@@ -56,7 +56,10 @@ from app.db.base import Base
 
 _SHA256_CHECK = "~ '^[0-9a-f]{64}$'"
 
-_ORCH_STATUS = "status IN ('pending','running','waiting_human','completed','failed','cancelled')"
+_ORCH_STATUS = (
+    "status IN ('pending','running','waiting_human','completed',"
+    "'completed_with_warnings','failed','cancelled')"
+)
 _ORCH_PHASE = (
     "current_phase IN ('planning','routing','preparing','fulfilling','waiting_manual',"
     "'stage4','awaiting_stage5','stage5','research_backflow','completed')"

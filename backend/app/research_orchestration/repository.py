@@ -235,6 +235,23 @@ class ResearchOrchestrationRepository:
             current_phase=OrchestrationPhase.COMPLETED.value,
         )
 
+    async def mark_completed_with_warnings(
+        self, orchestration_id: UUID, completed_at: datetime
+    ) -> ResearchOrchestrationModel | None:
+        """v1.2.2: human approve accepted with warnings (degraded section reviewed).
+
+        Only difference from mark_completed: status = completed_with_warnings
+        (terminal, semantically = research completed with review reminders).
+        """
+        return await self._set_terminal(
+            orchestration_id,
+            "completed_with_warnings",
+            completed_at,
+            error_code=None,
+            error_message=None,
+            current_phase=OrchestrationPhase.COMPLETED.value,
+        )
+
     async def mark_cancelled(
         self, orchestration_id: UUID, completed_at: datetime
     ) -> ResearchOrchestrationModel | None:

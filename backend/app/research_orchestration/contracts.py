@@ -81,6 +81,7 @@ class OrchestrationStatus(StrEnum):
     RUNNING = "running"
     WAITING_HUMAN = "waiting_human"
     COMPLETED = "completed"
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     FAILED = "failed"
     CANCELLED = "cancelled"
 

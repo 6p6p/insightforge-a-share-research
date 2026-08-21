@@ -46,6 +46,7 @@ from app.research_orchestration.errors import ResearchOrchestrationIntegrityErro
 from app.research_orchestration.repository import ResearchOrchestrationRepository
 from app.stage5.contracts import (
     STAGE5_TERMINAL_CANCELLED,
+    STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS,
     STAGE5_TERMINAL_RESEARCH_REQUIRED,
     Stage5RequestBuilder,
     Stage5WorkflowRequest,
@@ -284,6 +285,8 @@ def make_collect_synthesis_node(deps: ResearchOrchestrationDependencies):
 # `stage5_run_status` 路由取值（route_stage5_result 判定；child run 状态 +
 # checkpoint terminal 投影，spec L）。
 STAGE5_ROUTE_COMPLETED = "completed"
+# v1.2.2: stage5 finalize_with_warnings -> orchestration completed_with_warnings
+STAGE5_ROUTE_COMPLETED_WITH_WARNINGS = "completed_with_warnings"
 STAGE5_ROUTE_WAITING_HUMAN = "waiting_human"
 STAGE5_ROUTE_RESEARCH_REQUIRED = "research_required"
 STAGE5_ROUTE_FAILED = "failed"
@@ -295,6 +298,7 @@ STAGE5_ROUTE_AUDIT_DEGRADED = "audit_degraded"
 _STAGE5_ROUTE_VALUES = frozenset(
     {
         STAGE5_ROUTE_COMPLETED,
+        STAGE5_ROUTE_COMPLETED_WITH_WARNINGS,
         STAGE5_ROUTE_WAITING_HUMAN,
         STAGE5_ROUTE_RESEARCH_REQUIRED,
         STAGE5_ROUTE_FAILED,
@@ -395,6 +399,9 @@ async def _stage5_outcome(
         }
     if terminal == STAGE5_TERMINAL_CANCELLED:
         return STAGE5_ROUTE_CANCELLED, {}
+    if terminal == STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS:
+        # v1.2.2: 人工批准带警告完成 -> 路由到 completed_with_warnings 终态。
+        return STAGE5_ROUTE_COMPLETED_WITH_WARNINGS, {}
     return STAGE5_ROUTE_COMPLETED, {}
 
 
@@ -553,6 +560,24 @@ def make_complete_orchestration_node(deps: ResearchOrchestrationDependencies):
         return {"current_phase": _phase_value(OrchestrationPhase.COMPLETED)}
 
     return complete_orchestration
+
+
+def make_complete_orchestration_with_warnings_node(deps: ResearchOrchestrationDependencies):
+    """complete_orchestration_with_warnings：v1.2.2 人工批准带警告完成。
+
+    Stage5 finalize_with_warnings → orchestration status=completed_with_warnings
+    （terminal；product 语义 = 研究完成且包含审核提醒，不是普通 completed）。
+    """
+
+    async def complete_orchestration_with_warnings(state) -> dict:
+        async with deps.sessionmaker() as session:
+            await ResearchOrchestrationRepository(session).mark_completed_with_warnings(
+                UUID(state["orchestration_id"]), datetime.now(UTC)
+            )
+            await session.commit()
+        return {"current_phase": _phase_value(OrchestrationPhase.COMPLETED)}
+
+    return complete_orchestration_with_warnings
 
 
 # ------------------------------------------------------------------ backflow loop（7A.2B.3）

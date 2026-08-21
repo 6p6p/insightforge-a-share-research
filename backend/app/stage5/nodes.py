@@ -23,7 +23,7 @@ from uuid import UUID
 from langgraph.types import interrupt
 
 from app.audit.contracts import ReportAuditRequest
-from app.draft_section.contracts import DraftSectionRequest
+from app.draft_section.contracts import DEGRADED_SECTION_STATUS, DraftSectionRequest
 from app.draft_section.errors import (
     DraftSectionError,
     DraftSectionIntegrityError,
@@ -54,6 +54,7 @@ from app.stage5.contracts import (
     MAX_STAGE5_REVISION_ROUNDS,
     STAGE5_TERMINAL_CANCELLED,
     STAGE5_TERMINAL_FINALIZE,
+    STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS,
     STAGE5_TERMINAL_RESEARCH_REQUIRED,
     STAGE5_TERMINAL_REVISION_LIMIT_EXCEEDED,
 )
@@ -439,11 +440,48 @@ def make_wait_human_node():
     return wait_human
 
 
+def _degraded_section_ids(verified) -> frozenset[str]:
+    """从 verified Report 派生 degraded section id 集合（v1.2.2）。
+
+    degraded DraftSection（诚实占位）本身就是人工审核的对象：其内容不该被
+    deterministic Check 当作「正常内容瑕疵」阻止人工批准。返回这些 section 的
+    id 集合，供 finalize_on_approve 判定 findings 是否全部可归因。
+    """
+    return frozenset(
+        draft.section_id
+        for draft in verified.verified_report.verified_drafts
+        if draft.status == DEGRADED_SECTION_STATUS
+    )
+
+
+def _findings_all_attributable_to_degraded(verified, degraded_section_ids: frozenset[str]) -> bool:
+    """Check findings 是否全部落在 degraded section（v1.2.2 判定规则）。
+
+    - 空 findings 不算（caller 已区分 pass/fail，本函数只服务 fail 分支）；
+    - findings 的 section_id 全部 ∈ degraded_section_ids → 可人工接受（带警告）；
+    - 任一 finding 不在 degraded section（非诚实占位导致的真实内容瑕疵）→
+      **阻断**：保持 `Stage5ApproveRequiresPassCheck`，人工批准不被接受。
+    """
+    if not verified.findings:
+        return False
+    return all(
+        finding.section_id is not None and finding.section_id in degraded_section_ids
+        for finding in verified.findings
+    )
+
+
 def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
     """finalize_on_approve：spec R——approve 只能 finalize 当前 Report 且前提
     deterministic Check=pass（Gate 0 不被人工裁决覆盖）。
 
-    Check=fail → `Stage5ApproveRequiresPassCheck`（run FAILED，不静默改道）。
+    v1.2.2 分级（§2 A/B）：
+    - Check=pass → finalize（无警告完成）；
+    - Check=fail 且**全部 findings 可归因于 degraded section**（S5 因
+      model_unavailable 等诚实降级；人工已显式审核该占位）→ 允许人工批准 →
+      terminal `finalize_with_warnings`（带警告完成，不再是 run FAILED）；
+    - Check=fail 且存在**不可归因 finding**（真实内容瑕疵 / 证据链断 / 未来
+      证据等阻断级问题）→ 仍 `Stage5ApproveRequiresPassCheck`（run FAILED），
+      人工批准被拒绝，需补充研究或取消，绝不静默放行。
     """
 
     async def finalize_on_approve(state) -> dict:
@@ -454,6 +492,9 @@ def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
             UUID(check_result_id)
         )
         if verified.status != CHECK_STATUS_PASS:
+            degraded_section_ids = _degraded_section_ids(verified)
+            if _findings_all_attributable_to_degraded(verified, degraded_section_ids):
+                return {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS}
             raise Stage5ApproveRequiresPassCheck()
         return {"terminal": STAGE5_TERMINAL_FINALIZE}
 

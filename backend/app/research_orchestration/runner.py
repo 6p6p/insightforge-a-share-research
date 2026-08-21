@@ -56,6 +56,7 @@ from app.workflows.checkpoint import LangGraphCheckpointManager
 _TERMINAL_ORCHESTRATION_STATUSES = frozenset(
     {
         OrchestrationStatus.COMPLETED.value,
+        OrchestrationStatus.COMPLETED_WITH_WARNINGS.value,
         OrchestrationStatus.FAILED.value,
         OrchestrationStatus.CANCELLED.value,
     }

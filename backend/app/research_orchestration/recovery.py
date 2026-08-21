@@ -44,6 +44,7 @@ logger = get_logger("app.research_orchestration_recovery")
 _TERMINAL_ORCHESTRATION_STATUSES = frozenset(
     {
         OrchestrationStatus.COMPLETED.value,
+        OrchestrationStatus.COMPLETED_WITH_WARNINGS.value,
         OrchestrationStatus.FAILED.value,
         OrchestrationStatus.CANCELLED.value,
     }

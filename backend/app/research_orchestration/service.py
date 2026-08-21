@@ -407,7 +407,10 @@ class ResearchOrchestrationService:
             )
 
         # 无 active：latest 只可能是 terminal（completed / failed / cancelled）。
-        if latest.status == OrchestrationStatus.COMPLETED.value:
+        if latest.status in (
+            OrchestrationStatus.COMPLETED.value,
+            OrchestrationStatus.COMPLETED_WITH_WARNINGS.value,
+        ):
             return OrchestrationStartOutcome(
                 orchestration=await self._project(latest), created=False, scheduled=False
             )
@@ -441,6 +444,7 @@ class ResearchOrchestrationService:
                     raise ResearchOrchestrationNotFound()
                 if old.status in (
                     OrchestrationStatus.COMPLETED.value,
+                    OrchestrationStatus.COMPLETED_WITH_WARNINGS.value,
                     OrchestrationStatus.PENDING.value,
                     OrchestrationStatus.RUNNING.value,
                     OrchestrationStatus.WAITING_HUMAN.value,
@@ -615,6 +619,7 @@ class ResearchOrchestrationService:
                 return self._to_result(orchestration)
             if orchestration.status in (
                 OrchestrationStatus.COMPLETED.value,
+                OrchestrationStatus.COMPLETED_WITH_WARNINGS.value,
                 OrchestrationStatus.FAILED.value,
             ):
                 raise ResearchOrchestrationAlreadyFinished()

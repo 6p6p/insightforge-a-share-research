@@ -47,6 +47,7 @@ from app.research_orchestration.nodes import (
     make_awaiting_stage5_node,
     make_collect_synthesis_node,
     make_complete_orchestration_node,
+    make_complete_orchestration_with_warnings_node,
     make_ensure_plan_node,
     make_ensure_route_node,
     make_ensure_stage4_child_node,
@@ -101,6 +102,10 @@ def build_top_level_research_orchestration_graph(
     builder.add_node("run_or_resume_stage5", make_run_or_resume_stage5_node(dependencies))
     builder.add_node("awaiting_stage5", make_awaiting_stage5_node(dependencies))
     builder.add_node("complete_orchestration", make_complete_orchestration_node(dependencies))
+    builder.add_node(
+        "complete_orchestration_with_warnings",
+        make_complete_orchestration_with_warnings_node(dependencies),
+    )
     builder.add_node("stage5_failed", make_stage5_failed_node(dependencies))
     builder.add_node("stage5_cancelled", make_stage5_cancelled_node(dependencies))
     builder.add_node("waiting_manual", make_waiting_manual_node(dependencies))
@@ -147,6 +152,7 @@ def build_top_level_research_orchestration_graph(
         route_stage5_result,
         {
             "completed": "complete_orchestration",
+            "completed_with_warnings": "complete_orchestration_with_warnings",
             "waiting_human": "awaiting_stage5",
             "research_required": "plan_supplemental_research",
             "research_backflow_manual": "research_backflow_manual",
@@ -169,6 +175,7 @@ def build_top_level_research_orchestration_graph(
     builder.add_edge("fulfill_request", "ensure_stage5_child")
     builder.add_edge("awaiting_stage5", END)
     builder.add_edge("complete_orchestration", END)
+    builder.add_edge("complete_orchestration_with_warnings", END)
     builder.add_edge("stage5_failed", END)
     builder.add_edge("stage5_cancelled", END)
     builder.add_edge("waiting_manual", END)
