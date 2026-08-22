@@ -80,6 +80,10 @@ class TaskResponse(BaseModel):
     # 由 task + 最新 orchestration 推导（app.services.task_status_projection），
     # 所有前端位置统一读取，不再各自推导。
     public_status: str = PUBLIC_STATUS_NOT_STARTED
+    # v1.2.6：带审核提醒完成信号（presentation only）——人工接受带审核提醒的
+    # 报告（orchestration=completed_with_warnings）时 True；只决定「已完成」vs
+    # 「已完成（包含审核提醒）」的展示，不改变 public_status / DB 真实状态。
+    completed_with_warnings: bool = False
     created_at: datetime
     updated_at: datetime
 

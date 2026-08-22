@@ -10,7 +10,7 @@ import { EventTimeline } from '../../components/EventTimeline';
 import { StatusTag } from '../../components/StatusTag';
 import type { TaskResponse } from '../../types/task';
 import type { WorkflowEventResponse, WorkflowRunResponse } from '../../types/workflow';
-import { PUBLIC_STATUS_LABEL, stageLabel } from '../../utils/status';
+import { publicStatusText, stageLabel } from '../../utils/status';
 import { HumanActionCard } from './HumanActionCard';
 
 const { Title } = Typography;
@@ -106,7 +106,7 @@ export function WorkflowProgressPanel({
           <Descriptions.Item label="当前阶段">{stageLabel(task.current_stage)}</Descriptions.Item>
           <Descriptions.Item label="待处理事项">{pendingLabel}</Descriptions.Item>
           <Descriptions.Item label="任务进度">
-            {PUBLIC_STATUS_LABEL[task.public_status] ?? task.public_status}
+            {publicStatusText(task.public_status, task.completed_with_warnings)}
           </Descriptions.Item>
         </Descriptions>
 

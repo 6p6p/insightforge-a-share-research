@@ -14,16 +14,12 @@ Stage 6B.2（spec O/Q + Final Gate C/D）：段落里的「观点」「证据」
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Alert, Button, Card, Descriptions, Divider, Dropdown, List, Space, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Descriptions, Divider, Dropdown, Space, Tag, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 
-import { createExport, downloadExportContent, getTaskReport, getTaskReviews, taskKeys } from '../../api/tasks';
+import { createExport, downloadExportContent, getTaskReport, taskKeys } from '../../api/tasks';
 import { ApiError } from '../../types/api';
-import type {
-  ReportArtifactResponse,
-  ReportSectionArtifact,
-  ReviewIssueArtifactResponse,
-} from '../../types/artifacts';
+import type { ReportArtifactResponse, ReportSectionArtifact } from '../../types/artifacts';
 import type { CitationTarget } from '../../types/citation';
 import type { ExportFormat } from '../../types/export';
 import { artifactErrorMessage } from './integrity';
@@ -216,7 +212,6 @@ function ReportContent({
           <Descriptions.Item label="章节数">{data.section_count ?? '—'}</Descriptions.Item>
         </Descriptions>
       </Card>
-      <AuditReminder taskId={taskId} />
       {data.sections.length > 0 ? (
         <Card title={`报告正文（${data.sections.length} 节）`}>
           {data.sections.map((section, index) => (
@@ -356,107 +351,3 @@ function ParagraphMeta({ paragraph, onOpenCitation }: ParagraphMetaProps): React
     </div>
   );
 }
-
-// ------------------------------------------------------------------ 审核提醒区域（v1.2.5）
-
-/** issue_type → 产品化「问题描述」前缀（提醒 ≠ 失败原因）。 */
-const ISSUE_TYPE_HINT: Record<string, string> = {
-  unsupported_by_evidence: '该结论在现有证据中没有足够支撑',
-  stale_or_temporally_misaligned: '证据时效或时间对齐需要关注',
-  evidence_mismatch: '证据与主张存在错配，请人工核对',
-  claim_misrepresentation: '主张表述与证据原意可能不一致',
-  weak_source_quality: '证据来源质量一般',
-  omitted_counterevidence: '缺少反证讨论',
-  causal_overreach: '因果推断可能过度',
-  valuation_overreach: '估值推断可能过度',
-  insufficient_evidence: '证据充分性不足',
-  unresolved_conflict: '冲突信息未完全解决',
-  wording_overclaim: '措辞存在过度声明',
-};
-
-/** severity -> 产品等级标签（v1.2.5 风险提示语义）。 */
-const SEVERITY_LEVEL_LABEL: Record<string, { label: string; color: string }> = {
-  critical: { label: '重要审核提醒', color: 'warning' },
-  warning: { label: '审核提醒', color: 'gold' },
-  info: { label: '参考提示', color: 'blue' },
-};
-
-function AuditReminder({ taskId }: { taskId: string }): React.JSX.Element | null {
-  const { data, isLoading } = useQuery({
-    queryKey: taskKeys.reviews(taskId),
-    queryFn: () => getTaskReviews(taskId),
-    refetchInterval: 5000,
-  });
-
-  if (isLoading || !data) {
-    return null;
-  }
-  const issues = data.issues ?? [];
-  if (issues.length === 0 && (data.check?.findings?.length ?? 0) === 0) {
-    return null;
-  }
-
-  const reminders: {
-    key: string;
-    level: string;
-    section: string | null;
-    message: string;
-    suggestion: string;
-  }[] = [];
-
-  issues.forEach((issue: ReviewIssueArtifactResponse) => {
-    const cfg = SEVERITY_LEVEL_LABEL[issue.severity] ?? SEVERITY_LEVEL_LABEL.warning;
-    const hint = ISSUE_TYPE_HINT[issue.issue_type] ?? '';
-    reminders.push({
-      key: `audit-${issue.review_issue_id}`,
-      level: cfg.label,
-      section: issue.section_id,
-      message: issue.message,
-      suggestion: hint,
-    });
-  });
-
-  data.check?.findings?.forEach((finding, index) => {
-    reminders.push({
-      key: `check-${finding.code}-${index}`,
-      level: '审核提醒',
-      section: finding.section_id,
-      message: `确定性检查：${finding.code}`,
-      suggestion: '请结合审核详情确认相关数据。',
-    });
-  });
-
-  // 提醒不是失败原因：报告仍可交付，用户决定是否接受。
-  return (
-    <Card
-      title="审核提醒"
-      size="small"
-      extra={<Tag color="gold">提醒 ≠ 失败原因</Tag>}
-    >
-      <Alert
-        type="warning"
-        showIcon
-        message="报告期间发现以下审核提醒，请结合审核详情判断是否需要处理后重新研究，或直接接受当前报告。"
-      />
-      <List
-        size="small"
-        dataSource={reminders}
-        renderItem={(item) => (
-          <List.Item>
-            <Space direction="vertical" size={2} style={{ width: '100%' }}>
-              <Space size={4} wrap>
-                <Tag color={item.level === '重要审核提醒' ? 'warning' : 'gold'}>
-                  {item.level}
-                </Tag>
-                {item.section ? <Tag>章节：{item.section}</Tag> : null}
-              </Space>
-              <Text>{item.message}</Text>
-              {item.suggestion ? <Text type="secondary">建议：{item.suggestion}</Text> : null}
-            </Space>
-          </List.Item>
-        )}
-      />
-    </Card>
-  );
-}
-

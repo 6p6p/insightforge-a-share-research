@@ -283,7 +283,11 @@ function OverviewPanel({
       <Card title="任务概要">
         <Descriptions size="small" column={3}>
           <Descriptions.Item label="状态">
-            <StatusTag kind="public" status={data.task.public_status} />
+            <StatusTag
+              kind="public"
+              status={data.task.public_status}
+              completedWithWarnings={data.task.completed_with_warnings}
+            />
           </Descriptions.Item>
           <Descriptions.Item label="公司">{data.task.company_query}</Descriptions.Item>
           <Descriptions.Item label="分析周期">

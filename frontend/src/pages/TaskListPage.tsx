@@ -9,7 +9,7 @@ import { listTasks, taskKeys } from '../api/tasks';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import type { TaskResponse } from '../types/task';
-import { PUBLIC_STATUS_LABEL, stageLabel } from '../utils/status';
+import { PUBLIC_STATUS_LABEL, publicStatusText, stageLabel } from '../utils/status';
 
 export function TaskListPage(): React.JSX.Element {
   const { data, isLoading } = useQuery({
@@ -26,19 +26,27 @@ export function TaskListPage(): React.JSX.Element {
     {
       title: '状态',
       dataIndex: 'public_status',
-      render: (status: TaskResponse['public_status']) => (
-        <StatusTag kind="public" status={status} />
+      render: (status: TaskResponse['public_status'], record) => (
+        <StatusTag
+          kind="public"
+          status={status}
+          completedWithWarnings={record.completed_with_warnings}
+        />
       ),
     },
     {
       title: '阶段',
       dataIndex: 'current_stage',
-      render: (stage: TaskResponse['current_stage']) => stageLabel(stage),
+      render: (stage: TaskResponse['current_stage'], record) =>
+        record.public_status === 'completed' || record.public_status === 'failed'
+          ? PUBLIC_STATUS_LABEL[record.public_status]
+          : stageLabel(stage),
     },
     {
       title: '进度',
       dataIndex: 'public_status',
-      render: (status: TaskResponse['public_status']) => PUBLIC_STATUS_LABEL[status] ?? status,
+      render: (status: TaskResponse['public_status'], record) =>
+        publicStatusText(status, record.completed_with_warnings),
     },
     { title: '分析周期', dataIndex: 'research_start_date', render: (_, record) => `${record.research_start_date} ~ ${record.research_end_date}` },
     { title: '创建时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false }) },

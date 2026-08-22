@@ -29,6 +29,7 @@ from app.services.task_status_projection import (
     PUBLIC_STATUS_IN_PROGRESS,
     PUBLIC_STATUS_NOT_STARTED,
     PUBLIC_STATUS_WAITING_CONFIRMATION,
+    project_completed_with_warnings,
     project_public_status,
 )
 from app.services.task_workspace_service import TaskWorkspaceService
@@ -152,6 +153,29 @@ def test_project_public_status_table() -> None:
     )
 
 
+def test_project_public_status_completed_with_warnings_is_terminal_completed() -> None:
+    """v1.2.6：completed_with_warnings（人工接受带审核提醒的报告）→ 已完成
+    （terminal completed），绝不落入 in_progress fallback。"""
+    assert (
+        project_public_status(task_status="pending", orchestration_status="completed_with_warnings")
+        == PUBLIC_STATUS_COMPLETED
+    )
+    # 任务列表/工作台/概要均显示已完成（区别于普通 completed 由 bool 信号展示）。
+    assert (
+        project_completed_with_warnings(
+            task_status="pending", orchestration_status="completed_with_warnings"
+        )
+        is True
+    )
+    assert (
+        project_completed_with_warnings(task_status="pending", orchestration_status="completed")
+        is False
+    )
+    assert (
+        project_completed_with_warnings(task_status="pending", orchestration_status=None) is False
+    )
+
+
 # ---------------------------------------------------------------- regression：已完成
 
 
@@ -171,6 +195,54 @@ async def test_completed_orchestration_all_positions_completed(sessionmaker) -> 
     assert fetched.public_status == PUBLIC_STATUS_COMPLETED
     # 底层 task.status 仍是 pending（未修改 LangGraph / DB 语义——投影是权威）。
     assert fetched.status.value == "pending"
+
+
+# ---------------------------------------------------------------- v1.2.6：带提醒完成
+
+
+@pytest.mark.asyncio
+async def test_completed_with_warnings_all_positions_completed(sessionmaker) -> None:
+    """用户验收：orchestration=completed_with_warnings（人工接受带审核提醒）→
+    task list / workspace / get_task 全部显示「已完成」，且不出现在 running
+    fallback；completed_with_warnings 信号同时透出（前端据此显示「已完成
+    （包含审核提醒）」）。真实 DB 状态保留（task.status 仍是 pending，
+    orchestration.status 仍是 completed_with_warnings——投影是权威）。"""
+    task_id = await _seed(sessionmaker, orchestration=("completed_with_warnings", "completed"))
+
+    assert await _list_public_status(sessionmaker, task_id) == PUBLIC_STATUS_COMPLETED
+    assert await _workspace_public_status(sessionmaker, task_id) == PUBLIC_STATUS_COMPLETED
+
+    async with sessionmaker() as session:
+        service = TaskService(ResearchTaskRepository(session), sessionmaker)
+        fetched = await service.get_task(task_id)
+    assert fetched.public_status == PUBLIC_STATUS_COMPLETED
+    assert fetched.completed_with_warnings is True
+    # 真实状态未被修改：task 仍 pending，orchestration 仍 completed_with_warnings。
+    assert fetched.status.value == "pending"
+    from sqlalchemy import select
+
+    async with sessionmaker() as session:
+        from app.db.models.research_orchestration import ResearchOrchestrationModel
+
+        row = (
+            await session.execute(
+                select(ResearchOrchestrationModel).where(
+                    ResearchOrchestrationModel.task_id == task_id
+                )
+            )
+        ).scalar_one()
+        assert row.status == "completed_with_warnings"
+
+
+@pytest.mark.asyncio
+async def test_workspace_completed_with_warnings_signal(sessionmaker) -> None:
+    """workspace 投影的 task 亦携带 completed_with_warnings 信号（前端据此显示
+    「已完成（包含审核提醒）」），public_status 仍为已完成。"""
+    task_id = await _seed(sessionmaker, orchestration=("completed_with_warnings", "completed"))
+    service = TaskWorkspaceService(sessionmaker)
+    workspace = await service.get_workspace(task_id)
+    assert workspace.task.public_status == PUBLIC_STATUS_COMPLETED
+    assert workspace.task.completed_with_warnings is True
 
 
 # ---------------------------------------------------------------- regression：等待确认

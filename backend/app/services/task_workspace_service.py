@@ -26,7 +26,10 @@ from app.schemas.task import TaskResponse
 from app.services.company_identity_service import CompanyIdentityService
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.task_artifact_service import TaskArtifactService
-from app.services.task_status_projection import project_public_status
+from app.services.task_status_projection import (
+    project_completed_with_warnings,
+    project_public_status,
+)
 
 
 class TaskWorkspaceService:
@@ -52,14 +55,17 @@ class TaskWorkspaceService:
             )
         if task_model is None:
             raise TaskNotFound()
+        orch_status = orchestration.status if orchestration is not None else None
         task = TaskResponse.model_validate(task_model).model_copy(
             update={
                 "public_status": project_public_status(
                     task_status=task_model.status,
-                    orchestration_status=(
-                        orchestration.status if orchestration is not None else None
-                    ),
-                )
+                    orchestration_status=orch_status,
+                ),
+                "completed_with_warnings": project_completed_with_warnings(
+                    task_status=task_model.status,
+                    orchestration_status=orch_status,
+                ),
             }
         )
 

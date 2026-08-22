@@ -23,6 +23,7 @@
 import asyncio
 import hashlib
 from io import BytesIO
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -547,3 +548,58 @@ async def test_export_content_bytes_match_archive(
         assert content[:4] == b"%PDF"
     finally:
         await manager.close()
+
+
+# ---------------------------------------------------------------- v1.2.6：带审核提醒完成导出
+
+
+async def _set_orchestration_terminal_with_warnings(sessionmaker, task_id: UUID) -> None:
+    """把 task 的 orchestration 置为 completed_with_warnings（模拟人工接受带审核
+    提醒报告后的真实 DB 终态）。既有行更新；无行（execution 层 chain 不写
+    orchestration）则插入一个 terminal completed_with_warnings 行（字段对齐
+    research_orchestration_runs 约束）。"""
+    from app.db.models.research_orchestration import ResearchOrchestrationModel
+
+    async with sessionmaker() as session:
+        row = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT orchestration_id FROM research_orchestration_runs "
+                        "WHERE task_id = :tid ORDER BY created_at DESC LIMIT 1"
+                    ),
+                    {"tid": task_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is not None:
+            await session.execute(
+                text(
+                    "UPDATE research_orchestration_runs "
+                    "SET status = 'completed_with_warnings', current_phase = 'completed' "
+                    "WHERE orchestration_id = :oid"
+                ),
+                {"oid": row["orchestration_id"]},
+            )
+        else:
+            session.add(
+                ResearchOrchestrationModel(
+                    task_id=task_id,
+                    research_plan_id=None,
+                    attempt_no=1,
+                    retry_of_orchestration_id=None,
+                    orchestration_schema_version=1,
+                    orchestrator_name="research_orchestrator",
+                    orchestrator_version=1,
+                    status="completed_with_warnings",
+                    current_phase="completed",
+                    input_fingerprint="0" * 64,
+                    started_at=None,
+                    completed_at=None,
+                    error_code=None,
+                    error_message=None,
+                )
+            )
+        await session.commit()

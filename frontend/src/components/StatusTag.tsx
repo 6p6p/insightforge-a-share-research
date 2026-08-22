@@ -4,9 +4,9 @@ import { Tag } from 'antd';
 import type { PublicTaskStatus, TaskStatus } from '../types/task';
 import type { WorkflowRunStatus } from '../types/workflow';
 import {
-  PUBLIC_STATUS_LABEL,
   RUN_STATUS_LABEL,
   TASK_STATUS_LABEL,
+  publicStatusText,
   publicStatusTone,
   runStatusTone,
   taskStatusTone,
@@ -25,12 +25,18 @@ const TONE_COLOR: Record<Tone, string> = {
 interface Props {
   kind: 'run' | 'task' | 'public';
   status: WorkflowRunStatus | TaskStatus | PublicTaskStatus;
+  /** v1.2.6：public kind 的带提醒完成信号（completed_with_warnings）。 */
+  completedWithWarnings?: boolean;
 }
 
 /** 从 label 表里按 kind 取中文（status 是联合类型，需索引签名兜底）。 */
-function resolveLabel(kind: Props['kind'], status: Props['status']): string {
+function resolveLabel(
+  kind: Props['kind'],
+  status: Props['status'],
+  completedWithWarnings?: boolean,
+): string {
   if (kind === 'public') {
-    return PUBLIC_STATUS_LABEL[status as PublicTaskStatus] ?? String(status);
+    return publicStatusText(status as PublicTaskStatus, completedWithWarnings);
   }
   if (kind === 'run') {
     return RUN_STATUS_LABEL[status as WorkflowRunStatus] ?? String(status);
@@ -48,6 +54,10 @@ function resolveTone(kind: Props['kind'], status: Props['status']): Tone {
   return taskStatusTone(status as TaskStatus);
 }
 
-export function StatusTag({ kind, status }: Props): React.JSX.Element {
-  return <Tag color={TONE_COLOR[resolveTone(kind, status)]}>{resolveLabel(kind, status)}</Tag>;
+export function StatusTag({ kind, status, completedWithWarnings }: Props): React.JSX.Element {
+  return (
+    <Tag color={TONE_COLOR[resolveTone(kind, status)]}>
+      {resolveLabel(kind, status, completedWithWarnings)}
+    </Tag>
+  );
 }

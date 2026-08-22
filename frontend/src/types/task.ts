@@ -72,6 +72,10 @@ export interface TaskResponse {
   progress: number;
   /** canonical public projection（五态，全部位置统一展示）。 */
   public_status: PublicTaskStatus;
+  /** v1.2.6：带审核提醒完成信号（presentation only）——orchestration 以
+   * completed_with_warnings 结束时为 true；只决定「已完成」vs
+   * 「已完成（包含审核提醒）」的展示，真实状态保留在后端。 */
+  completed_with_warnings?: boolean;
   created_at: string;
   updated_at: string;
 }

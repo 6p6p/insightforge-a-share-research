@@ -60,6 +60,7 @@ from app.report_export.errors import (
 from app.report_export.pack import (
     AUDIT_NOTE_BACKFLOW_ACCEPTED,
     AUDIT_NOTE_HUMAN_APPROVED,
+    AUDIT_NOTE_WARNINGS_ACCEPTED,
     ExportCardDetail,
     build_export_report_pack,
 )
@@ -180,10 +181,19 @@ class ReportExportService:
             raise ReportNotExportable()
 
         backflow_accepted = await self._backflow_accept_for_task(task_id)
+        # v1.2.6：orchestration 已 terminal（completed / completed_with_warnings）
+        # → 人工已接受报告（含带审核提醒）→ 允许导出，不要求 Check=pass。
+        export_terminal = await self._export_terminal_status_for_task(task_id)
         audit_note, eligible = _eligibility(
-            verified_audit, verified_decision, backflow_accepted=backflow_accepted
+            verified_audit,
+            verified_decision,
+            backflow_accepted=backflow_accepted,
+            export_terminal=export_terminal,
         )
-        if not eligible or verified_audit.verified_check.status != CHECK_STATUS_PASS:
+        check_pass_required = export_terminal is None
+        if not eligible or (
+            check_pass_required and verified_audit.verified_check.status != CHECK_STATUS_PASS
+        ):
             raise ReportNotExportable()
 
         task = await self._task_artifact_service.anchor_task(task_id)
@@ -324,10 +334,15 @@ class ReportExportService:
             company = await self._resolve_company(verified_report)
 
             backflow_accepted = await self._backflow_accept_for_task(row.task_id)
+            export_terminal = await self._export_terminal_status_for_task(row.task_id)
             audit_note, eligible = _eligibility(
-                verified_audit, verified_decision, backflow_accepted=backflow_accepted
+                verified_audit,
+                verified_decision,
+                backflow_accepted=backflow_accepted,
+                export_terminal=export_terminal,
             )
-            if not eligible or verified_check.status != CHECK_STATUS_PASS:
+            check_pass_required = export_terminal is None
+            if not eligible or (check_pass_required and verified_check.status != CHECK_STATUS_PASS):
                 raise ReportExportIntegrityError()
 
             pack = await self._build_pack(
@@ -457,6 +472,33 @@ class ReportExportService:
                     raise ReportExportIntegrityError() from None
         return details, provenance
 
+    async def _export_terminal_status_for_task(self, task_id: UUID) -> str | None:
+        """task 最新 orchestration 是否为「带审核提醒完成」terminal（v1.2.6 导出资格）。
+
+        仅当最新 orchestration.status == completed_with_warnings（人工接受带审核
+        提醒的报告，保留非关键提醒交付）返回该状态，其余（completed / pending /
+        running / waiting_human / failed / cancelled / 无）→ None：
+        - completed_with_warnings → 允许导出（审核发现 ≠ 不可交付；提醒已固定文案
+          保留在报告中），不要求 Check=pass——这是本 bug 的根治；
+        - completed → 走既有 A/B/C 资格 + Check=pass 硬要求（普通完成路径不变）；
+        - 其它 → 不可导出（导出前报告必须已人工确认或正常走完 finalize）。
+        只读投影，不修改 orchestration / task 真实状态。
+        """
+        from app.research_orchestration.repository import ResearchOrchestrationRepository
+
+        try:
+            async with self._sessionmaker() as session:
+                orchestration = await ResearchOrchestrationRepository(session).get_latest_for_task(
+                    task_id
+                )
+        except Exception:  # noqa: BLE001 - 只读资格判定，不因读取侧异常放宽
+            return None
+        if orchestration is None:
+            return None
+        if orchestration.status == "completed_with_warnings":
+            return orchestration.status
+        return None
+
     async def _backflow_accept_for_task(self, task_id: UUID) -> bool:
         """task 的（active/最新）orchestration 是否已有 backflow closure accept。
 
@@ -503,17 +545,28 @@ def _eligibility(
     decision: VerifiedHumanReviewDecision | None,
     *,
     backflow_accepted: bool = False,
+    export_terminal: str | None = None,
 ) -> tuple[str | None, bool]:
     """spec H 资格判定：返回 (audit_note, eligible)。
 
     A. audit pass + route pass → 可导出，无 audit_note；
     B. audit fail + route human_review + 人工 approve → 可导出，audit_note 固定文案；
     C. audit fail + backflow manual closure accept（补充研究已达上限，用户接受当前
-       报告；accept 守卫已保证不含 critical integrity failure）→ 可导出，固定文案。
-       确定性 Check=pass 由调用方另行强制；critical 守卫在 accept 时已拒绝，此处
-       只需读 closure 决策。
-    其余（rewrite / research / waiting_human / 无 audit）→ 不可导出。
+      报告；accept 守卫已保证不含 critical integrity failure）→ 可导出，固定文案。
+      确定性 Check=pass 由调用方另行强制；critical 守卫在 accept 时已拒绝，此处
+      只需读 closure 决策。
+    D. v1.2.6：orchestration 已 terminal completed_with_warnings（人工接受带
+      审核提醒的报告，保留非关键提醒交付）→ 可导出（带提醒固定文案），
+      **不要求 Check=pass**（审核发现 ≠ 不可交付；导出时提醒保留在报告中）。
+      仅当所有校验（完整性 / 指纹 / 归档字节）通过才真正放行。普通 completed
+      不进入本分支，仍走 A/B/C + Check=pass 硬要求。
+    其余（rewrite / research / waiting_human / running / failed / cancelled /
+    无 audit）→ 不可导出。
     """
+    if export_terminal is not None:
+        if export_terminal == "completed_with_warnings":
+            return AUDIT_NOTE_WARNINGS_ACCEPTED, True
+        return None, True
     if audit.audit_status == AUDIT_STATUS_PASS and audit.recommended_route == AUDIT_ROUTE_PASS:
         return None, True
     if (

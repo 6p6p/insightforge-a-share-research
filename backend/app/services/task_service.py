@@ -16,6 +16,7 @@ from app.research_orchestration.repository import ResearchOrchestrationRepositor
 from app.schemas.task import TaskCreateRequest, TaskListResponse, TaskResponse
 from app.services.task_status_projection import (
     PUBLIC_STATUS_NOT_STARTED,
+    project_completed_with_warnings,
     project_public_status,
 )
 
@@ -72,8 +73,10 @@ class TaskService:
         task = await self._repository.get_by_id(task_id)
         if task is None:
             raise TaskNotFound()
-        public_status = await self._project_public_status(task)
-        return self._to_response(task, public_status=public_status)
+        public_status, with_warnings = await self._project_public_status(task)
+        return self._to_response(
+            task, public_status=public_status, completed_with_warnings=with_warnings
+        )
 
     async def list_tasks(
         self,
@@ -87,7 +90,14 @@ class TaskService:
             offset=offset,
         )
         statuses = await self._project_public_statuses(rows)
-        items = [self._to_response(task, public_status=statuses[task.task_id]) for task in rows]
+        items = [
+            self._to_response(
+                task,
+                public_status=statuses[task.task_id][0],
+                completed_with_warnings=statuses[task.task_id][1],
+            )
+            for task in rows
+        ]
         return TaskListResponse(items=items, total=total, limit=limit, offset=offset)
 
     @staticmethod
@@ -123,9 +133,18 @@ class TaskService:
         )
 
     @staticmethod
-    def _to_response(task: ResearchTaskModel, public_status: str) -> TaskResponse:
+    def _to_response(
+        task: ResearchTaskModel,
+        public_status: str,
+        completed_with_warnings: bool = False,
+    ) -> TaskResponse:
         base = TaskResponse.model_validate(task)
-        return base.model_copy(update={"public_status": public_status})
+        return base.model_copy(
+            update={
+                "public_status": public_status,
+                "completed_with_warnings": completed_with_warnings,
+            }
+        )
 
     @staticmethod
     def _is_idempotency_conflict(exc: IntegrityError) -> bool:
@@ -141,42 +160,65 @@ class TaskService:
     ) -> TaskCreationResult:
         if existing.request_fingerprint != fingerprint:
             raise IdempotencyConflict()
-        public_status = await self._project_public_status(existing)
+        public_status, with_warnings = await self._project_public_status(existing)
         return TaskCreationResult(
-            task=self._to_response(existing, public_status=public_status),
+            task=self._to_response(
+                existing, public_status=public_status, completed_with_warnings=with_warnings
+            ),
             replayed=True,
         )
 
     # ------------------------------------------------------------ projection
 
-    async def _project_public_status(self, task: ResearchTaskModel) -> str:
-        """task + 最新 orchestration → canonical public status（单点权威）。
+    async def _project_public_status(self, task: ResearchTaskModel) -> tuple[str, bool]:
+        """task + 最新 orchestration → (public status, completed_with_warnings)。
 
-        sessionmaker 未注入 → 只按 task 自身推导（不查 orchestration）。
+        单点权威；sessionmaker 未注入 → 只按 task 自身推导（不查 orchestration）。
         """
         if self._sessionmaker is None:
-            return project_public_status(task_status=task.status)
+            return (
+                project_public_status(task_status=task.status),
+                project_completed_with_warnings(task_status=task.status),
+            )
         async with self._sessionmaker() as session:
             orchestration = await ResearchOrchestrationRepository(session).get_latest_for_task(
                 task.task_id
             )
-        return project_public_status(
-            task_status=task.status,
-            orchestration_status=(orchestration.status if orchestration is not None else None),
+        orch_status = orchestration.status if orchestration is not None else None
+        return (
+            project_public_status(task_status=task.status, orchestration_status=orch_status),
+            project_completed_with_warnings(
+                task_status=task.status, orchestration_status=orch_status
+            ),
         )
 
-    async def _project_public_statuses(self, tasks: list[ResearchTaskModel]) -> dict[UUID, str]:
-        """批量投影（列表页避免 N+1）；无 orchestration 信息 → 按 task 自身推导。"""
+    async def _project_public_statuses(
+        self, tasks: list[ResearchTaskModel]
+    ) -> dict[UUID, tuple[str, bool]]:
         if self._sessionmaker is None or not tasks:
-            return {task.task_id: project_public_status(task_status=task.status) for task in tasks}
+            return {
+                task.task_id: (
+                    project_public_status(task_status=task.status),
+                    project_completed_with_warnings(task_status=task.status),
+                )
+                for task in tasks
+            }
         task_ids = [task.task_id for task in tasks]
         async with self._sessionmaker() as session:
             latest = await ResearchOrchestrationRepository(session).list_latest_for_tasks(task_ids)
         return {
-            task.task_id: project_public_status(
-                task_status=task.status,
-                orchestration_status=(
-                    latest[task.task_id].status if task.task_id in latest else None
+            task.task_id: (
+                project_public_status(
+                    task_status=task.status,
+                    orchestration_status=(
+                        latest[task.task_id].status if task.task_id in latest else None
+                    ),
+                ),
+                project_completed_with_warnings(
+                    task_status=task.status,
+                    orchestration_status=(
+                        latest[task.task_id].status if task.task_id in latest else None
+                    ),
                 ),
             )
             for task in tasks

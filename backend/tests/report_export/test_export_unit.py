@@ -596,3 +596,61 @@ def test_store_rejects_empty_and_path_traversal(tmp_path) -> None:
         store.open("no/such/file.md")
     with pytest.raises(InvalidStorageKey):
         store.put_bytes(b"x", "txt")  # 扩展名白名单外
+
+
+# ---------------------------------------------------------------- eligibility (spec H, v1.2.6)
+
+
+def _min_audit(status, route):
+    """构造最小 VerifiedReportAudit（frozen dataclass → object.__new__ +
+    object.__setattr__；_eligibility 只读 audit_status / recommended_route）。"""
+    from app.audit.contracts import VerifiedReportAudit
+
+    audit = object.__new__(VerifiedReportAudit)
+    object.__setattr__(audit, "audit_status", status)
+    object.__setattr__(audit, "recommended_route", route)
+    return audit
+
+
+def _min_decision(decision):
+    from app.review.contracts import VerifiedHumanReviewDecision
+
+    d = object.__new__(VerifiedHumanReviewDecision)
+    object.__setattr__(d, "decision", decision)
+    return d
+
+
+def test_eligibility_terminal_with_warnings_allows_any_check() -> None:
+    from app.report_export.pack import AUDIT_NOTE_WARNINGS_ACCEPTED
+    from app.report_export.service import _eligibility
+
+    note, eligible = _eligibility(
+        _min_audit("fail", "human_review"),
+        _min_decision("approve"),
+        export_terminal="completed_with_warnings",
+    )
+    assert eligible is True
+    assert note == AUDIT_NOTE_WARNINGS_ACCEPTED
+    note2, eligible2 = _eligibility(
+        _min_audit("pass", "pass"),
+        None,
+        export_terminal="completed_with_warnings",
+    )
+    assert eligible2 is True
+    assert note2 == AUDIT_NOTE_WARNINGS_ACCEPTED
+
+
+def test_eligibility_terminal_not_relaxed_without_warnings() -> None:
+    from app.report_export.pack import AUDIT_NOTE_HUMAN_APPROVED
+    from app.report_export.service import _eligibility
+
+    note, eligible = _eligibility(_min_audit("pass", "pass"), None, export_terminal=None)
+    assert eligible is True
+    assert note is None
+    note2, eligible2 = _eligibility(
+        _min_audit("fail", "human_review"), _min_decision("approve"), export_terminal=None
+    )
+    assert eligible2 is True
+    assert note2 == AUDIT_NOTE_HUMAN_APPROVED
+    _, eligible3 = _eligibility(_min_audit("fail", "human_review"), None)
+    assert eligible3 is False

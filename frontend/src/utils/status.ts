@@ -89,6 +89,21 @@ export function taskStatusTone(status: TaskStatus): PresetStatus {
   }
 }
 
+/**
+ * canonical public 状态中文标签（v1.2.6 补充）。
+ * completed + completedWithWarnings → 「已完成（包含审核提醒）」；
+ * 其余状态与 PUBLIC_STATUS_LABEL 完全一致（真实状态保留，仅展示区分）。
+ */
+export function publicStatusText(
+  status: PublicTaskStatus,
+  completedWithWarnings?: boolean,
+): string {
+  if (status === 'completed' && completedWithWarnings) {
+    return '已完成（包含审核提醒）';
+  }
+  return PUBLIC_STATUS_LABEL[status] ?? status;
+}
+
 /** canonical public 六态语义色。 */
 export function publicStatusTone(status: PublicTaskStatus): PresetStatus {
   switch (status) {
