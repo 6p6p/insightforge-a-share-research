@@ -744,7 +744,7 @@ class ResearchOrchestrationService:
                 orchestration_id,
                 datetime.now(UTC),
                 error_code="stage5_approval_rejected",
-                error_message="报告存在阻断性审核问题（真实性/证据链），暂不能批准通过",
+                error_message="报告未能批准：存在系统级审核故障（审核记录缺失或数据一致性异常），请重试或重新研究",
             )
             await session.commit()
 
@@ -1024,14 +1024,20 @@ class ResearchOrchestrationService:
             raise RuntimeError("acceptance guard services not bound")
         check = await self._report_check_service.verify_check_result_integrity(check_result_id)
         verified = await self._report_audit_service.verify_audit_integrity(audit_id)
+        section_type_by_id = {
+            draft.section_id: draft.section_type
+            for draft in check.verified_report.verified_drafts
+        }
         scope = classify_report_scope(
             finding_codes=[f.code for f in check.findings],
             finding_section_ids=[f.section_id for f in check.findings],
             issues=list(verified.issues),
             degraded_section_ids=_degraded_draft_ids(check),
+            section_type_by_id=section_type_by_id,
         )
-        if scope is AuditImpactScope.REPORT_BLOCKING:
-            barriers.append("存在关键审核问题，不能接受当前报告")
+        # v1.2.5：内容审核问题（含 REPORT_BLOCKING → CRITICAL_ALERT 严重提醒）
+        # 不再阻断 accept；只有系统级不可恢复（无法定位报告 / 审核记录缺失）
+        # 才产生 barrier。scope 仅决定完成状态（INFO→completed）。
         return (scope, barriers)
 
     # ------------------------------------------------------------------ internal

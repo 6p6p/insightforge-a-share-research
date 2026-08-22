@@ -130,6 +130,11 @@ async def _cleanup(sessionmaker) -> None:
     research_plans / research_tasks），再走公共 `_cleanup_with_revisions`（Stage5
     reports / audits / revisions / human decisions / backflow requests）。"""
     async with sessionmaker() as session:
+        # 先删 backflow human review 引用（FK RESTRICT 指向
+        # research_orchestration_runs），再删 orchestration 本体——
+        # 避免真实运行残留的 backflow request 阻止清理。
+        await session.execute(text("DELETE FROM backflow_human_review_decisions"))
+        await session.execute(text("DELETE FROM backflow_human_review_requests"))
         await session.execute(text("DELETE FROM research_orchestration_child_runs"))
         await session.execute(text("DELETE FROM research_orchestration_runs"))
         await session.execute(text("DELETE FROM research_plan_routes"))

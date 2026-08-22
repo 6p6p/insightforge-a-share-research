@@ -121,10 +121,10 @@ const STAGE5_ACTIONS: {
   danger?: boolean;
   primary?: boolean;
 }[] = [
-  { action: 'approve', label: '批准通过', primary: true },
+  { action: 'approve', label: '接受报告', primary: true },
   { action: 'rewrite', label: '要求重写' },
-  { action: 'research', label: '需要补充研究' },
-  { action: 'cancel', label: '取消执行', danger: true },
+  { action: 'research', label: '再次补充研究' },
+  { action: 'cancel', label: '取消研究', danger: true },
 ];
 
 interface Props {
@@ -151,7 +151,7 @@ export function OrchestrationBanner({
         message="研究完成"
         description={
           status === 'completed_with_warnings'
-            ? '报告已生成（包含审核提醒）——部分章节因模型不可用等原因以占位内容完成，已由人工确认；请在「报告」标签页查看各章节的说明。'
+            ? '报告已生成（包含审核提醒）——审核提醒已保留在报告中供参考，不影响报告交付；请在「报告」标签页查看各章节的说明与审核详情。'
             : '报告已生成，可在「报告」标签页查看并导出。'
         }
       />
@@ -734,6 +734,12 @@ function OrchestrationHumanActionCard({
   return (
     <Card title="需要人工确认" type="inner" size="small">
       <Space direction="vertical" style={{ width: '100%' }}>
+        <Alert
+          type="warning"
+          showIcon
+          message="报告已生成，请确认研究结果"
+          description="如发现问题，仍可要求重写、补充研究或取消；批准后报告将作为最终结果交付，审核提醒会保留在报告中。"
+        />
         {conflict ? (
           <Alert type="warning" showIcon message="状态已变化" description={conflict} />
         ) : null}
@@ -895,13 +901,15 @@ function BackflowClosureCard({
   });
 
   const barriers = review?.acceptance_barriers ?? [];
+  // v1.2.5：内容审核问题不再阻断——只有系统级 barrier（无法定位报告 /
+  // 审核记录未生成等）才禁用接受；impact scope 仅决定提醒文案与完成状态。
   const acceptDisabled = barriers.length > 0 || mutation.isPending;
   const submitting = mutation.isPending;
   const done = review?.decision != null;
-  /** v1.2.4：impact scope（nullable，旧响应缺失时视为 blocked/unknown）。
-   * report_blocking → 暂不能接受（❌）；section_warning / section_unavailable →
-   * 带审核提醒可接受（⚠）；info / 缺省 → 无提醒。 */
   const impactScope: string | null = review?.impact_scope ?? null;
+  /** v1.2.5：CRITICAL_ALERT（report_blocking 枚举值）→ 重要审核提醒；
+   * WARNING（section_warning / section_unavailable）→ 审核提醒；均允许接受。 */
+  const criticalAlert = !done && impactScope === 'report_blocking';
   const sectionWarning =
     !done &&
     impactScope != null &&
@@ -961,8 +969,16 @@ function BackflowClosureCard({
           <Alert
             type="error"
             showIcon
-            message="当前报告存在关键问题，暂不能接受"
+            message="当前报告暂不能接受"
             description={barriers.join('；')}
+          />
+        ) : null}
+        {criticalAlert ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="当前报告存在重要审核提醒"
+            description="发现可能影响结论可靠性的因素，请查看审核详情后决定。"
           />
         ) : null}
         {sectionWarning ? (

@@ -295,7 +295,8 @@ async def test_quality_guard_error_degrades_not_crash() -> None:
     assert len(degraded) == 1
     assert degraded[0]["section_id"] == "s2"
     assert degraded[0]["draft_section_id"] is not None
-    assert degraded[0]["degraded_reason"] == "draft_quality_guard"
+    # v1.2.5：numeric grounding → 数据口径风险提示降级（不再 draft_quality_guard）。
+    assert degraded[0]["degraded_reason"] == "numeric_grounding_warning"
 
     # 仍可装配（S1..S2 都在），不 stage5 中断
     assemble_node = make_assemble_report_node(deps)

@@ -454,13 +454,12 @@ async def test_research_route_terminal(env, monkeypatch, connection_uri) -> None
 # ---------------------------------------------------------------- approve 安全（spec R，node 级）
 
 
-async def test_approve_requires_pass_check(env, monkeypatch, connection_uri) -> None:
-    """v1.2.3 Case2/3：critical 严重度时 approve 必须拒绝 finalize。
-
-    正常 Report（Check=pass）+ critical 审计 issue（unsupported_by_evidence →
-    数据真实性无法确认）→ 即使人工 approve 也不能服务式接受，Stage5ApproveRequiresPassCheck 必须
-    保持（​不删除【定性保护】。
-    """
+async def test_approve_critical_alert_finalizes_with_warnings(
+    env, monkeypatch, connection_uri
+) -> None:
+    """v1.2.5：critical 严重度（unsupported_by_evidence → CRITICAL_ALERT 严重审核
+    提醒）不再阻断 approve——人工批准被接受 → terminal finalize_with_warnings
+    （completed_with_warnings）。审核发现问题 ≠ 报告不可交付。"""
     outline_id = await _create_outline(env, monkeypatch, connection_uri, _two_theme_models())
     fake = FakeDraftSectionModel(decision_factory=valid_decision_for)
     draft_ids = await _draft_mixed_sections(
@@ -488,13 +487,14 @@ async def test_approve_requires_pass_check(env, monkeypatch, connection_uri) -> 
         revision_model=FakeRevisionWriterModel(),
     )
     node = make_finalize_on_approve_node(deps)
-    with pytest.raises(Stage5ApproveRequiresPassCheck):
-        await node(
-            {
-                "check_result_id": str(check.check_result_id),
-                "audit_id": str(audit.audit_id),
-            }
-        )
+    result = await node(
+        {
+            "check_result_id": str(check.check_result_id),
+            "audit_id": str(audit.audit_id),
+        }
+    )
+    # v1.2.5：CRITICAL_ALERT 严重提醒 → 带警告完成（不阻断 approve）。
+    assert result["terminal"] == STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS
 
 
 # ---------------------------------------------------------------- degrade approve（v1.2.2 §2 B）

@@ -24,6 +24,7 @@ import { ReportTab } from './ReportTab';
 
 const mocks = vi.hoisted(() => ({
   getTaskReport: vi.fn(),
+  getTaskReviews: vi.fn(),
   createExport: vi.fn(),
   downloadExportContent: vi.fn(),
 }));
@@ -32,8 +33,10 @@ vi.mock('../../api/tasks', () => ({
   taskKeys: {
     all: ['tasks'],
     report: (id: string) => ['tasks', 'artifacts', id, 'report'],
+    reviews: (id: string) => ['tasks', 'artifacts', id, 'reviews'],
   },
   getTaskReport: mocks.getTaskReport,
+  getTaskReviews: mocks.getTaskReviews,
   createExport: mocks.createExport,
   downloadExportContent: mocks.downloadExportContent,
 }));
@@ -80,11 +83,27 @@ function renderReportTab(): ReturnType<typeof render> {
   );
 }
 
-describe('ReportTab export dropdown（Stage 6C spec Q）', () => {
+describe('ReportTab export dropdown（v1.2.5 含审核提醒区域）', () => {
   beforeEach(() => {
     mocks.getTaskReport.mockReset();
+    mocks.getTaskReviews.mockReset();
     mocks.createExport.mockReset();
     mocks.downloadExportContent.mockReset();
+    // 审核提醒区域默认无 issue（不干扰既有报告渲染断言）。
+    mocks.getTaskReviews.mockResolvedValue({
+      audit_id: null,
+      report_id: 'rpt-1',
+      audit_status: null,
+      recommended_route: null,
+      issue_count: 0,
+      audit_fingerprint: null,
+      issues: [],
+      check: null,
+      review_action: null,
+      human_review: null,
+      research_backflow: null,
+      pending_human_review: null,
+    });
   });
 
   it('报告存在 → 渲染「导出报告」按钮；展开显示 3 种格式', async () => {

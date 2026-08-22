@@ -11,8 +11,10 @@ Role boundaries (spec D/O/Q/R/S):
 - 人审（spec Q）：`wait_human` 用真实 LangGraph `interrupt()`；resume 值
   = `{human_decision_id, decision, comment}`（decision 由 API 层先经
   `resolve_human_request` 持久化）；
-- approve 安全（spec R）：`finalize_on_approve` 只 finalize 当前 Report 且
-  前提 deterministic Check=pass，否则 `Stage5ApproveRequiresPassCheck`；
+- approve 安全（spec R / v1.2.5）：`finalize_on_approve` 只 finalize 当前
+  Report；内容审核问题（含 critical/CRITICAL_ALERT）→ 带提醒完成
+  （finalize_with_warnings），`Stage5ApproveRequiresPassCheck` 仅系统级不可
+  恢复错误（artifact 缺失 / 一致性破坏 / 状态损坏）触发；
 - research 本轮不执行（spec S）：route=research / human 决定 research →
   terminal `research_required`，不假装 research completed。
 """
@@ -33,6 +35,7 @@ from app.draft_section.errors import (
     DraftSectionIntegrityError,
     DraftSectionModelUnavailable,
     DraftSectionNotFound,
+    DraftSectionNumericGroundingError,
     DraftSectionPersistenceFailed,
 )
 from app.report.contracts import ReportAssemblyDraft
@@ -166,11 +169,18 @@ def make_build_report_draft_node(deps: Stage5WorkflowDependencies):
             # 保留完整 DraftSection contract；正文诚实，无 claim/数字/引文），
             # assembler 仍拿到 S1..S6。
             except DraftSectionError as exc:
+                # v1.2.5：numeric grounding 属于「数据口径风险提示」——普通研究
+                # 内容生成 degraded section（reason=numeric_grounding_warning）继续
+                # 完成报告，不中断整个编排（与用户验收：只系统级才失败对齐）。
                 degraded_count += 1
                 reason = (
                     "model_unavailable"
                     if isinstance(exc, DraftSectionModelUnavailable)
-                    else "draft_quality_guard"
+                    else (
+                        "numeric_grounding_warning"
+                        if isinstance(exc, DraftSectionNumericGroundingError)
+                        else "draft_quality_guard"
+                    )
                 )
                 degraded = await deps.draft_section_service.create_or_get_degraded_section(
                     DraftSectionRequest(
@@ -346,27 +356,66 @@ def make_rewrite_sections_node(deps: Stage5WorkflowDependencies):
 
         revisions: list[dict] = []
         for section_id in target_ids:
-            result = await deps.revision_service.revise_section(
-                RevisionRequest(
-                    source_draft_section_id=UUID(drafts_by_section[section_id]),
-                    trigger=trigger,
-                    revision_round=revision_round,
+            degraded = False
+            degraded_reason: str | None = None
+            try:
+                result = await deps.revision_service.revise_section(
+                    RevisionRequest(
+                        source_draft_section_id=UUID(drafts_by_section[section_id]),
+                        trigger=trigger,
+                        revision_round=revision_round,
+                    )
                 )
-            )
+                revised_id = str(result.revised_draft_section_id)
+            except (DraftSectionNotFound, DraftSectionPersistenceFailed) as exc:
+                # 系统级：章节/持久化记录缺失 → 保持 fail-hard（不降级掩盖）。
+                raise Stage5InvalidState(
+                    f"rewrite_sections 系统级失败：{type(exc).__name__}"
+                ) from exc
+            except DraftSectionError as exc:
+                # v1.2.5：内容级 guard 失败（含 numeric grounding）→ 降级该
+                # section（reason=numeric_grounding_warning），继续完成报告；
+                # 只有系统级不可恢复（NotFound/Persistence）才失败。
+                degraded = True
+                degraded_reason = (
+                    "numeric_grounding_warning"
+                    if isinstance(exc, DraftSectionNumericGroundingError)
+                    else "draft_quality_guard"
+                )
+                if not outline_id:
+                    raise Stage5InvalidState("rewrite_sections 降级需要 outline_id")
+                degraded_section = await deps.draft_section_service.create_or_get_degraded_section(
+                    DraftSectionRequest(outline_id=UUID(outline_id), section_id=section_id),
+                    reason=degraded_reason,
+                )
+                revised_id = str(degraded_section.draft_section_id)
             revisions.append(
                 {
-                    "revision_id": str(result.revision_id),
+                    "revision_id": None if degraded else str(result.revision_id),
                     "section_id": section_id,
                     "source_draft_section_id": drafts_by_section[section_id],
-                    "revised_draft_section_id": str(result.revised_draft_section_id),
+                    "revised_draft_section_id": revised_id,
                     "revision_round": revision_round,
                     "trigger_type": trigger_type,
+                    "degraded": degraded,
+                    "degraded_reason": degraded_reason,
                 }
             )
 
         revised_by_section = {r["section_id"]: r["revised_draft_section_id"] for r in revisions}
         updated_sections = [
-            {**s, "draft_section_id": revised_by_section[s["section_id"]]}
+            {
+                **s,
+                "draft_section_id": revised_by_section[s["section_id"]],
+                "section_status": "degraded" if any(
+                    r["section_id"] == s["section_id"] and r["degraded"] for r in revisions
+                ) else s.get("section_status", "completed"),
+                "degraded_reason": next(
+                    (r["degraded_reason"] for r in revisions
+                     if r["section_id"] == s["section_id"] and r.get("degraded")),
+                    s.get("degraded_reason"),
+                ),
+            }
             if s["section_id"] in revised_by_section
             else s
             for s in state.get("sections", [])
@@ -457,48 +506,33 @@ def _degraded_section_ids(verified) -> frozenset[str]:
         if draft.status == DEGRADED_SECTION_STATUS
     )
 
-
-def _findings_all_attributable_to_degraded(verified, degraded_section_ids: frozenset[str]) -> bool:
-    """Check findings 是否全部落在 degraded section（v1.2.2 判定规则）。
-
-    - 空 findings 不算（caller 已区分 pass/fail，本函数只服务 fail 分支）；
-    - findings 的 section_id 全部 ∈ degraded_section_ids → 可人工接受（带警告）；
-    - 任一 finding 不在 degraded section（非诚实占位导致的真实内容瑕疵）→
-      **阻断**：保持 `Stage5ApproveRequiresPassCheck`，人工批准不被接受。
-    """
-    if not verified.findings:
-        return False
-    return all(
-        finding.section_id is not None and finding.section_id in degraded_section_ids
-        for finding in verified.findings
-    )
-
-
 def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
-    """finalize_on_approve：spec R——approve 只能 finalize 当前 Report，且人工接受
-    受**确定性 severity 无条件守卫**约束（Gate 0 不被人工裁决覆盖、不因降级特判）。
+    """finalize_on_approve：spec R——approve 只 finalize 当前 Report（v1.2.5）。
 
-    v1.2.4 impact scope（确定性分类，LLM 不裁决接受级别）：
-    - REPORT_BLOCKING（未来证据 / 时间穿越 / 伪造数字 / citation/provenance 严重失败 /
-      numeric grounding 无法确认关键财务事实 / 数据真实性无法确认）→ 阻断：
-      `Stage5ApproveRequiresPassCheck`（run FAILED），人工批准被拒绝；
-    - SECTION_WARNING / SECTION_UNAVAILABLE（章节级缺陷：degraded 占位 /
-      model_unavailable / draft_quality_guard / S5/S6 风险章节未生成 /
-      conflict_gap 讨论不足 / 非关键章节缺少分析）→ 允许人工批准 →
-      terminal `finalize_with_warnings`（带警告完成 → completed_with_warnings）；
-    - INFO → finalize（无警告完成）。
+    v1.2.5 风险提示系统：**内容审核问题不再阻断人工批准**。审核发现问题（含
+    REPORT_BLOCKING 枚举值，语义 CRITICAL_ALERT）→ 如实记录提醒并允许接受 →
+    `finalize_with_warnings`（completed_with_warnings）；无提醒（INFO）→
+    `finalize`（completed）。
 
-    说明：影响范围（REPORT vs SECTION）与 severity 正交；章节级缺陷不再阻断整个
-    报告，数据真实性 guard 保持（REPORT 级仍无条件阻断）。
+    `Stage5ApproveRequiresPassCheck` 只保留给**系统级不可恢复错误**（orchestration
+    状态损坏 / artifact 不存在 / 数据库一致性破坏 / 无法恢复的数据错误）——由
+    verify_*_integrity 的完整性失败自然触发（上游 Report / Check / Audit 行缺失
+    或指纹不一致），不因任何内容审计 issue 触发。
     """
 
     async def finalize_on_approve(state) -> dict:
         check_result_id = state.get("check_result_id")
         if not check_result_id:
             raise Stage5InvalidState("finalize_on_approve 需要 check_result_id")
-        verified = await deps.report_check_service.verify_check_result_integrity(
-            UUID(check_result_id)
-        )
+        try:
+            verified = await deps.report_check_service.verify_check_result_integrity(
+                UUID(check_result_id)
+            )
+        except Exception as exc:
+            # v1.2.5：只有系统级不可恢复错误（CheckResult 行缺失 / 指纹不一致 /
+            # 上游 Report 损坏 / DB 一致性破坏）才阻断 approve——
+            # Stage5ApproveRequiresPassCheck 唯一保留的触发点。
+            raise Stage5ApproveRequiresPassCheck() from exc
         raw_audit_id = state.get("audit_id")
         audit_id: UUID | None = None
         if raw_audit_id:
@@ -507,20 +541,27 @@ def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
             )
         issues: list[object] = []
         if audit_id is not None:
-            audit = await deps.report_audit_service.verify_audit_integrity(audit_id)
+            try:
+                audit = await deps.report_audit_service.verify_audit_integrity(audit_id)
+            except Exception as exc:
+                # 系统级：audit 行缺失/损坏（非内容审计问题）。
+                raise Stage5ApproveRequiresPassCheck() from exc
             issues = list(audit.issues)
+        section_type_by_id = {
+            draft.section_id: draft.section_type
+            for draft in verified.verified_report.verified_drafts
+        }
         scope = classify_report_scope(
             finding_codes=[f.code for f in verified.findings],
             finding_section_ids=[f.section_id for f in verified.findings],
             issues=issues,
             degraded_section_ids=_degraded_section_ids(verified),
+            section_type_by_id=section_type_by_id,
         )
-        if scope is AuditImpactScope.REPORT_BLOCKING:
-            # 只有破坏整体可信度（REPORT 级）才阻断人工批准
-            raise Stage5ApproveRequiresPassCheck()
         if scope is AuditImpactScope.INFO:
             return {"terminal": STAGE5_TERMINAL_FINALIZE}
-        # SECTION_WARNING / SECTION_UNAVAILABLE：允许人工批准，带警告完成
+        # REPORT_BLOCKING（CRITICAL_ALERT）/ SECTION_WARNING / SECTION_UNAVAILABLE：
+        # 均允许人工批准；带审核提醒完成（completed_with_warnings）。
         return {"terminal": STAGE5_TERMINAL_FINALIZE_WITH_WARNINGS}
 
     return finalize_on_approve

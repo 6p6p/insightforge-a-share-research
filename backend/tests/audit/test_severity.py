@@ -175,7 +175,8 @@ def test_scope_ranks_and_stricter() -> None:
 
 
 def test_scope_accepts() -> None:
-    assert not accepts_with_scope(AuditImpactScope.REPORT_BLOCKING)
+    # v1.2.5：任何 scope 均允许人工接受（审核发现问题 ≠ 报告不可交付）。
+    assert accepts_with_scope(AuditImpactScope.REPORT_BLOCKING)
     assert accepts_with_scope(AuditImpactScope.SECTION_WARNING)
     assert accepts_with_scope(AuditImpactScope.SECTION_UNAVAILABLE)
     assert accepts_with_scope(AuditImpactScope.INFO)
@@ -262,8 +263,9 @@ def test_scope_degraded_section_unavailable_allows_accept() -> None:
     assert accepts_with_scope(scope)
 
 
-def test_scope_numeric_grounding_blocks() -> None:
-    # §6(2) numeric grounding critical → REPORT_BLOCKING → 阻断接受
+def test_scope_numeric_grounding_critical_alert_not_blocking() -> None:
+    # v1.2.5：numeric grounding → REPORT_BLOCKING 枚举值（CRITICAL_ALERT 严重
+    # 提醒），但接受不被阻断——用户仍可接受/补充研究/取消。
     scope = classify_report_scope(
         finding_codes=["numeric_grounding"],
         finding_section_ids=["S1"],
@@ -271,11 +273,12 @@ def test_scope_numeric_grounding_blocks() -> None:
         degraded_section_ids=frozenset(),
     )
     assert scope is AuditImpactScope.REPORT_BLOCKING
-    assert not accepts_with_scope(scope)
+    assert accepts_with_scope(scope)
 
 
-def test_scope_future_evidence_blocks() -> None:
-    # §6(3) 未来证据 / temporal violation → REPORT_BLOCKING → 阻断接受
+def test_scope_future_evidence_critical_alert_not_blocking() -> None:
+    # v1.2.5：未来证据 / temporal violation → REPORT_BLOCKING 枚举值（严重提醒），
+    # 接受不被阻断。
     scope = classify_report_scope(
         finding_codes=[],
         finding_section_ids=[],
@@ -283,7 +286,32 @@ def test_scope_future_evidence_blocks() -> None:
         degraded_section_ids=frozenset(),
     )
     assert scope is AuditImpactScope.REPORT_BLOCKING
-    assert not accepts_with_scope(scope)
+    assert accepts_with_scope(scope)
+
+
+def test_scope_s6_s7_numeric_grounding_section_warning() -> None:
+    # v1.2.5 §5：S6/S7（risks_and_gaps）章节的 numeric grounding → SECTION_WARNING
+    # （不 REPORT_BLOCKING）。
+    scope = classify_report_scope(
+        finding_codes=["numeric_grounding"],
+        finding_section_ids=["S6"],
+        issues=[],
+        degraded_section_ids=frozenset(),
+        section_type_by_id={"S6": "risks_and_gaps"},
+    )
+    assert scope is AuditImpactScope.SECTION_WARNING
+
+
+def test_scope_risk_section_insufficient_evidence_warning() -> None:
+    # v1.2.5 §5：S6/S7 的 missing evidence issue → SECTION_WARNING。
+    scope = classify_report_scope(
+        finding_codes=[],
+        finding_section_ids=[],
+        issues=[FakeIssue("insufficient_evidence", "S7")],
+        degraded_section_ids=frozenset(),
+        section_type_by_id={"S7": "risks_and_gaps"},
+    )
+    assert scope is AuditImpactScope.SECTION_WARNING
 
 
 def test_scope_unknown_issue_conservative_blocking() -> None:

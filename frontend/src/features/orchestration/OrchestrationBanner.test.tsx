@@ -148,11 +148,11 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
 
     expect(screen.getByText('等待人工确认')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '要求重写' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '需要补充研究' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '取消执行' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '再次补充研究' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消研究' })).toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText('审批意见'), '同意发布');
-    await userEvent.click(screen.getByRole('button', { name: '批准通过' }));
+    await userEvent.click(screen.getByRole('button', { name: '接受报告' }));
 
     await waitFor(() =>
       expect(mocks.actOnOrchestration).toHaveBeenCalledWith('orch-1', 'approve', '同意发布'),
@@ -274,7 +274,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
         companyId="c1"
       />,
     );
-    expect(await screen.findByText('当前报告存在关键问题，暂不能接受')).toBeInTheDocument();
+    expect(await screen.findByText('当前报告暂不能接受')).toBeInTheDocument();
     expect(screen.getByText('报告检查未通过；存在关键完整性失败')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '接受当前报告' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '再次补充研究' })).toBeEnabled();
@@ -302,7 +302,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     );
     await screen.findByText('当前报告存在审核提醒');
     expect(screen.getByText(/部分章节存在缺口，但其他内容仍可查看与接受/)).toBeInTheDocument();
-    expect(screen.queryByText('当前报告存在关键问题，暂不能接受')).not.toBeInTheDocument();
+    expect(screen.queryByText('当前报告暂不能接受')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '接受当前报告' })).toBeEnabled();
   });
 

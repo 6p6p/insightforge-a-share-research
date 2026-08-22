@@ -102,10 +102,10 @@ def main():
                 err = {}
             code = err.get("code", "")
             if e.code == 409 and code == "research_orchestration_approval_rejected":
-                # v1.2.4 polish：approve 被确定性阻断（REPORT_BLOCKING 真实性/
-                # 证据链）→ 409 + orchestration 同步投影 failed（不再卡
-                # waiting_human、不再二次点击报「已结束」）。
-                print(f"[{tag}] approve rejected as expected (409 blocking): {code}")
+                # v1.2.5：内容审核问题不再阻断 approve（CRITICAL_ALERT 仅提醒）；
+                # 此 409 只可能在系统级不可恢复错误（artifact 缺失/一致性破坏/
+                # 状态损坏）时出现——orchestration 投影 failed 为正确终态。
+                print(f"[smoke] approve rejected (system-level 409): {code}")
                 st2, after2 = req("GET", f"/tasks/{task_id}/orchestrations/current", timeout=30)
                 print(f"[{tag}] after-rejection projection: status={after2.get('status')} "
                       f"phase={after2.get('current_phase')} "

@@ -101,13 +101,16 @@ class ResearchOrchestrationRetryRequired(ResearchOrchestrationError):
 
 class ResearchOrchestrationApprovalRejected(ResearchOrchestrationError):
     """人工 approve 提交被确定性阻断（Stage5 finalize 抛
-    `Stage5ApproveRequiresPassCheck`，REPORT_BLOCKING 真实性/证据问题）。
+    `Stage5ApproveRequiresPassCheck`，**仅系统级不可恢复错误**：
+    artifact 缺失 / 审核记录损坏 / 数据库一致性破坏 / 状态损坏）。
 
-    v1.2.4 polish：阻断成立时把 orchestration 投影为 failed（与 Stage5 child
-    run 的 FAILED 终态一致），并返回可理解的 409——不再裸 500、不再让 UI 卡在
-    waiting_human 后二次点击报「工作流已结束」。
+    v1.2.5 风险提示系统：内容审核问题（含 CRITICAL_ALERT 严重提醒）不再触发本
+    错误——approve 总被接受（带提醒完成 completed_with_warnings）。本错误仅在
+    系统级失败时把 orchestration 投影为 failed（与 Stage5 child run 的 FAILED
+    终态一致），并返回可理解的 409——不再裸 500、不再让 UI 卡在 waiting_human
+    后二次点击报「工作流已结束」。
     """
 
     code = "research_orchestration_approval_rejected"
     http_status = 409
-    message = "报告存在阻断性审核问题（真实性/证据链），暂不能批准通过"
+    message = "报告未能批准：存在系统级审核故障（审核记录缺失或数据一致性异常），请重试或重新研究"

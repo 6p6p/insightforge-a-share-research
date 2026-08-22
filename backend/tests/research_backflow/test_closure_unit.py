@@ -15,7 +15,6 @@ from app.research_backflow.closure import (
     BACKFLOW_DECISION_ACCEPT,
     BACKFLOW_DECISION_CANCEL,
     BACKFLOW_DECISION_EXTRA_RESEARCH,
-    BackflowReviewNotAcceptable,
     compute_backflow_decision_fingerprint,
     compute_backflow_review_fingerprint,
     normalize_backflow_comment,
@@ -250,7 +249,9 @@ def _bind_closure(service, monkeypatch, *, decision, with_view=False):
 
 
 @pytest.mark.asyncio
-async def test_accept_blocked_when_check_fails(monkeypatch):
+async def test_accept_allowed_when_check_fails_with_warnings(monkeypatch):
+    # v1.2.5：内容审核问题（check fail / numeric grounding）不再阻断 accept——
+    # 带审核提醒完成（completed_with_warnings）；只有系统级 barrier 才拒绝。
     service = _build_service(
         monkeypatch,
         check_status="fail",
@@ -258,23 +259,24 @@ async def test_accept_blocked_when_check_fails(monkeypatch):
         findings=[FakeFinding("numeric_grounding", "S1")],
     )
     closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
-    with pytest.raises(BackflowReviewNotAcceptable) as exc:
-        await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
-    assert any("关键审核问题" in b for b in exc.value.barriers)
-    assert closure.resolved == []
+    result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
+    assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
+    assert service._fake_orchestration_row.status == "completed_with_warnings"
 
 
 @pytest.mark.asyncio
-async def test_accept_blocked_when_critical_issue(monkeypatch):
+async def test_accept_allowed_when_critical_issue_with_warnings(monkeypatch):
+    # v1.2.5：critical issue（evidence_mismatch → CRITICAL_ALERT 严重提醒）不再
+    # 阻断 accept——带提醒完成（completed_with_warnings）。
     service = _build_service(
         monkeypatch,
         check_status="pass",
         issues=[FakeIssue("evidence_mismatch", "critical")],
     )
-    _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
-    with pytest.raises(BackflowReviewNotAcceptable) as exc:
-        await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
-    assert any("关键审核问题" in b for b in exc.value.barriers)
+    closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
+    result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
+    assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
+    assert service._fake_orchestration_row.status == "completed_with_warnings"
 
 
 @pytest.mark.asyncio
