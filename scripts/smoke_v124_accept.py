@@ -56,7 +56,9 @@ def main():
 
     deadline = time.monotonic() + 1200
     while time.monotonic() < deadline:
-        st, orch = req("GET", f"/tasks/{task_id}/orchestrations/current", timeout=30)
+        # GET current 是后台编排的轻量投影；放宽超时避免编排同步阶段
+        # （LLM 密集节点）误判为超时。
+        st, orch = req("GET", f"/tasks/{task_id}/orchestrations/current", timeout=150)
         status = orch.get("status")
         phase = orch.get("current_phase")
         print(f"[{tag}] poll: status={status} phase={phase}")
@@ -93,8 +95,30 @@ def main():
                 print(f"[{tag}] FAIL: approve produced status={after.get('status')}")
                 ok = 4
         except urllib.error.HTTPError as e:
-            print(f"[{tag}] approve HTTPError {e.code}: {e.read().decode()[:300]}")
-            ok = 5
+            body = e.read().decode()
+            try:
+                err = json.loads(body).get("error", {})
+            except Exception:
+                err = {}
+            code = err.get("code", "")
+            if e.code == 409 and code == "research_orchestration_approval_rejected":
+                # v1.2.4 polish：approve 被确定性阻断（REPORT_BLOCKING 真实性/
+                # 证据链）→ 409 + orchestration 同步投影 failed（不再卡
+                # waiting_human、不再二次点击报「已结束」）。
+                print(f"[{tag}] approve rejected as expected (409 blocking): {code}")
+                st2, after2 = req("GET", f"/tasks/{task_id}/orchestrations/current", timeout=30)
+                print(f"[{tag}] after-rejection projection: status={after2.get('status')} "
+                      f"phase={after2.get('current_phase')} "
+                      f"error_code={after2.get('error_code')}")
+                if after2.get("status") == "failed" and after2.get("error_code") == "stage5_approval_rejected":
+                    print(f"[{tag}] RESULT blocked + projection ok (terminal failed)")
+                    ok = 0
+                else:
+                    print(f"[{tag}] FAIL: rejection did not project orchestration to failed")
+                    ok = 4
+            else:
+                print(f"[{tag}] approve HTTPError {e.code}: {body[:300]}")
+                ok = 5
         print(f"[{tag}] FINAL ok={ok}")
         sys.exit(ok)
 

@@ -22,10 +22,11 @@ ORCHESTRATOR_VERSION = 1
 ACTIVE_ORCHESTRATION_STATUSES = frozenset({"pending", "running", "waiting_human"})
 
 # 补充研究最大轮数（7A.2B.3 spec K-X）：同一 orchestration 内最多执行
-# MAX_BACKFLOW_RESEARCH_ROUNDS 轮 backflow（Stage4/5 child attempt 2、3）。
-# 达到上限仍未 resolved → waiting_human / manual_required，稳定 reason
+# MAX_BACKFLOW_RESEARCH_ROUNDS 轮 backflow（v1.2.4 polish：默认 2 → 1，仅一轮
+# 自动补充研究，未 resolved → waiting_human / manual_required）。达到上限仍未
+# resolved → waiting_human / manual_required，稳定 reason
 # research_backflow_limit_reached（防无限循环）。
-MAX_BACKFLOW_RESEARCH_ROUNDS = 2
+MAX_BACKFLOW_RESEARCH_ROUNDS = 1
 # P3：用户手动「再次补充研究」(extra_research) 轮的有界上限。当前架构每个
 # orchestration 至多一个 closure request/decision（backflow_human_review_requests
 # UNIQUE(orchestration_id)），即单次手动补充轮；与自动轮上限

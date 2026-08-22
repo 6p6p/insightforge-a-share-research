@@ -25,12 +25,15 @@ from app.research_orchestration.contracts import (
     OrchestrationPhase,
     OrchestrationStatus,
 )
+from app.core.errors import WorkflowRunAlreadyFinished
 from app.research_orchestration.errors import (
     ResearchOrchestrationAlreadyFinished,
+    ResearchOrchestrationApprovalRejected,
     ResearchOrchestrationChildNotFound,
     ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
 )
+from app.stage5.errors import Stage5ApproveRequiresPassCheck
 from app.research_orchestration.repository import (
     ResearchOrchestrationChildRepository,
     ResearchOrchestrationRepository,
@@ -231,3 +234,67 @@ async def test_act_unbound_runners_raise(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="action runners not bound"):
         await service.act_on_orchestration(_OID, HUMAN_DECISION_APPROVE)
+
+
+async def test_act_approve_requires_pass_check_projections_failed(monkeypatch) -> None:
+    """v1.2.4 polish：approve 被确定性阻断（Stage5ApproveRequiresPassCheck，
+    REPORT_BLOCKING 真实性/证据问题）→ orchestration 同步投影 failed
+    （error_code=stage5_approval_rejected）+ 抛 409 ApprovalRejected；
+    **顶层 run_orchestration 不再执行**（child 已 FAILED，二次点击直接
+    AlreadyFinished，不重复阻塞式拒绝）。"""
+    service = _service(monkeypatch)
+    _bind_row(monkeypatch, _waiting_stage5_row())
+
+    async def fake_resume(self, run_id, decision, comment=None):
+        raise Stage5ApproveRequiresPassCheck()
+
+    async def fake_mark_failed(self, orchestration_id, completed_at, *, error_code, error_message=None):
+        assert error_code == "stage5_approval_rejected"
+        assert error_message and "阻断" in error_message
+        return make_orchestration(
+            orchestration_id=_OID,
+            task_id=_TASK_ID,
+            status=OrchestrationStatus.FAILED.value,
+            current_phase=OrchestrationPhase.STAGE5.value,
+            error_code=error_code,
+        )
+
+    monkeypatch.setattr(FakeActionStage5Runner, "resume_stage5_human", fake_resume)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "mark_failed", fake_mark_failed)
+
+    with pytest.raises(ResearchOrchestrationApprovalRejected):
+        await service.act_on_orchestration(_OID, HUMAN_DECISION_APPROVE)
+
+    # 顶层 run 未被调用：approve 被拒即终态投影，不继续顶层（防二次执行）。
+    assert service._orchestration_runner.run_calls == []
+
+
+async def test_act_approve_child_already_finished_also_projections_failed(
+    monkeypatch,
+) -> None:
+    """v1.2.4 polish：僵尸态「第二次点击」——child run 已终态（前次拒绝已标
+    FAILED / 外部已结束），resume 抛 WorkflowRunAlreadyFinished → 同样投影
+    orchestration failed + 抛 409（不再「工作流已结束」后仍卡 waiting_human）。"""
+    service = _service(monkeypatch)
+    _bind_row(monkeypatch, _waiting_stage5_row())
+
+    async def fake_resume(self, run_id, decision, comment=None):
+        raise WorkflowRunAlreadyFinished()
+
+    async def fake_mark_failed(self, orchestration_id, completed_at, *, error_code, error_message=None):
+        assert error_code == "stage5_approval_rejected"
+        return make_orchestration(
+            orchestration_id=_OID,
+            task_id=_TASK_ID,
+            status=OrchestrationStatus.FAILED.value,
+            current_phase=OrchestrationPhase.STAGE5.value,
+            error_code=error_code,
+        )
+
+    monkeypatch.setattr(FakeActionStage5Runner, "resume_stage5_human", fake_resume)
+    monkeypatch.setattr(ResearchOrchestrationRepository, "mark_failed", fake_mark_failed)
+
+    with pytest.raises(ResearchOrchestrationApprovalRejected):
+        await service.act_on_orchestration(_OID, HUMAN_DECISION_APPROVE)
+
+    assert service._orchestration_runner.run_calls == []

@@ -513,10 +513,11 @@ async def test_finalize_with_warnings_marks_completed_with_warnings(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_research_required_backflow_loop_to_limit(monkeypatch) -> None:
-    """research_required → backflow loop（每轮新增 EvidenceCard）→ 两轮后达
-    MAX_BACKFLOW_RESEARCH_ROUNDS → research_backflow_manual（limit_reached）。
+    """research_required → backflow loop（每轮新增 EvidenceCard）→ 一轮后达
+    MAX_BACKFLOW_RESEARCH_ROUNDS (=1，v1.2.4 polish 默认 2 → 1）
+    → research_backflow_manual（limit_reached）。
 
-    验证：round 递增、Stage4/5 child attempt 1/2/3、每轮 execute_supplemental_
+    验证：round 递增、Stage4/5 child attempt 1/2、每轮 execute_supplemental_
     research、backflow child link 记录 source_research_request_id、最终
     waiting_human + phase=research_backflow + 稳定 reason。
     """
@@ -535,15 +536,15 @@ async def test_research_required_backflow_loop_to_limit(monkeypatch) -> None:
     assert final["research_request_id"] == str(_RESEARCH_REQUEST_ID)
     assert final["current_phase"] == OrchestrationPhase.RESEARCH_BACKFLOW.value
     assert final["backflow_manual_reason"] == "research_backflow_limit_reached"
-    assert final["backflow_round"] == 2
-    # 首启 attempt1 + 两轮 backflow attempt2/3。
-    assert harness.child_service.stage4_attempts == [1, 2, 3]
-    assert harness.child_service.stage5_attempts == [1, 2, 3]
-    assert harness.backflow_executor.calls == 2
-    # backflow child link 记录 source_research_request_id（attempt1 为 None）。
-    assert harness.child_service.stage4_sources[1:] == [_RESEARCH_REQUEST_ID] * 2
-    assert harness.child_service.stage5_sources[1:] == [_RESEARCH_REQUEST_ID] * 2
-    # fake run 复用同一 run：execute 只发生在首启（attempt2/3 复用 completed run）。
+    assert final["backflow_round"] == 1
+    # 首启 attempt1 + 一轮 backflow attempt2。
+    assert harness.child_service.stage4_attempts == [1, 2]
+    assert harness.child_service.stage5_attempts == [1, 2]
+    assert harness.backflow_executor.calls == 1
+    # backflow child 节点记录 source_research_request_id（attempt1 为 None）。
+    assert harness.child_service.stage4_sources[1:] == [_RESEARCH_REQUEST_ID]
+    assert harness.child_service.stage5_sources[1:] == [_RESEARCH_REQUEST_ID]
+    # fake run 复用同一 run：execute 只发生在首启（attempt2 复用 completed run）。
     assert harness.stage5_runner.execute_calls == 1
 
 
@@ -790,13 +791,13 @@ async def test_k2_resume_progress_consumes_same_plan(monkeypatch) -> None:
     final2 = await runner.resume_after_source_acquisition(
         _ORCH_ID, RESUME_KIND_SUPPLEMENTAL_RESEARCH
     )
-    # 有进度 → Stage4 attempt 2 → Stage5 attempt 2 又 research_required → round 2 →
-    # 继续 → 达 MAX → limit_reached END（K3 不绕过）。
+    # 有进度 → Stage4 attempt 2 → Stage5 attempt 2 又 research_required → round 1
+    # 已达 MAX (=1, v1.2.4 polish 2 → 1）→ limit_reached END（K3 不绕过）。
     assert final2["backflow_manual_reason"] == "research_backflow_limit_reached"
-    assert final2["backflow_round"] == 2
-    assert harness.child_service.stage4_attempts == [1, 2, 3]
-    assert harness.child_service.stage5_attempts == [1, 2, 3]
-    assert harness.backflow_executor.calls == 3  # 首启 + resume + round2
+    assert final2["backflow_round"] == 1
+    assert harness.child_service.stage4_attempts == [1, 2]
+    assert harness.child_service.stage5_attempts == [1, 2]
+    assert harness.backflow_executor.calls == 2  # 首启 + resume
     # create_or_get_plan replay 幂等：全部同一 plan id（不新建 SupplementalPlan）。
     assert len(set(harness.backflow_service.plan_ids)) == 1
 

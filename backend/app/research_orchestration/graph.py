@@ -22,7 +22,7 @@ Backflow loop（7A.2B.3 spec K-X）：
            collect_synthesis → fulfill_request → ensure_stage5_child →
            run_or_resume_stage5 → route_stage5_result 重新判定)
         → (no_progress: research_backflow_manual END)
-    `MAX_BACKFLOW_RESEARCH_ROUNDS=2`：达到上限 → research_backflow_manual
+    `MAX_BACKFLOW_RESEARCH_ROUNDS=1`：达到上限 → research_backflow_manual
     （reason=research_backflow_limit_reached）。
 
 - 顶层是真实 LangGraph graph（`build_top_level_research_orchestration_graph`），

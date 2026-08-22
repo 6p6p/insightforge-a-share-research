@@ -1013,10 +1013,11 @@ async def test_backflow_progress_fulfill_continuation_completed(
 
 
 async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_uri) -> None:
-    """Backflow 达上限：两轮各新增 EvidenceCard + 两轮 fulfill 成功 → Stage5 第三次
-    research_required → round=2 >= MAX → research_backflow_manual
-    （reason=research_backflow_limit_reached）→ waiting_human；3 次 Stage4/Stage5
-    attempt、2 行 fulfillment。"""
+    """Backflow 达上限（v1.2.4 polish：MAX_BACKFLOW_RESEARCH_ROUNDS 默认 2 → 1）：
+    一轮补充研究各新增 EvidenceCard + fulfill 成功 → Stage5 第二次
+    research_required → round=1 >= MAX → research_backflow_manual
+    （reason=research_backflow_limit_reached）→ waiting_human；2 次 Stage4/Stage5
+    attempt、1 行 fulfillment。"""
     ids = await _seed_worker_inputs(env, monkeypatch)
     extra_a = await _seed_claim_doc_card(
         env,
@@ -1024,15 +1025,8 @@ async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_u
         source_url="https://www.xinhuanet.com/2026/0810/s4extraA.htm",
         research_question=_QUESTION,
     )
-    extra_b = await _seed_claim_doc_card(
-        env,
-        statement="贵州茅台 2026 年渠道证据 B。",
-        source_url="https://www.xinhuanet.com/2026/0810/s4extraB.htm",
-        research_question=_QUESTION,
-    )
     request = _request(env, ids)
     request_a = _with_extra_card(request, extra_a["evidence_card_id"])
-    request_ab = _with_extra_card(request_a, extra_b["evidence_card_id"])
     sessionmaker = env["sessionmaker"]
     task_id = env["task_id"]
 
@@ -1041,13 +1035,10 @@ async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_u
     try:
         orchestration_id = await _create_orchestration(sessionmaker, task_id)
         executor = _FakeBackflowExecutor(
-            new_card_batches=[
-                (extra_a["evidence_card_id"],),
-                (extra_b["evidence_card_id"],),
-            ]
+            new_card_batches=[(extra_a["evidence_card_id"],)]
         )
-        # prepare 调用序：首启 3 次 base → round1 2 次 request_a → round2 2 次
-        # request_ab（prepare/ensure_stage4_child/run_or_resume_stage4 +
+        # prepare 调用序：首启 3 次 base → round1 2 次 request_a
+        # （prepare/ensure_stage4_child/run_or_resume_stage4 +
         # prepare_updated_analysis/run_or_resume_stage4）。
         deps = _orchestration_deps(
             sessionmaker,
@@ -1060,7 +1051,7 @@ async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_u
                 (True, request, []),
                 (True, request_a, []),
                 (True, request_a, []),
-                (True, request_ab, []),
+                (True, request_a, []),
             ],
             models=_ref_aware_models(),
             backflow_executor=executor,
@@ -1070,24 +1061,24 @@ async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_u
 
         # 达上限 → research_backflow_manual（稳定 reason），不 pretend completed。
         assert final["current_phase"] == "research_backflow"
-        assert final["backflow_round"] == 2
+        assert final["backflow_round"] == 1
         assert final["backflow_manual_reason"] == RESEARCH_BACKFLOW_LIMIT_REACHED
         row = await _get_orchestration_row(sessionmaker, orchestration_id)
         assert row["status"] == "waiting_human"
         assert row["current_phase"] == "research_backflow"
 
-        # 两轮补充计划 + 两轮 fulfillment；Stage4/Stage5 共 3 次 attempt。
-        assert await _count(sessionmaker, "research_backflow_plans") == 2
-        assert await _count(sessionmaker, "research_backflow_fulfillments") == 2
-        assert executor.calls == 2
+        # 一轮补充计划 + 一轮 fulfillment；Stage4/Stage5 共 2 次 attempt。
+        assert await _count(sessionmaker, "research_backflow_plans") == 1
+        assert await _count(sessionmaker, "research_backflow_fulfillments") == 1
+        assert executor.calls == 1
         s_runs, s_results = await _synthesis_counts(sessionmaker)
-        assert (s_runs, s_results) == (3, 3)
-        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=3) is not None
-        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=3) is not None
+        assert (s_runs, s_results) == (2, 2)
+        assert await _get_child(sessionmaker, orchestration_id, "stage4", attempt_no=2) is not None
+        assert await _get_child(sessionmaker, orchestration_id, "stage5", attempt_no=2) is not None
 
-        # 6 条 run（stage4 x3 + stage5 x3）全部 completed（child 终态），顶层 waiting_human。
+        # 4 条 run（stage4 x2 + stage5 x2）全部 completed（child 终态），顶层 waiting_human。
         runs = await _runs_for_task(sessionmaker, task_id)
-        assert len(runs) == 6
+        assert len(runs) == 4
         assert all(r["status"] == "completed" for r in runs)
     finally:
         await manager.close()

@@ -718,11 +718,14 @@ function OrchestrationHumanActionCard({
       void queryClient.invalidateQueries({ queryKey: taskKeys.workspace(orchestration.task_id) });
     },
     onError: (error: unknown) => {
-      if (error instanceof ApiError && error.isConflict) {
-        setConflict(error.message);
-        void queryClient.invalidateQueries({ queryKey: orchestrationKeys.all });
-        void queryClient.invalidateQueries({ queryKey: taskKeys.workspace(orchestration.task_id) });
-      }
+      const message =
+        error instanceof ApiError ? error.message : error instanceof Error ? error.message : null;
+      setConflict(message);
+      // v1.2.4 polish：任何错误（含 409 阻断性拒绝）都强制刷新——
+      // 后端同步投影后（如 approval rejected → failed）UI 立即跟上，
+      // 不再「第一次点击无反馈、第二次点击报已结束」。
+      void queryClient.invalidateQueries({ queryKey: orchestrationKeys.all });
+      void queryClient.invalidateQueries({ queryKey: taskKeys.workspace(orchestration.task_id) });
     },
   });
 

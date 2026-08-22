@@ -91,19 +91,26 @@ def test_route_stage5_result_known_statuses(status: str) -> None:
 
 
 def test_route_stage5_result_research_required_below_limit_enters_backflow() -> None:
-    """research_required + round < MAX_BACKFLOW_RESEARCH_ROUNDS → 进入 backflow loop。"""
+    """research_required + round < MAX_BACKFLOW_RESEARCH_ROUNDS → 进入 backflow loop。
+
+    v1.2.4 polish：MAX_BACKFLOW_RESEARCH_ROUNDS 默认 2 → 1，round 0 进入 loop，
+    round 1 已达上限 → research_backflow_manual。
+    """
     assert (
         route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 0})
-        == "research_required"
-    )
-    assert (
-        route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 1})
         == "research_required"
     )
 
 
 def test_route_stage5_result_research_required_limit_reached() -> None:
-    """research_required + round >= MAX → research_backflow_manual（limit）。"""
+    """research_required + round >= MAX → research_backflow_manual（limit）。
+
+    v1.2.4 polish：MAX_BACKFLOW_RESEARCH_ROUNDS=1，round 1 即达上限。
+    """
+    assert (
+        route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 1})
+        == "research_backflow_manual"
+    )
     assert (
         route_stage5_result({"stage5_run_status": "research_required", "backflow_round": 2})
         == "research_backflow_manual"

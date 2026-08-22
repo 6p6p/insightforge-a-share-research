@@ -52,7 +52,7 @@ from app.audit.severity import (
     AuditImpactScope,
     classify_report_scope,
 )
-from app.core.errors import ActiveWorkflowRunExists
+from app.core.errors import ActiveWorkflowRunExists, WorkflowRunAlreadyFinished
 from app.core.logging import get_logger
 from app.db.models.research_orchestration import (
     ResearchOrchestrationChildModel,
@@ -79,6 +79,7 @@ from app.research_orchestration.contracts import (
 from app.research_orchestration.errors import (
     ResearchOrchestrationActiveConflict,
     ResearchOrchestrationAlreadyFinished,
+    ResearchOrchestrationApprovalRejected,
     ResearchOrchestrationChildConflict,
     ResearchOrchestrationChildNotFound,
     ResearchOrchestrationIntegrityError,
@@ -101,6 +102,7 @@ from app.review.contracts import (
 from app.stage4.contracts import Stage4WorkflowRequest
 from app.stage4.runner import Stage4WorkflowRunner
 from app.stage5.contracts import Stage5WorkflowRequest
+from app.stage5.errors import Stage5ApproveRequiresPassCheck
 from app.stage5.runner import Stage5WorkflowRunner
 
 if TYPE_CHECKING:  # pragma: no cover — 仅类型注解
@@ -714,11 +716,37 @@ class ResearchOrchestrationService:
         if child is None:
             raise ResearchOrchestrationChildNotFound()
 
-        await self._stage5_runner.resume_stage5_human(
-            child.workflow_run_id, decision=action, comment=comment
-        )
+        try:
+            await self._stage5_runner.resume_stage5_human(
+                child.workflow_run_id, decision=action, comment=comment
+            )
+        except (Stage5ApproveRequiresPassCheck, WorkflowRunAlreadyFinished) as exc:
+            # v1.2.4 polish：approve 不能推进 Stage5（确定性阻断
+            # Stage5ApproveRequiresPassCheck；或 child run 已终态二次提交
+            # WorkflowRunAlreadyFinished）——两种都意味着人工批准无法生效，
+            # 这里把 orchestration 同步投影为 failed（不再卡在
+            # waiting_human/awaiting_stage5），并返回可理解的 409，避免
+            # 「第一次点击无反馈，第二次点击报已结束」。
+            await self._stage5_failed_on_approval_rejected(orchestration_id)
+            raise ResearchOrchestrationApprovalRejected from exc
         await self._orchestration_runner.run_orchestration(orchestration_id)
         return await self.get_orchestration(orchestration_id)
+
+    async def _stage5_failed_on_approval_rejected(self, orchestration_id: UUID) -> None:
+        """approve 被确定性阻断时的 orchestration 投影（v1.2.4 polish）。
+
+        Stage5 child run 已由 runner 标 FAILED（terminal）；这里把
+        orchestration 同步投影为 failed，使 UI 不再卡在 waiting_human 且
+        后续 action 得到一致的「已结束」反馈（不重复阻塞式拒绝）。
+        """
+        async with self._sessionmaker() as session:
+            await ResearchOrchestrationRepository(session).mark_failed(
+                orchestration_id,
+                datetime.now(UTC),
+                error_code="stage5_approval_rejected",
+                error_message="报告存在阻断性审核问题（真实性/证据链），暂不能批准通过",
+            )
+            await session.commit()
 
     async def resume_after_source_acquisition(
         self, orchestration_id: UUID

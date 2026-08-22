@@ -97,3 +97,17 @@ class ResearchOrchestrationRetryRequired(ResearchOrchestrationError):
     code = "research_orchestration_retry_required"
     http_status = 409
     message = "该任务最近一次研究编排已结束且未成功，请显式重试"
+
+
+class ResearchOrchestrationApprovalRejected(ResearchOrchestrationError):
+    """人工 approve 提交被确定性阻断（Stage5 finalize 抛
+    `Stage5ApproveRequiresPassCheck`，REPORT_BLOCKING 真实性/证据问题）。
+
+    v1.2.4 polish：阻断成立时把 orchestration 投影为 failed（与 Stage5 child
+    run 的 FAILED 终态一致），并返回可理解的 409——不再裸 500、不再让 UI 卡在
+    waiting_human 后二次点击报「工作流已结束」。
+    """
+
+    code = "research_orchestration_approval_rejected"
+    http_status = 409
+    message = "报告存在阻断性审核问题（真实性/证据链），暂不能批准通过"
