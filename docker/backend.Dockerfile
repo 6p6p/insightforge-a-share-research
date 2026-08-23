@@ -18,6 +18,8 @@ COPY backend/alembic ./alembic
 # `--index-url` 指向 PyTorch CPU 源（+cpu 版本只在此发布）；torch 的普通依赖
 # （sympy / filelock 等）需 `--extra-index-url` 从 PyPI 解析（单源会解析失败）。
 RUN python -m pip install --no-cache-dir \
+    --progress-bar on \
+    --timeout 3000 \
     --index-url https://download.pytorch.org/whl/cpu \
     --extra-index-url https://pypi.org/simple/ \
     "torch==2.13.0+cpu"

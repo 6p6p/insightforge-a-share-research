@@ -74,6 +74,7 @@ const base: ResearchOrchestrationResponse = {
   research_request_id: null,
   manual_reason: null,
   missing_need_codes: [],
+  data_source_warning: null,
   updated_at: '2026-08-12T00:00:00Z',
 };
 
@@ -214,19 +215,34 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     await waitFor(() => expect(mocks.resumeSourceAcquisition).toHaveBeenCalledWith('orch-1'));
   });
 
-  it('research_backflow + source_acquisition_required → 同样显示补资料面板（K2 路径）', async () => {
-    mocks.listSourceProviders.mockResolvedValue({ items: [], total: 0 });
+  it('v1.2.6-B：research_backflow + source_acquisition_required → 报告已生成，显示人工闭环卡片（可接受报告）', async () => {
+    mocks.getBackflowReview.mockResolvedValue({
+      orchestration_id: 'orch-1',
+      backflow_human_request_id: 'req-1',
+      reason: 'source_acquisition_required',
+      decision: null,
+      comment: null,
+      decided_at: null,
+      acceptance_barriers: [],
+      impact_scope: 'section_warning',
+    });
     renderWithProviders(
       <OrchestrationBanner
         orchestration={withPhase({
+          status: 'waiting_human',
           current_phase: 'research_backflow',
           manual_reason: 'source_acquisition_required',
           missing_need_codes: ['annual_report_financial'],
+          data_source_warning: '部分资料缺失，相关章节需要人工确认（报告按现有证据完成，含审核提醒）',
         })}
         companyId="c1"
       />,
     );
-    expect(await screen.findByText('研究资料不足')).toBeInTheDocument();
+    // 资料不足且有报告：提供「接受报告」而非只补资料。
+    expect(await screen.findByText('需要人工确认')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '接受当前报告' })).toBeInTheDocument();
+    // data_source_warning 提醒展示。
+    expect(screen.getByText(/部分资料缺失，相关章节需要人工确认/)).toBeInTheDocument();
   });
 
   it('research_backflow + limit_reached → 人工闭环卡片（接受/再次补充研究/取消）', async () => {
@@ -255,7 +271,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     expect(screen.queryByText('研究资料不足')).not.toBeInTheDocument();
   });
 
-  it('research_backflow + limit_reached + 关键 barrier → 接受按钮禁用并给出中文理由', async () => {
+  it('v1.2.6-B：系统级 barrier（无法定位报告）→ 接受按钮禁用并给出中文理由', async () => {
     mocks.getBackflowReview.mockResolvedValue({
       orchestration_id: 'orch-1',
       backflow_human_request_id: 'req-1',
@@ -263,7 +279,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
       decision: null,
       comment: null,
       decided_at: null,
-      acceptance_barriers: ['报告检查未通过', '存在关键完整性失败'],
+      acceptance_barriers: ['无法定位当前报告（工作流状态未完成），不能接受'],
     });
     renderWithProviders(
       <OrchestrationBanner
@@ -274,8 +290,8 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
         companyId="c1"
       />,
     );
-    expect(await screen.findByText('当前报告暂不能接受')).toBeInTheDocument();
-    expect(screen.getByText('报告检查未通过；存在关键完整性失败')).toBeInTheDocument();
+    expect(await screen.findByText('当前报告因系统异常暂不能接受')).toBeInTheDocument();
+    expect(screen.getByText('无法定位当前报告（工作流状态未完成），不能接受')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '接受当前报告' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '再次补充研究' })).toBeEnabled();
   });
@@ -302,7 +318,7 @@ describe('OrchestrationBanner（V1.1 产品语义）', () => {
     );
     await screen.findByText('当前报告存在审核提醒');
     expect(screen.getByText(/部分章节存在缺口，但其他内容仍可查看与接受/)).toBeInTheDocument();
-    expect(screen.queryByText('当前报告暂不能接受')).not.toBeInTheDocument();
+    expect(screen.queryByText('当前报告因系统异常暂不能接受')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '接受当前报告' })).toBeEnabled();
   });
 

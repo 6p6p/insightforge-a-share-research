@@ -209,6 +209,8 @@ class ResearchOrchestrationResult:
     research_request_id: UUID | None = None
     manual_reason: str | None = None
     missing_need_codes: list[str] | None = None
+    # v1.2.6-B：backflow 终结时若报告已生成但存在资料/来源缺口，投影提醒文案。
+    data_source_warning: str | None = None
     updated_at: datetime | None = None
 
 
@@ -307,6 +309,7 @@ class ResearchOrchestrationService:
             research_request_id=_uuid_or_none(checkpoint.get("research_request_id")),
             manual_reason=checkpoint.get("backflow_manual_reason"),
             missing_need_codes=checkpoint.get("missing_need_codes"),
+            data_source_warning=checkpoint.get("data_source_warning"),
             updated_at=(
                 orchestration.updated_at.astimezone(UTC)
                 if orchestration.updated_at is not None
@@ -1010,23 +1013,27 @@ class ResearchOrchestrationService:
         stage5_state = await self._stage5_runner.read_checkpoint_state(child.workflow_run_id)
         audit_id = _uuid_or_none(stage5_state.get("audit_id"))
         check_result_id = _uuid_or_none(stage5_state.get("check_result_id"))
+        # v1.2.6-B：报告已生成（stage5 checkpoint 存在 report_id）即允许人工接受。
+        # 删除旧的「审核记录缺失 → 暂不能接受」阻断逻辑（会与「报告已生成」并存）。
+        # audit/check 缺失但报告已生成 -> 允许接受（SECTION_WARNING 带提醒完成）；
+        # 仅当报告也缺失（工作流状态损坏）才属系统级不可恢复，产生 barrier。
         if audit_id is None or check_result_id is None:
-            # P0 UX 修复：守卫仍严格拒绝（无 audit/check 不可接受），但理由必须可理解：
-            # 当前处于「自动审核失败 / 审核未完成」而非神秘「缺记录」。
-            return (
-                AuditImpactScope.REPORT_BLOCKING,
-                [
-                    "当前报告尚未完成自动审核（审核记录未生成），暂不能接受；"
-                    "请选择「再次补充研究」重新验证，或取消研究。"
-                ],
-            )
+            report_id = _uuid_or_none(stage5_state.get("report_id"))
+            if report_id is None:
+                return (
+                    AuditImpactScope.REPORT_BLOCKING,
+                    [
+                        "无法定位当前报告（工作流状态未完成），不能接受；请选择「再次补充研究」重新验证，或取消研究。"
+                    ],
+                )
+            return (AuditImpactScope.SECTION_WARNING, [])
+
         if self._report_check_service is None or self._report_audit_service is None:
             raise RuntimeError("acceptance guard services not bound")
         check = await self._report_check_service.verify_check_result_integrity(check_result_id)
         verified = await self._report_audit_service.verify_audit_integrity(audit_id)
         section_type_by_id = {
-            draft.section_id: draft.section_type
-            for draft in check.verified_report.verified_drafts
+            draft.section_id: draft.section_type for draft in check.verified_report.verified_drafts
         }
         scope = classify_report_scope(
             finding_codes=[f.code for f in check.findings],

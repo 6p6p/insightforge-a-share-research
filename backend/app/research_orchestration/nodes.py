@@ -829,6 +829,14 @@ def make_research_backflow_manual_node(deps: ResearchOrchestrationDependencies):
         return {
             "backflow_manual_reason": reason,
             "current_phase": _phase_value(OrchestrationPhase.RESEARCH_BACKFLOW),
+            # v1.2.6-B（任务2）：backflow 终结时报告 artifact 已生成（stage5
+            # terminal research_backflow 时 report_id 先于 research_required 落盘），
+            # 仅存在资料/来源不足缺口 -> 记录 data_source_warning，前端据此提醒
+            # 「部分资料缺失，相关章节需要人工确认」；仅当无任何报告（waiting_manual
+            # 路径，0 WorkflowRun）才等待人工补资料，此时无此字段。
+            "data_source_warning": (
+                "部分资料缺失，相关章节需要人工确认（报告按现有证据完成，含审核提醒）"
+            ),
         }
 
     return research_backflow_manual

@@ -28,6 +28,7 @@ def test_state_keys_exact() -> None:
         "backflow_executor_manual_reasons",
         "backflow_progress",
         "backflow_manual_reason",
+        "data_source_warning",
         "fulfillment_id",
         "error_code",
     }

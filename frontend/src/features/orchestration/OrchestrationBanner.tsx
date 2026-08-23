@@ -50,7 +50,6 @@ import {
   type OrchestrationAction,
   type OrchestrationPhase,
   type ResearchOrchestrationResponse,
-  RESUME_MANUAL_REASONS,
   STRUCTURED_DATA_REFRESH_REASON,
 } from '../../types/orchestration';
 import {
@@ -151,7 +150,10 @@ export function OrchestrationBanner({
         message="研究完成"
         description={
           status === 'completed_with_warnings'
-            ? '报告已生成（包含审核提醒）——审核提醒已保留在报告中供参考，不影响报告交付；请在「报告」标签页查看各章节的说明与审核详情。'
+            ? orchestration.data_source_warning != null
+              ? orchestration.data_source_warning +
+                  '。报告已生成（包含审核提醒）——请在「报告」标签页查看各章节说明与审核详情。'
+              : '报告已生成（包含审核提醒）——审核提醒已保留在报告中供参考，不影响报告交付；请在「报告」标签页查看各章节的说明与审核详情。'
             : '报告已生成，可在「报告」标签页查看并导出。'
         }
       />
@@ -186,11 +188,10 @@ export function OrchestrationBanner({
     );
   }
 
-  const needsSource =
-    current_phase === 'waiting_manual' ||
-    (current_phase === 'research_backflow' &&
-      orchestration.manual_reason != null &&
-      RESUME_MANUAL_REASONS.includes(orchestration.manual_reason));
+  // v1.2.6-B（任务2）：只有「无法生成任何报告」（waiting_manual，0 WorkflowRun）
+  // 才等待人工补资料；research_backflow 终结时报告 artifact 已生成，即使存在
+  // 资料/来源缺口（source_acquisition_required）也应走人工闭环卡（可接受报告）。
+  const needsSource = current_phase === 'waiting_manual';
 
   // 结构化数据补充缺口不在自动文档补充研究范围：上传 PDF / URL 不能解决。
   const structuredGap =
@@ -963,13 +964,18 @@ function BackflowClosureCard({
           type="warning"
           showIcon
           message={closureAlertMessage(review?.reason ?? orchestration.manual_reason)}
-          description="你可以接受当前报告、再次补充研究（有界），或取消研究。"
+          description={
+            orchestration.data_source_warning != null
+              ? orchestration.data_source_warning +
+                  '。你可以接受当前报告、再次补充研究（有界），或取消研究。'
+              : '你可以接受当前报告、再次补充研究（有界），或取消研究。'
+          }
         />
         {!done && acceptDisabled && barriers.length > 0 ? (
           <Alert
             type="error"
             showIcon
-            message="当前报告暂不能接受"
+            message="当前报告因系统异常暂不能接受"
             description={barriers.join('；')}
           />
         ) : null}

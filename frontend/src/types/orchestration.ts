@@ -56,6 +56,8 @@ export interface ResearchOrchestrationResponse {
   manual_reason: string | null;
   /** 资料不足时缺失的研究需求代码（need_code）。 */
   missing_need_codes: string[];
+  /** v1.2.6-B：报告已生成但存在资料/来源缺口时的提醒文案（可空）。 */
+  data_source_warning: string | null;
   updated_at: string;
 }
 

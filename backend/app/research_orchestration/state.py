@@ -69,6 +69,8 @@ class ResearchOrchestrationState(TypedDict, total=False):
     # research_backflow_no_progress / source_acquisition_required /
     # structured_data_refresh_required；checkpoint state observability）。
     backflow_manual_reason: str
+    # backflow 终结：仍存在资料/来源缺口提示（仅投影）。
+    data_source_warning: str
     # fulfill_request 之后：consumed 的新 SynthesisResult 的 fulfillment 行 id
     # （build_stage5_continuation_request 据此重建 Stage5 attempt 的 request）。
     fulfillment_id: str

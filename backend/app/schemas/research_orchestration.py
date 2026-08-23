@@ -45,6 +45,7 @@ class ResearchOrchestrationResponse(BaseModel):
     research_request_id: UUID | None = None
     manual_reason: str | None = None
     missing_need_codes: list[str] | None = None
+    data_source_warning: str | None = None
     updated_at: datetime | None = None
 
 
@@ -79,4 +80,3 @@ class BackflowReviewResponse(BaseModel):
     decided_at: datetime | None = None
     acceptance_barriers: list[str] = []
     impact_scope: str | None = None  # v1.2.4 impact scope
-
