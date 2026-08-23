@@ -97,6 +97,14 @@ async def get_task(
     return await service.get_task(task_id)
 
 
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task(
+    task_id: UUID,
+    service: Annotated[TaskService, Depends(get_task_service)],
+) -> None:
+    await service.delete_task(task_id)
+
+
 @router.get("", response_model=TaskListResponse)
 async def list_tasks(
     service: Annotated[TaskService, Depends(get_task_service)],

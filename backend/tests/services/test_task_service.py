@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.core.errors import IdempotencyConflict, TaskNotFound
+from app.core.errors import IdempotencyConflict, TaskHasDependentData, TaskNotFound
 from app.db.models.research_task import ResearchTaskModel
 from app.domain.tasks import TaskStatus
 from app.schemas.task import TaskCreateRequest
@@ -37,14 +37,25 @@ class _FakeUniqueViolation(Exception):
         self.diag = _FakeDiag("23505", "uq_research_tasks_idempotency_key")
 
 
+class _FakeFkViolation(Exception):
+    def __init__(self) -> None:
+        self.diag = _FakeDiag("23503", "some_fk_constraint")
+
+
 class FakeResearchTaskRepository:
     """In-memory repository; can simulate a late idempotency-key conflict."""
 
-    def __init__(self, *, simulate_late_conflict: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        simulate_late_conflict: bool = False,
+        simulate_fk_conflict: bool = False,
+    ) -> None:
         self.session = _FakeSession()
         self.by_id: dict[UUID, ResearchTaskModel] = {}
         self.by_key: dict[str, ResearchTaskModel] = {}
         self.simulate_late_conflict = simulate_late_conflict
+        self.simulate_fk_conflict = simulate_fk_conflict
         self.late_existing: ResearchTaskModel | None = None
         self.query_count = 0
         self.last_list: tuple[TaskStatus | None, int, int] | None = None
@@ -81,6 +92,13 @@ class FakeResearchTaskRepository:
         rows = [t for t in self.by_id.values() if status is None or t.status == status.value]
         rows.sort(key=lambda t: (t.created_at, t.task_id), reverse=True)
         return rows[offset : offset + limit], len(rows)
+
+    async def delete(self, task: ResearchTaskModel) -> None:
+        if self.simulate_fk_conflict:
+            raise IntegrityError("stmt", {}, _FakeFkViolation())
+        self.by_id.pop(task.task_id, None)
+        if task.idempotency_key:
+            self.by_key.pop(task.idempotency_key, None)
 
 
 def _request(**overrides: object) -> TaskCreateRequest:
@@ -206,3 +224,33 @@ async def test_late_conflict_conflicts_on_different_fingerprint() -> None:
 
     with pytest.raises(IdempotencyConflict):
         await service.create_task(_request(), key)
+
+
+async def test_delete_missing_task_raises_not_found() -> None:
+    repo = FakeResearchTaskRepository()
+    service = TaskService(repo)
+
+    with pytest.raises(TaskNotFound):
+        await service.delete_task(uuid4())
+
+
+async def test_delete_existing_task_removes_row() -> None:
+    repo = FakeResearchTaskRepository()
+    service = TaskService(repo)
+    task = _model()
+    repo.by_id[task.task_id] = task
+
+    await service.delete_task(task.task_id)
+
+    assert task.task_id not in repo.by_id
+    assert len(repo.by_id) == 0
+
+
+async def test_delete_with_dependent_data_raises_conflict() -> None:
+    repo = FakeResearchTaskRepository(simulate_fk_conflict=True)
+    service = TaskService(repo)
+    task = _model()
+    repo.by_id[task.task_id] = task
+
+    with pytest.raises(TaskHasDependentData):
+        await service.delete_task(task.task_id)

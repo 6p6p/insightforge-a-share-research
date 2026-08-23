@@ -59,3 +59,9 @@ class ResearchTaskRepository:
         )
         rows = (await self._session.execute(query)).scalars().all()
         return list(rows), total
+
+    async def delete(self, task: ResearchTaskModel) -> None:
+        # Delete a research task within the caller-coordinated transaction.
+        # FK violations (downstream rows referencing task.task_id) surface here.
+        await self._session.delete(task)
+        await self._session.flush()

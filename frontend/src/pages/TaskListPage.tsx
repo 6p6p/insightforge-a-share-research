@@ -1,20 +1,34 @@
-/** 任务列表页：简洁表格，点击跳转任务工作台。 */
+/** 任务列表页：简洁表格，点击跳转任务工作台；支持删除任务（硬删除，带确认弹窗）。 */
 
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { Card, Layout, Table, Typography } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Button, Card, Layout, message, Popconfirm, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
-import { listTasks, taskKeys } from '../api/tasks';
+import { deleteTask, listTasks, taskKeys } from '../api/tasks';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import type { TaskResponse } from '../types/task';
 import { PUBLIC_STATUS_LABEL, publicStatusText, stageLabel } from '../utils/status';
 
 export function TaskListPage(): React.JSX.Element {
+  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: taskKeys.list({ limit: 20, offset: 0 }),
     queryFn: () => listTasks({ limit: 20, offset: 0 }),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (taskId: string) => deleteTask(taskId),
+    onSuccess: () => {
+      message.success('研究任务已删除');
+      void queryClient.invalidateQueries({ queryKey: taskKeys.all });
+    },
+    onError: (error: unknown) => {
+      message.error(
+        error instanceof Error ? error.message : '删除研究任务失败，请稍后重试',
+      );
+    },
   });
 
   const columns: ColumnsType<TaskResponse> = [
@@ -50,6 +64,25 @@ export function TaskListPage(): React.JSX.Element {
     },
     { title: '分析周期', dataIndex: 'research_start_date', render: (_, record) => `${record.research_start_date} ~ ${record.research_end_date}` },
     { title: '创建时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString('zh-CN', { hour12: false }) },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 90,
+      render: (_, record) => (
+        <Popconfirm
+          title="删除研究任务"
+          description="确认删除该研究任务？删除后无法恢复。"
+          okText="确认删除"
+          cancelText="取消"
+          okButtonProps={{ danger: true, loading: deleteMutation.isPending }}
+          onConfirm={() => deleteMutation.mutate(record.task_id)}
+        >
+          <Button type="link" danger size="small">
+            删除
+          </Button>
+        </Popconfirm>
+      ),
+    },
   ];
 
   return (

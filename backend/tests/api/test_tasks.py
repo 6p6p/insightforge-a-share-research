@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.api.dependencies import get_langgraph_checkpoint_manager, get_task_service
-from app.core.errors import IdempotencyConflict, TaskNotFound
+from app.core.errors import IdempotencyConflict, TaskHasDependentData, TaskNotFound
 from app.db.dependencies import get_database
 from app.domain.tasks import TaskStatus
 from app.main import create_app
@@ -56,6 +56,8 @@ class FakeTaskService:
         self.get_error: Exception | None = None
         self.list_result: TaskListResponse | None = None
         self.list_calls: list[tuple[TaskStatus | None, int, int]] = []
+        self.delete_error: Exception | None = None
+        self.delete_calls: list[UUID] = []
 
     async def create_task(
         self,
@@ -86,6 +88,11 @@ class FakeTaskService:
         if self.list_result is not None:
             return self.list_result
         return TaskListResponse(items=[_task_response()], total=1, limit=limit, offset=offset)
+
+    async def delete_task(self, task_id: UUID) -> None:
+        self.delete_calls.append(task_id)
+        if self.delete_error is not None:
+            raise self.delete_error
 
 
 @pytest.fixture
@@ -220,3 +227,30 @@ def test_openapi_contains_task_endpoints(client) -> None:
 def test_health_unaffected_by_task_api(client) -> None:
     assert client.get("/api/v1/health/live").status_code == 200
     assert client.get("/api/v1/health/ready").status_code == 200
+
+
+def test_delete_task_returns_204(client, fake_task_service) -> None:
+    response = client.delete(f"/api/v1/tasks/{uuid4()}")
+
+    assert response.status_code == 204
+    assert len(fake_task_service.delete_calls) == 1
+
+
+def test_delete_missing_task_returns_unified_error(client, fake_task_service) -> None:
+    fake_task_service.delete_error = TaskNotFound()
+
+    response = client.delete(f"/api/v1/tasks/{uuid4()}")
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "task_not_found"
+
+
+def test_delete_dependent_task_returns_409(client, fake_task_service) -> None:
+    fake_task_service.delete_error = TaskHasDependentData()
+
+    response = client.delete(f"/api/v1/tasks/{uuid4()}")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "task_has_dependent_data"

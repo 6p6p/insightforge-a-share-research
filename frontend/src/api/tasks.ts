@@ -66,6 +66,10 @@ export async function getTask(taskId: string): Promise<TaskResponse> {
   return apiRequest<TaskResponse>(`/tasks/${taskId}`);
 }
 
+export async function deleteTask(taskId: string): Promise<void> {
+  await apiRequest<void>(`/tasks/${taskId}`, { method: 'DELETE' });
+}
+
 export async function getTaskWorkspace(taskId: string): Promise<TaskWorkspaceResponse> {
   return apiRequest<TaskWorkspaceResponse>(`/tasks/${taskId}/workspace`);
 }

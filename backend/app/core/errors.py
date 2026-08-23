@@ -13,6 +13,15 @@ class TaskNotFound(DomainError):
     message = "研究任务不存在"
 
 
+class TaskHasDependentData(DomainError):
+    """任务已产生下游业务数据（workflow_run / plan / orchestration / export
+    引用其 task_id），按当前 DB 设计（RESTRICT FK）不可直接删除。"""
+
+    code = "task_has_dependent_data"
+    http_status = 409
+    message = "该研究任务已存在研究数据，不能删除"
+
+
 class IdempotencyConflict(DomainError):
     code = "idempotency_conflict"
     http_status = 409
