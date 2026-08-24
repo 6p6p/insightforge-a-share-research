@@ -2,7 +2,7 @@
 
 import { Navigate, Route, Routes } from 'react-router-dom';
 
-import { EvalBenchmarkPage } from '../pages/EvalBenchmarkPage';
+import { ModelConfigPage } from '../pages/ModelConfigPage';
 import { TaskCreatePage } from '../pages/TaskCreatePage';
 import { TaskListPage } from '../pages/TaskListPage';
 import { TaskWorkspacePage } from '../pages/TaskWorkspacePage';
@@ -14,7 +14,7 @@ export function AppRoutes(): React.JSX.Element {
       <Route path="/tasks" element={<TaskListPage />} />
       <Route path="/tasks/new" element={<TaskCreatePage />} />
       <Route path="/tasks/:taskId" element={<TaskWorkspacePage />} />
-      <Route path="/eval" element={<EvalBenchmarkPage />} />
+      <Route path="/models" element={<ModelConfigPage />} />
       <Route path="*" element={<Navigate to="/tasks" replace />} />
     </Routes>
   );

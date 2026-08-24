@@ -83,6 +83,7 @@ from app.db.models.source_record import SourceRecordModel
 from app.db.models.valuation_metric_observation import ValuationMetricObservationModel
 from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
+from app.db.models.llm_provider_config import LlmProviderConfigModel
 
 __all__ = [
     "ChunkSetModel",
@@ -155,4 +156,5 @@ __all__ = [
     "ValuationMetricObservationModel",
     "WorkflowEventModel",
     "WorkflowRunModel",
+    "LlmProviderConfigModel",
 ]

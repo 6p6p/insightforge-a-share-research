@@ -10,6 +10,7 @@ from app.core.logging import get_logger
 from app.core.resources import ApplicationResources
 from app.db.session import DatabaseManager
 from app.db.urls import to_postgres_connection_uri
+from app.llm.active_config import apply_active_override, load_active_config
 from app.research_orchestration.recovery import ResearchOrchestrationRecoveryCoordinator
 from app.research_orchestration.service import ResearchOrchestrationService
 from app.services.company_identity_service import CompanyIdentityService
@@ -118,6 +119,13 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         connection_uri=to_postgres_connection_uri(settings.database_url)
     )
     sessionmaker = database.session_factory()
+    # v1.2.7-B：应用层 LLM 配置优先——DB active deepseek 配置覆盖 Settings。
+    try:
+        _active = await load_active_config(sessionmaker)
+        if apply_active_override(settings, _active):
+            logger.info("llm_active_config_applied", provider="deepseek")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("llm_active_config_skip", error_type=type(exc).__name__)
     workflow_execution = WorkflowExecutionManager(
         runner=WorkflowRunner(sessionmaker, langgraph),
         shutdown_timeout_seconds=settings.workflow_shutdown_timeout_seconds,

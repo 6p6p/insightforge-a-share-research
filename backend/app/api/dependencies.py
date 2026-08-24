@@ -7,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.dependencies import get_db_session
 from app.report_export.service import ReportExportService
+from app.repositories.llm_provider_config_repository import LlmProviderConfigRepository
 from app.repositories.research_task_repository import ResearchTaskRepository
 from app.research_orchestration.service import ResearchOrchestrationService
 from app.services.company_identity_service import CompanyIdentityService
+from app.services.llm_provider_config_service import LlmProviderConfigService
 from app.services.research_execution_service import ResearchExecutionService
 from app.services.source_ingestion_service import SourceIngestionService
 from app.services.source_preparation_service import SourcePreparationService
@@ -211,3 +213,13 @@ def get_source_preparation_service(request: Request) -> SourcePreparationService
     if resources is None or resources.source_preparation is None:
         return None
     return resources.source_preparation
+
+
+def get_llm_provider_config_service(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> LlmProviderConfigService:
+    settings = request.app.state.settings
+    repository = LlmProviderConfigRepository(session)
+    return LlmProviderConfigService(repository, settings)
+
