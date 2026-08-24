@@ -105,7 +105,6 @@ class Settings(BaseSettings):
     llm_config_encryption_key: SecretStr | None = None
     llm_config_key_path: Path = PROJECT_ROOT / ".data" / "llm_config.key"
 
-
     @field_validator("app_port", "chroma_port")
     @classmethod
     def _validate_port(cls, value: int) -> int:

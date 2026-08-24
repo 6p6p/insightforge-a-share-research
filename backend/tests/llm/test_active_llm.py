@@ -198,15 +198,10 @@ def test_has_llm_credentials_deepseek() -> None:
 
 def test_has_llm_credentials_openai_uses_llm_api_key() -> None:
     assert (
-        has_llm_credentials(
-            _settings(llm_provider="openai", llm_api_key=SecretStr("sk-y"))
-        )
-        is True
+        has_llm_credentials(_settings(llm_provider="openai", llm_api_key=SecretStr("sk-y"))) is True
     )
     assert (
-        has_llm_credentials(
-            _settings(llm_provider="openai", deepseek_api_key=SecretStr("sk-deep"))
-        )
+        has_llm_credentials(_settings(llm_provider="openai", deepseek_api_key=SecretStr("sk-deep")))
         is False
     )
 

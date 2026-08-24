@@ -1039,9 +1039,7 @@ async def test_backflow_loop_reaches_limit_manual(env, monkeypatch, connection_u
     await manager.setup()
     try:
         orchestration_id = await _create_orchestration(sessionmaker, task_id)
-        executor = _FakeBackflowExecutor(
-            new_card_batches=[(extra_a["evidence_card_id"],)]
-        )
+        executor = _FakeBackflowExecutor(new_card_batches=[(extra_a["evidence_card_id"],)])
         # prepare 调用序：首启 3 次 base → round1 2 次 request_a
         # （prepare/ensure_stage4_child/run_or_resume_stage4 +
         # prepare_updated_analysis/run_or_resume_stage4）。

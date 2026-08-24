@@ -51,6 +51,7 @@ def stricter(a: AuditSeverity, b: AuditSeverity) -> AuditSeverity:
 
 # ================================================================ impact scope (v1.2.4)
 
+
 # 影响范围维度：**一个 finding/issue 属于 REPORT 级还是 SECTION 级** 是确定性判定，
 # 与 severity 正交。v1.2.5 起 scope 只决定提醒级别与完成状态，**不再阻断接受**：
 # - REPORT_BLOCKING（枚举值保留）→ 产品语义 CRITICAL_ALERT「严重审核提醒」：
@@ -59,10 +60,10 @@ def stricter(a: AuditSeverity, b: AuditSeverity) -> AuditSeverity:
 #   （带提醒）→ completed_with_warnings；
 # - INFO → 无提醒 → completed。
 class AuditImpactScope(StrEnum):
-    REPORT_BLOCKING = "report_blocking"        # CRITICAL_ALERT：严重审核提醒（不阻断）
-    SECTION_WARNING = "section_warning"        # WARNING：章节级质量提醒（允许接受）
+    REPORT_BLOCKING = "report_blocking"  # CRITICAL_ALERT：严重审核提醒（不阻断）
+    SECTION_WARNING = "section_warning"  # WARNING：章节级质量提醒（允许接受）
     SECTION_UNAVAILABLE = "section_unavailable"  # WARNING：章节不可用/降级（允许接受）
-    INFO = "info"                              # 无影响（正常完成）
+    INFO = "info"  # 无影响（正常完成）
 
 
 def impact_scope_rank(scope: AuditImpactScope) -> int:
@@ -172,9 +173,7 @@ _S6_S7_DOWNGRADE_ISSUE_TYPES = frozenset(
 )
 
 
-def audit_issue_scope(
-    issue_type: str, section_type: str | None = None
-) -> AuditImpactScope:
+def audit_issue_scope(issue_type: str, section_type: str | None = None) -> AuditImpactScope:
     """单条 Audit issue_type -> impact scope（确定性；未知类型保守 -> REPORT_BLOCKING）。
 
     v1.2.5：S6/S7（risks_and_gaps）章节的 numeric / conflict / missing evidence
@@ -258,7 +257,6 @@ def accepts_with_scope(scope: AuditImpactScope) -> bool:
     与提醒级别（REPORT_BLOCKING→CRITICAL_ALERT 严重提醒），不参与阻断。
     """
     return True
-
 
 
 # deterministic Check finding code → severity（app/report/checks.py 同步维护）。
@@ -434,4 +432,3 @@ def product_level_of_scope(scope: AuditImpactScope) -> str:
 def product_level_of_severity(severity: AuditSeverity) -> str:
     """severity -> 产品提醒等级。"""
     return _PRODUCT_LEVEL_BY_SEVERITY.get(severity, AuditSeverity.INFO.value)
-

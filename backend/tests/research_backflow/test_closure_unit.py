@@ -187,9 +187,9 @@ def _build_service(
 
         async def mark_completed(self, orchestration_id, completed_at):
             orchestration.status = "completed"
+
         async def mark_completed_with_warnings(self, orchestration_id, completed_at):
             orchestration.status = "completed_with_warnings"
-
 
     class FakeChildRepo:
         def __init__(self, session):
@@ -309,6 +309,7 @@ async def test_accept_allowed_for_non_critical_issues(monkeypatch):
     assert service._fake_orchestration_row.status == "completed"
     assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
     # mark_completed 把 orchestration 行置为 completed（FakeRepo 已记录）。
+
 
 @pytest.mark.asyncio
 async def test_extra_research_schedules_bounded_round(monkeypatch):

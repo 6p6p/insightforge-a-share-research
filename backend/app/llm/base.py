@@ -101,14 +101,9 @@ def get_active_llm_info(settings: Settings) -> dict:
     }
 
 
-
-
 def has_llm_credentials(settings: Settings) -> bool:
     """当前 provider 是否配置了 secret（smoke 预检）。"""
     return bool(_resolve_token(_pick_key(settings)))
-
-
-
 
 
 def require_llm_credentials(settings: Settings) -> None:
@@ -117,7 +112,6 @@ def require_llm_credentials(settings: Settings) -> None:
         from app.llm.errors import MissingLLMCredentialsError
 
         raise MissingLLMCredentialsError("llm credentials are not configured")
-
 
 
 def _pick_key(settings: Settings):

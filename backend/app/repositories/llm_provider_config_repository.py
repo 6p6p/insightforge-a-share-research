@@ -14,9 +14,7 @@ class LlmProviderConfigRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(
-        self, config: LlmProviderConfigModel
-    ) -> LlmProviderConfigModel:
+    async def create(self, config: LlmProviderConfigModel) -> LlmProviderConfigModel:
         self._session.add(config)
         await self._session.flush()
         await self._session.refresh(config)
@@ -24,9 +22,7 @@ class LlmProviderConfigRepository:
 
     async def get_by_id(self, config_id: UUID) -> LlmProviderConfigModel | None:
         result = await self._session.execute(
-            select(LlmProviderConfigModel).where(
-                LlmProviderConfigModel.id == config_id
-            )
+            select(LlmProviderConfigModel).where(LlmProviderConfigModel.id == config_id)
         )
         return result.scalar_one_or_none()
 
@@ -43,9 +39,7 @@ class LlmProviderConfigRepository:
 
     async def clear_active(self) -> None:
         rows = await self._session.execute(
-            select(LlmProviderConfigModel).where(
-                LlmProviderConfigModel.is_active.is_(True)
-            )
+            select(LlmProviderConfigModel).where(LlmProviderConfigModel.is_active.is_(True))
         )
         for row in rows.scalars().all():
             row.is_active = False

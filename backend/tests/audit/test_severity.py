@@ -145,9 +145,8 @@ def test_classify_report_degraded_non_degraded_mix_keeps_critical() -> None:
     assert sev is AuditSeverity.CRITICAL
 
 
-
-
 # ================================================================ v1.2.4 impact scope
+
 
 def test_scope_ranks_and_stricter() -> None:
     from app.audit.severity import impact_scope_rank, stricter_scope
@@ -167,9 +166,7 @@ def test_scope_ranks_and_stricter() -> None:
         is AuditImpactScope.REPORT_BLOCKING
     )
     assert (
-        stricter_scope(
-            AuditImpactScope.SECTION_WARNING, AuditImpactScope.SECTION_UNAVAILABLE
-        )
+        stricter_scope(AuditImpactScope.SECTION_WARNING, AuditImpactScope.SECTION_UNAVAILABLE)
         is AuditImpactScope.SECTION_WARNING
     )
 
@@ -362,9 +359,11 @@ def test_scope_degraded_report_critical_stays_non_blocking() -> None:
 def test_classify_check_scope_and_issue_scope_union() -> None:
     assert classify_check_scope([], [], frozenset()) is AuditImpactScope.INFO
     assert classify_issue_scope([], frozenset()) is AuditImpactScope.INFO
-    assert classify_check_scope(
-        ["empty_section"], ["S2"], frozenset()
-    ) is AuditImpactScope.SECTION_WARNING
-    assert classify_issue_scope(
-        [FakeIssue("unsupported_by_evidence", "S1")], frozenset()
-    ) is AuditImpactScope.REPORT_BLOCKING
+    assert (
+        classify_check_scope(["empty_section"], ["S2"], frozenset())
+        is AuditImpactScope.SECTION_WARNING
+    )
+    assert (
+        classify_issue_scope([FakeIssue("unsupported_by_evidence", "S1")], frozenset())
+        is AuditImpactScope.REPORT_BLOCKING
+    )

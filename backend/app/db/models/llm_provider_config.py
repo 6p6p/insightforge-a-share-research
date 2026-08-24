@@ -28,13 +28,9 @@ class LlmProviderConfigModel(Base):
     model_id: Mapped[str] = mapped_column(String(160), nullable=False)
     base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     encrypted_api_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     # 是否明文透出（仅 test 后 / 前端跳转可能用）——始终不返回密文/明文 key。
-    has_api_key: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    has_api_key: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

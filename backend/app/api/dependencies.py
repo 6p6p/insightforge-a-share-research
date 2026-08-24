@@ -222,4 +222,3 @@ def get_llm_provider_config_service(
     settings = request.app.state.settings
     repository = LlmProviderConfigRepository(session)
     return LlmProviderConfigService(repository, settings)
-

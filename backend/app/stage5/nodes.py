@@ -408,12 +408,15 @@ def make_rewrite_sections_node(deps: Stage5WorkflowDependencies):
             {
                 **s,
                 "draft_section_id": revised_by_section[s["section_id"]],
-                "section_status": "degraded" if any(
-                    r["section_id"] == s["section_id"] and r["degraded"] for r in revisions
-                ) else s.get("section_status", "completed"),
+                "section_status": "degraded"
+                if any(r["section_id"] == s["section_id"] and r["degraded"] for r in revisions)
+                else s.get("section_status", "completed"),
                 "degraded_reason": next(
-                    (r["degraded_reason"] for r in revisions
-                     if r["section_id"] == s["section_id"] and r.get("degraded")),
+                    (
+                        r["degraded_reason"]
+                        for r in revisions
+                        if r["section_id"] == s["section_id"] and r.get("degraded")
+                    ),
                     s.get("degraded_reason"),
                 ),
             }
@@ -506,6 +509,7 @@ def _degraded_section_ids(verified) -> frozenset[str]:
         for draft in verified.verified_report.verified_drafts
         if draft.status == DEGRADED_SECTION_STATUS
     )
+
 
 def make_finalize_on_approve_node(deps: Stage5WorkflowDependencies):
     """finalize_on_approve：spec R——approve 只 finalize 当前 Report（v1.2.5）。

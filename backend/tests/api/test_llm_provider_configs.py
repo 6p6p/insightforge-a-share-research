@@ -197,4 +197,3 @@ def test_test_stored_config_passes_own_id(client, fake_service):
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert fake_service.last_test_config_id == item.id
-
