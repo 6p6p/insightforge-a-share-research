@@ -66,6 +66,10 @@ class _FakeRepo:
     async def delete(self, config):
         self.rows = [r for r in self.rows if r.id != config.id]
 
+    async def flush(self):
+        # v1.2.8：service 经 repository.flush()（修复 .session 500）。
+        pass
+
     @property
     def session(self):
         class _S:
@@ -226,4 +230,90 @@ async def test_test_connection_success_and_failure():
                 base_url="https://api.openai.com/v1",
                 api_key="bad",
             )
+        )
+
+
+# ----------------------------------------------------------------------
+# v1.2.8：update key 保留语义 + test_connection 读目标配置自己的 key
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_without_api_key_keeps_existing_key():
+    repo = _FakeRepo()
+    key_store = _FakeKeyStore()
+    service = _service(repo, key_store)
+    row = _row(encrypted_api_key=key_store.encrypt("sk-original"), has_api_key=True)
+    repo.rows.append(row)
+
+    updated = await service.update(
+        row.id,
+        LlmConfigUpdateRequest(display_name="改名", model_id="deepseek-v4", is_active=True),
+    )
+    assert updated.has_api_key is True
+    assert key_store.decrypt(row.encrypted_api_key) == "sk-original"
+
+
+@pytest.mark.asyncio
+async def test_update_with_empty_api_key_keeps_existing_key():
+    repo = _FakeRepo()
+    key_store = _FakeKeyStore()
+    service = _service(repo, key_store)
+    row = _row(encrypted_api_key=key_store.encrypt("sk-original"), has_api_key=True)
+    repo.rows.append(row)
+
+    await service.update(row.id, LlmConfigUpdateRequest(api_key="   "))
+    assert key_store.decrypt(row.encrypted_api_key) == "sk-original"
+
+
+@pytest.mark.asyncio
+async def test_test_connection_uses_target_config_key_by_id():
+    # 目标配置自己的 encrypt key，而不是“当前 active 配置”的 key。
+    repo = _FakeRepo()
+    key_store = _FakeKeyStore()
+    service = _service(repo, key_store)
+    active_other = _row(
+        display_name="ActiveOther",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        base_url="https://api.openai.com/v1",
+        encrypted_api_key=key_store.encrypt("sk-other-active"),
+        has_api_key=True,
+        is_active=True,
+    )
+    target = _row(
+        display_name="Target",
+        encrypted_api_key=key_store.encrypt("sk-target"),
+        has_api_key=True,
+    )
+    repo.rows.extend([active_other, target])
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"id": "x"})
+
+    service._transport = httpx.MockTransport(handler)
+    ok = await service.test_connection(
+        LlmConfigTestRequest(provider="deepseek", model_id="deepseek-v4-flash", api_key=None),
+        config_id=target.id,
+    )
+    assert ok.ok is True
+    # 用的是目标配置的 key，而不是 active 配置的 key
+    assert seen["auth"] == "Bearer sk-target"
+
+
+@pytest.mark.asyncio
+async def test_test_connection_decrypt_failure_raises_business_error():
+    repo = _FakeRepo()
+    service = _service(repo)
+    row = _row(encrypted_api_key="garbage-not-valid", has_api_key=True)
+    repo.rows.append(row)
+    from app.services.llm_provider_config_service import LlmConfigTestFailed
+
+    with pytest.raises(LlmConfigTestFailed):
+        await service.test_connection(
+            LlmConfigTestRequest(provider="deepseek", model_id="deepseek-v4-flash", api_key=None),
+            config_id=row.id,
         )

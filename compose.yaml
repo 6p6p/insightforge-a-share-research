@@ -52,6 +52,9 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       # BGE 模型已固化进镜像（HF_HOME=/home/appuser/.cache/huggingface），
       # 运行时离线加载（V1.1 closure：不依赖 huggingface.co 连通性）。
+      # v1.2.8：LLM 配置加密密钥文件持久化到 raw_data 命名卷（容器内 /app/data），
+      # 避免每次重建生成新 Fernet key 导致已存 encrypted_api_key 无法解密。
+      LLM_CONFIG_KEY_PATH: /app/data/llm_config.key
       HF_HUB_OFFLINE: "1"
     volumes:
       - raw_data:/app/data/raw

@@ -126,11 +126,11 @@ def main():
         if status in ("completed", "completed_with_warnings"):
             ok += 1
         elif status == "failed":
-            print(f"  -> FAIL: 不允许 orchestration_execution_failed（除非系统级）", flush=True)
+            print("  -> FAIL: 不允许 orchestration_execution_failed（除非系统级）", flush=True)
         elif status == "timeout":
-            print(f"  -> INCONCLUSIVE: 超时", flush=True)
+            print("  -> INCONCLUSIVE: 超时", flush=True)
         else:
-            print(f"  -> WARN: 未达预期终态", flush=True)
+            print("  -> WARN: 未达预期终态", flush=True)
     print(f"OK={ok}/{len(results)}", flush=True)
     sys.exit(0 if ok >= 1 else 1)
 

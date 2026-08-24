@@ -38,10 +38,13 @@ def test_factory_model_id_reflects_provider_and_model() -> None:
     assert create_macro_analysis_model(settings).model_id == "deepseek:deepseek-v4-flash"
 
 
-def test_factory_rejects_unknown_provider() -> None:
+def test_factory_accepts_any_nonempty_provider() -> None:
+    # v1.2.8：非空 provider 一律返回 wrapper（get_active_llm 在调用时分派）；
+    # 未知非空 provider 不再抛 Unsupported——留到 adapter 运行时由 base_url 决定。
     settings = _settings(llm_provider="openai")
-    with pytest.raises(UnsupportedLLMProviderError):
-        create_macro_analysis_model(settings)
+    model = create_macro_analysis_model(settings)
+    assert model is not None
+    assert model.model_id == "openai:deepseek-v4-flash"
 
 
 def test_factory_rejects_empty_provider() -> None:

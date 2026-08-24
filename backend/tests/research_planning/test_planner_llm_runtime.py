@@ -74,9 +74,11 @@ def test_factory_returns_deepseek_planner_adapter() -> None:
     assert model.model_id == "deepseek:deepseek-v4-flash"
 
 
-def test_factory_unsupported_provider() -> None:
-    with pytest.raises(UnsupportedLLMProviderError):
-        create_research_planner_model(_settings(llm_provider="openai"))
+def test_factory_accepts_openai_provider() -> None:
+    # v1.2.8：非空 provider 直接视为 wrapper（openai-compatible 语义）。
+    model = create_research_planner_model(_settings(llm_provider="openai"))
+    assert model is not None
+    assert model.model_id == "openai:deepseek-v4-flash"
 
 
 def test_pending_credentials_without_key() -> None:

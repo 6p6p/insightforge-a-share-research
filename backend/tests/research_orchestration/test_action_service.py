@@ -20,12 +20,12 @@ from uuid import UUID
 
 import pytest
 
+from app.core.errors import WorkflowRunAlreadyFinished
 from app.research_orchestration.contracts import (
     ChildStage,
     OrchestrationPhase,
     OrchestrationStatus,
 )
-from app.core.errors import WorkflowRunAlreadyFinished
 from app.research_orchestration.errors import (
     ResearchOrchestrationAlreadyFinished,
     ResearchOrchestrationApprovalRejected,
@@ -33,7 +33,6 @@ from app.research_orchestration.errors import (
     ResearchOrchestrationInvalidAction,
     ResearchOrchestrationNotFound,
 )
-from app.stage5.errors import Stage5ApproveRequiresPassCheck
 from app.research_orchestration.repository import (
     ResearchOrchestrationChildRepository,
     ResearchOrchestrationRepository,
@@ -45,6 +44,7 @@ from app.review.contracts import (
     HUMAN_DECISION_RESEARCH,
     HUMAN_DECISION_REWRITE,
 )
+from app.stage5.errors import Stage5ApproveRequiresPassCheck
 from tests.research_orchestration.fakes import (
     FakeActionOrchestrationRunner,
     FakeActionStage5Runner,

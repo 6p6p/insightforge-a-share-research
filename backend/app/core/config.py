@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     llm_max_retries: int = 1
     deepseek_api_key: SecretStr | None = None
+    # v1.2.8: OpenAI-compatible provider generic key/base url.
+    llm_api_key: SecretStr | None = None
+    llm_base_url: str | None = None
     # v1.2.7-B：LLM provider 配置加密（Fernet）。环境变量 key（优先），
     # 缺省持久化到 llm_config_key_path 文件（首次生成）。
     llm_config_encryption_key: SecretStr | None = None

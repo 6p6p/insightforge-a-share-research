@@ -1,12 +1,10 @@
-"""LLM runtime active-config resolution (v1.2.7-B).
+"""Runtime active LLM config resolution (v1.2.7-B / v1.2.8).
 
 优先级：数据库 active 配置 > 环境变量 > 默认。
 
-现有 production adapter 只认证 DeepSeek（component-inventory 静态扫描约束）。
-因此 DB active 配置仅在 provider=="deepseek" 时覆盖 Settings 的
-llm_provider / llm_model / deepseek_api_key（模型与密钥从应用层配置生效）；
-openai / openrouter / custom 的配置可存储、展示与测试连接，但为避免破坏已
-审计的 deepseek-only 研究执行路径，研究流程暂不改用它们（仍走 .env 默认）。
+v1.2.8：任意受支持 provider 的 active 配置都会覆盖 Settings（provider /
+model / base_url / api key），研究执行统一走 get_active_llm() 读取；
+无 DB active 配置时完全 fallback 到 .env（现状不变）。
 """
 
 from app.core.config import Settings
@@ -33,22 +31,32 @@ async def load_active_config(sessionmaker) -> object | None:
 
 
 def apply_active_override(settings: Settings, active) -> bool:
-    """把 active 配置覆盖到 settings（仅 deepseek provider）。返回是否应用。"""
+    """把 active 配置覆盖到 settings（任意受支持 provider）。返回是否应用。
+
+    deepseek → settings.deepseek_api_key；其他 provider → settings.llm_api_key；
+    base_url 覆盖 settings.llm_base_url。
+    """
     if active is None:
         return False
     provider = (getattr(active, "provider", "") or "").strip().lower()
-    if provider != "deepseek":
+    if not provider:
         return False
     model_id = (getattr(active, "model_id", "") or "").strip()
     if not model_id:
         return False
-    object.__setattr__(settings, "llm_provider", "deepseek")
+    object.__setattr__(settings, "llm_provider", provider)
     object.__setattr__(settings, "llm_model", model_id)
+    base_url = (getattr(active, "base_url", None) or "").strip()
+    if base_url:
+        object.__setattr__(settings, "llm_base_url", base_url)
     encrypted = getattr(active, "encrypted_api_key", None)
     if encrypted:
         key = LlmConfigKeyStore(settings).decrypt(encrypted)
         if key:
             from pydantic import SecretStr
 
-            object.__setattr__(settings, "deepseek_api_key", SecretStr(key))
+            if provider == "deepseek":
+                object.__setattr__(settings, "deepseek_api_key", SecretStr(key))
+            else:
+                object.__setattr__(settings, "llm_api_key", SecretStr(key))
     return True

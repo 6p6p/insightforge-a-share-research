@@ -45,6 +45,7 @@ class FakeLlmConfigService:
         self.create_error: Exception | None = None
         self.test_result: LlmConfigTestResponse | None = None
         self.deleted: list[UUID] = []
+        self.last_test_config_id: UUID | None = None
 
     async def list(self):
         return list(self.items)
@@ -87,9 +88,11 @@ class FakeLlmConfigService:
         self.deleted.append(config_id)
         self.items.remove(item)
 
-    async def test_connection(self, request):
+    async def test_connection(self, request, config_id=None):
         if self.test_result is not None:
             return self.test_result
+        # 记录调用（供 /{id}/test 断言 config_id 已透传）
+        self.last_test_config_id = config_id
         return LlmConfigTestResponse(ok=True, latency_ms=12, message="连接成功")
 
 
@@ -183,4 +186,15 @@ def test_test_connection(client, fake_service):
     )
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_test_stored_config_passes_own_id(client, fake_service):
+    # v1.2.8 修复：/{id}/test 必须把目标 config_id 透传给 service（读取该配置
+    # 自己的加密 key），而不是误用“当前 active 配置”的 key。
+    item = _response()
+    fake_service.items = [item]
+    response = client.post(f"/api/v1/llm-configs/{item.id}/test")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert fake_service.last_test_config_id == item.id
 

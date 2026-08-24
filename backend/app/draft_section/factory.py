@@ -9,7 +9,6 @@
 from app.core.config import Settings
 from app.draft_section.adapters import DeepSeekDraftSectionModel
 from app.draft_section.model import DraftSectionModel
-from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import UnsupportedLLMProviderError
 from app.llm.instrumentation import LlmUsageObserver
 
@@ -19,6 +18,7 @@ def create_draft_section_model(
 ) -> DraftSectionModel:
     """根据 Settings.llm_provider 构造 DraftSectionModel（可选注入 usage_observer）。"""
     provider = (settings.llm_provider or "").strip().lower()
-    if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekDraftSectionModel(settings, usage_observer=usage_observer)
-    raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")
+    if not provider:
+        raise UnsupportedLLMProviderError("llm_provider is not configured")
+
+    return DeepSeekDraftSectionModel(settings, usage_observer=usage_observer)

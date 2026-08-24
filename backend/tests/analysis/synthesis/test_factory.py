@@ -41,9 +41,11 @@ def test_factory_model_id_reflects_provider_and_model() -> None:
     )
 
 
-def test_factory_rejects_unknown_provider() -> None:
-    with pytest.raises(UnsupportedLLMProviderError):
-        create_synthesis_analysis_model(_settings(llm_provider="openai"))
+def test_factory_accepts_any_nonempty_provider() -> None:
+    # v1.2.8：非空 provider 视为 wrapper（openai-compatible 语义）。
+    model = create_synthesis_analysis_model(_settings(llm_provider="openai"))
+    assert model is not None
+    assert model.model_id == "openai:deepseek-v4-flash"
 
 
 def test_factory_rejects_empty_provider() -> None:

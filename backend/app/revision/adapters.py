@@ -17,6 +17,7 @@
 from app.core.config import Settings
 from app.draft_section.contracts import WriterDecision
 from app.llm.components import COMPONENT_REVISION_WRITER
+from app.llm.base import get_active_llm
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.revision.errors import (
     RevisionWriterMalformedOutput,
@@ -46,24 +47,11 @@ class DeepSeekRevisionWriterModel:
     async def rewrite(self, pack: RevisionInputPack) -> WriterDecision:
         try:
             from langchain_core.exceptions import OutputParserException  # noqa: F401
-            from langchain_deepseek import ChatDeepSeek
         except ImportError as exc:
             raise RevisionWriterModelUnavailable("langchain-deepseek 未安装") from exc
 
         messages = build_revision_writer_messages(pack)
-        api_key = self._settings.deepseek_api_key
-        llm = ChatDeepSeek(
-            model=self._settings.llm_model,
-            temperature=0.0,
-            timeout=self._settings.llm_timeout_seconds,
-            max_retries=self._settings.llm_max_retries,
-            api_key=api_key.get_secret_value() if api_key is not None else None,
-            # 显式关闭 thinking：DeepSeek V4 Flash 默认 thinking，但 Evidence-bound
-            # Rewriter 需要稳定受约束输出（无 reasoning_content）；temperature=0 不
-            # 等于关闭 thinking。thinking 非标准 OpenAI 参数，经 extra_body 传递。
-            extra_body={"thinking": {"type": "disabled"}},
-            # 只启用 structured-output；不绑定 tools / web search / function side effects。
-        )
+        llm = get_active_llm(self._settings, temperature=0.0)
         try:
             return await invoke_structured_with_usage(
                 llm,

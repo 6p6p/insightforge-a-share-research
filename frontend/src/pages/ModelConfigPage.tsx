@@ -208,6 +208,29 @@ export function ModelConfigPage(): React.JSX.Element {
           style={{ marginBottom: 16 }}
         />
       )}
+      {(() => {
+        const active = items.find((i) => i.id === activeId) ?? null;
+        return active ? (
+          <Alert
+            type="info"
+            showIcon
+            message={`当前运行模型：${active.provider} / ${active.model_id}`}
+            description={
+              active.base_url
+                ? `API Base URL：${active.base_url}`
+                : undefined
+            }
+            style={{ marginBottom: 16 }}
+          />
+        ) : (
+          <Alert
+            type="info"
+            showIcon
+            message="未设置运行模型，研究流程将沿用 .env 默认（DeepSeek）"
+            style={{ marginBottom: 16 }}
+          />
+        );
+      })()}
       <Card
         title="已配置模型"
         extra={
@@ -348,11 +371,6 @@ function ConfigEditor({
         >
           <Input.Password placeholder="sk-..." autoComplete="new-password" />
         </Form.Item>
-        <Alert
-          type="info"
-          showIcon
-          message="当前仅沿用 DeepSeek（研究执行路径认证 provider）。OpenAI / OpenRouter / Custom 配置可用于测试连接与展示，但研究流程仍走 .env 默认。"
-        />
       </Form>
     </Modal>
   );

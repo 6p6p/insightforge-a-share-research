@@ -21,8 +21,8 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.llm.components import COMPONENT_RESEARCH_PLANNER
-from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import UnsupportedLLMProviderError
+from app.llm.base import get_active_llm
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.research_planning.contracts import (
     ResearchPlannerRequest,
@@ -64,9 +64,10 @@ def create_research_planner_model(
 ) -> ResearchPlannerModel:
     """根据 Settings.llm_provider 构造 ResearchPlannerModel（可选注入 usage_observer）。"""
     provider = (settings.llm_provider or "").strip().lower()
-    if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekResearchPlannerModel(settings, usage_observer=usage_observer)
-    raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")
+    if not provider:
+        raise UnsupportedLLMProviderError("llm_provider is not configured")
+
+    return DeepSeekResearchPlannerModel(settings, usage_observer=usage_observer)
 
 
 _SYSTEM_RULES = """你是 InsightForge 的研究计划制定器。任务：为一个 A 股上市公司研究问题生成
@@ -176,22 +177,8 @@ class DeepSeekResearchPlannerModel:
         return self._model_id
 
     async def generate(self, request: ResearchPlannerRequest) -> ResearchPlanPayload:
-        try:
-            from langchain_deepseek import ChatDeepSeek
-        except ImportError as exc:
-            raise ResearchPlannerModelUnavailable("langchain-deepseek 未安装") from exc
-
         messages = build_planner_messages(request)
-        api_key = self._settings.deepseek_api_key
-        llm = ChatDeepSeek(
-            model=self._settings.llm_model,
-            temperature=0.0,
-            timeout=self._settings.llm_timeout_seconds,
-            max_retries=self._settings.llm_max_retries,
-            api_key=api_key.get_secret_value() if api_key is not None else None,
-            # 显式关闭 thinking（同现有 analyst adapter 约定）。
-            extra_body={"thinking": {"type": "disabled"}},
-        )
+        llm = get_active_llm(self._settings, temperature=0.0)
         try:
             return await invoke_structured_with_usage(
                 llm,

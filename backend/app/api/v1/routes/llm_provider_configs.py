@@ -77,15 +77,17 @@ async def test_stored_config(
     config_id: UUID,
     service: Annotated[LlmProviderConfigService, Depends(get_llm_provider_config_service)],
 ) -> LlmConfigTestResponse:
+    # v1.2.8 修复：把 config_id 交给 service，由其读取该配置自己的加密 key
+    # （不再依赖「当前 active 配置的 key」，否则测试非 active 配置会拿错 / 拿不到 key）。
     config = await service.get(config_id)
     request = LlmConfigTestRequest(
         provider=config.provider,
         model_id=config.model_id,
         base_url=config.base_url,
         api_key=None,
-        use_stored_key=True,
+        use_stored_key=False,
     )
-    return await service.test_connection(request)
+    return await service.test_connection(request, config_id=config_id)
 
 
 @router.post("/test", response_model=LlmConfigTestResponse)

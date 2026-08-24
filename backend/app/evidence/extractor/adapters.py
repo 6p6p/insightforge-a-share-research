@@ -31,6 +31,7 @@ from app.evidence.extractor.errors import (
 )
 from app.evidence.extractor.prompt import ExtractionContext, build_extraction_messages
 from app.llm.components import COMPONENT_EVIDENCE_EXTRACTION
+from app.llm.base import get_active_llm
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.rag.retrieval.contracts import RetrievalHit
 
@@ -59,7 +60,6 @@ class DeepSeekEvidenceExtractionModel:
     ) -> EvidenceExtractionDecision:
         try:
             from langchain_core.exceptions import OutputParserException  # noqa: F401
-            from langchain_deepseek import ChatDeepSeek
         except ImportError as exc:
             raise EvidenceExtractorUnavailable("langchain-deepseek 未安装") from exc
 
@@ -69,20 +69,7 @@ class DeepSeekEvidenceExtractionModel:
             chunk_text=retrieval_hit.text,
             context=context,
         )
-        api_key = self._settings.deepseek_api_key
-        llm = ChatDeepSeek(
-            model=self._settings.llm_model,
-            temperature=0.0,
-            timeout=self._settings.llm_timeout_seconds,
-            max_retries=self._settings.llm_max_retries,
-            api_key=api_key.get_secret_value() if api_key is not None else None,
-            # 显式关闭 thinking：DeepSeek V4 Flash 默认 thinking，但结构化抽取
-            # 需要稳定受约束输出（无 reasoning_content）；temperature=0 不等于
-            # 关闭 thinking。thinking 非标准 OpenAI 参数，按 langchain-deepseek
-            # ==1.1.0 公开接口经 extra_body 传递（model_kwargs 会造成 API 错误）。
-            extra_body={"thinking": {"type": "disabled"}},
-            # 只启用 structured-output；不绑定 tools / web search / function side effects。
-        )
+        llm = get_active_llm(self._settings, temperature=0.0)
         try:
             return await invoke_structured_with_usage(
                 llm,

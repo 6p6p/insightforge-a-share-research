@@ -1,15 +1,13 @@
 """LLM factory (stage 3C.2.1): Settings → EvidenceExtractionModel。
 
-- `deepseek` → `DeepSeekEvidenceExtractionModel`（官方 langchain-deepseek
-  integration；**不用** ChatOpenAI + base_url 模拟 DeepSeek）；
-- 未知 provider → `UnsupportedLLMProviderError`；
+- 任意受支持 provider → wrapper（`get_active_llm` 在 adapter 内部按
+  settings.llm_provider / llm_base_url 分派 deepseek 或 openai-compatible）；
 - 无 key 时**仍允许构造**（应用启动不调用工厂；调用时才由 provider 层报错）。
 """
 
 from app.core.config import Settings
 from app.evidence.extractor.adapters import DeepSeekEvidenceExtractionModel
 from app.evidence.extractor.contracts import EvidenceExtractionModel
-from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import MissingLLMCredentialsError, UnsupportedLLMProviderError
 from app.llm.instrumentation import LlmUsageObserver
 
@@ -22,16 +20,17 @@ def create_evidence_extraction_model(
     可选 `usage_observer` 注入 eval 层 collector（生产默认 None）。
     """
     provider = (settings.llm_provider or "").strip().lower()
-    if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekEvidenceExtractionModel(settings, usage_observer=usage_observer)
-    raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")
+    if not provider:
+        raise UnsupportedLLMProviderError("llm_provider is not configured")
+
+    return DeepSeekEvidenceExtractionModel(settings, usage_observer=usage_observer)
 
 
 def has_llm_credentials(settings: Settings) -> bool:
-    """真实 smoke 的凭证预检：当前 provider 是否配置了 secret。"""
-    if settings.deepseek_api_key is None:
-        return False
-    return bool(settings.deepseek_api_key.get_secret_value())
+    """真实 smoke 的凭证预检：当前 provider 是否配置了 secret（deepseek 或通用 key）。"""
+    from app.llm.base import has_llm_credentials as _base_has
+
+    return _base_has(settings)
 
 
 def require_llm_credentials(settings: Settings) -> None:

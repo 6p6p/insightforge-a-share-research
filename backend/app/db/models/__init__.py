@@ -38,6 +38,7 @@ from app.db.models.financial_metric_observation import FinancialMetricObservatio
 from app.db.models.human_action import HumanActionModel
 from app.db.models.issuer_domain import IssuerDomainModel
 from app.db.models.issuer_domain_snapshot import IssuerDomainSnapshotRow
+from app.db.models.llm_provider_config import LlmProviderConfigModel
 from app.db.models.macro_dataset_snapshot import MacroDatasetSnapshotModel
 from app.db.models.macro_observation import MacroObservationModel
 from app.db.models.macro_series import MacroSeriesModel
@@ -83,7 +84,6 @@ from app.db.models.source_record import SourceRecordModel
 from app.db.models.valuation_metric_observation import ValuationMetricObservationModel
 from app.db.models.workflow_event import WorkflowEventModel
 from app.db.models.workflow_run import WorkflowRunModel
-from app.db.models.llm_provider_config import LlmProviderConfigModel
 
 __all__ = [
     "ChunkSetModel",

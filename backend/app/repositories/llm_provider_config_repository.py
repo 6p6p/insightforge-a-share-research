@@ -54,3 +54,7 @@ class LlmProviderConfigRepository:
     async def delete(self, config: LlmProviderConfigModel) -> None:
         await self._session.delete(config)
         await self._session.flush()
+
+    async def flush(self) -> None:
+        """显式 flush 挂起变更（update / set_active 修改行属性后调用）。"""
+        await self._session.flush()

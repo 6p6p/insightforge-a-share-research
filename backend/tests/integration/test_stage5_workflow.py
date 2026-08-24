@@ -54,7 +54,7 @@ from app.stage5.contracts import (
     Stage5WorkflowRequest,
 )
 from app.stage5.dependencies import Stage5WorkflowDependencies
-from app.stage5.errors import Stage5ApproveRequiresPassCheck, Stage5ResearchTaskNotFound
+from app.stage5.errors import Stage5ResearchTaskNotFound
 from app.stage5.nodes import make_finalize_on_approve_node
 from app.stage5.runner import Stage5WorkflowRunner
 from app.storage.raw_store import LocalRawArtifactStore

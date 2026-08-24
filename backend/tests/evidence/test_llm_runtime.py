@@ -90,12 +90,11 @@ def test_factory_returns_deepseek_adapter() -> None:
     assert model.model_id == "deepseek:deepseek-v4-flash"
 
 
-def test_factory_unsupported_provider() -> None:
-    with pytest.raises(Exception) as exc_info:
-        create_evidence_extraction_model(_settings(llm_provider="openai"))
-    from app.llm.errors import UnsupportedLLMProviderError
-
-    assert isinstance(exc_info.value, UnsupportedLLMProviderError)
+def test_factory_accepts_openai_provider() -> None:
+    # v1.2.8：非空 provider 直接视为 wrapper（openai-compatible 语义）。
+    model = create_evidence_extraction_model(_settings(llm_provider="openai"))
+    assert model is not None
+    assert model.model_id == "openai:deepseek-v4-flash"
 
 
 def test_adapter_has_no_tools_or_web_search() -> None:

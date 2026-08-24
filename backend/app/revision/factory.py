@@ -7,7 +7,6 @@
 """
 
 from app.core.config import Settings
-from app.llm.contracts import LLM_PROVIDER_DEEPSEEK
 from app.llm.errors import UnsupportedLLMProviderError
 from app.llm.instrumentation import LlmUsageObserver
 from app.revision.adapters import DeepSeekRevisionWriterModel
@@ -19,6 +18,7 @@ def create_revision_writer_model(
 ) -> RevisionWriterModel:
     """根据 Settings.llm_provider 构造 RevisionWriterModel（可选注入 usage_observer）。"""
     provider = (settings.llm_provider or "").strip().lower()
-    if provider == LLM_PROVIDER_DEEPSEEK:
-        return DeepSeekRevisionWriterModel(settings, usage_observer=usage_observer)
-    raise UnsupportedLLMProviderError(f"unsupported llm_provider: {provider or '<empty>'}")
+    if not provider:
+        raise UnsupportedLLMProviderError("llm_provider is not configured")
+
+    return DeepSeekRevisionWriterModel(settings, usage_observer=usage_observer)

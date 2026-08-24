@@ -40,6 +40,10 @@ class LlmConfigTestFailed(DomainError):
     http_status = 400
     message = "模型配置验证失败"
 
+    def __init__(self, detail: str | None = None) -> None:
+        if detail:
+            self.message = f"模型配置验证失败：{detail}"
+
 
 _DEFAULT_CHAT_SUFFIX = "/chat/completions"
 _TIMEOUT_SECONDS = 20.0
@@ -188,13 +192,14 @@ class LlmProviderConfigService:
             row.model_id = request.model_id.strip()
         if request.base_url is not None:
             row.base_url = request.base_url.strip() or None
-        if request.api_key is not None:
+        if request.api_key is not None and request.api_key.strip():
+            # v1.2.8 修复：空 / None key 不覆盖已有 encrypted_api_key（避免编辑保存后丢 key）。
             row.encrypted_api_key = self._key_store.encrypt(request.api_key)
-            row.has_api_key = bool(request.api_key.strip())
+            row.has_api_key = True
         if request.is_active is not None:
             row.is_active = request.is_active
         row.updated_at = datetime.now(UTC)
-        await self._repository.session.flush()
+        await self._repository.flush()
         return self._to_response(row)
 
     async def set_active(self, config_id: uuid.UUID, active: bool) -> LlmConfigResponse:
@@ -207,7 +212,7 @@ class LlmProviderConfigService:
         else:
             row.is_active = False
         row.updated_at = datetime.now(UTC)
-        await self._repository.session.flush()
+        await self._repository.flush()
         return self._to_response(row)
 
     async def delete(self, config_id: uuid.UUID) -> None:
@@ -219,15 +224,38 @@ class LlmProviderConfigService:
     async def test_connection(
         self,
         request: LlmConfigTestRequest,
+        config_id: uuid.UUID | None = None,
     ) -> LlmConfigTestResponse:
         base_url = (request.base_url or "").strip() or _default_base_url(request.provider)
         api_key = (request.api_key or "").strip()
-        if not api_key and getattr(request, "use_stored_key", False):
-            async for _row_any in self._iter_active_rows():
-                decrypted = self._key_store.decrypt(_row_any.encrypted_api_key)
-                if decrypted:
-                    api_key = decrypted
-                    break
+
+        # v1.2.8 修复：优先读目标配置（config_id）自己的加密 key，而不是误读
+        # 当前 active 行（测试非 active 配置时拿错 key）。config_id 缺失时才回退
+        # 到「测试当前 active」语义。
+        if not api_key and config_id is not None:
+            stored = await self._repository.get_by_id(config_id)
+            if stored is None:
+                raise LlmProviderConfigNotFound()
+            if not stored.encrypted_api_key:
+                raise LlmConfigTestFailed(detail="该配置未保存 API Key")
+            decrypted = self._key_store.decrypt(stored.encrypted_api_key)
+            if not decrypted:
+                raise LlmConfigTestFailed(detail="API Key 解密失败，请重新保存")
+            api_key = decrypted
+            # 目标配置自己的 provider / model / base_url 才是测试对象（覆盖 request 中
+            # route 未提供的字段，且保证与 DB 一致）。
+            base_url = (
+                (stored.base_url or "").strip() or _default_base_url(stored.provider)
+            ) or base_url
+            model_id = stored.model_id
+        else:
+            model_id = request.model_id
+            if not api_key and getattr(request, "use_stored_key", False):
+                async for _row_any in self._iter_active_rows():
+                    decrypted = self._key_store.decrypt(_row_any.encrypted_api_key)
+                    if decrypted:
+                        api_key = decrypted
+                        break
 
         if not base_url:
             return LlmConfigTestResponse(ok=False, message="未提供 Base URL")
@@ -238,8 +266,10 @@ class LlmProviderConfigService:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        if not model_id:
+            return LlmConfigTestResponse(ok=False, message="未提供 Model ID")
         payload = {
-            "model": request.model_id,
+            "model": model_id,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
         }
@@ -254,7 +284,7 @@ class LlmProviderConfigService:
         if response.status_code in (200, 201):
             return LlmConfigTestResponse(ok=True, latency_ms=latency, message="连接成功")
         _detail = _extract_error_detail(response)
-        raise LlmConfigTestFailed() from None
+        raise LlmConfigTestFailed(detail=_detail) from None
 
     async def _iter_active_rows(self):
         rows = await self._repository.list_all()

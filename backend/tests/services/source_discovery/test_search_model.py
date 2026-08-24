@@ -113,14 +113,16 @@ def test_factory_enabled_for_deepseek() -> None:
     assert model.model_id == "deepseek:deepseek-v4-flash"
 
 
-def test_factory_enabled_unsupported_provider() -> None:
+def test_factory_accepts_any_nonempty_provider() -> None:
+    # v1.2.8：非空 provider 直接视为 wrapper（openai-compatible 语义）。
     settings = Settings(
         database_url="postgresql+psycopg://u:p@127.0.0.1:5433/db",
         search_discovery_llm_enabled=True,
         llm_provider="unknown",
     )
-    with pytest.raises(UnsupportedLLMProviderError):
-        create_search_query_model(settings)
+    model = create_search_query_model(settings)
+    assert model is not None
+    assert model.model_id == "unknown:deepseek-v4-flash"
 
 
 # ---------------------------------------------------------------- 域名 allowlist 纯函数
