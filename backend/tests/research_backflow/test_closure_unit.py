@@ -259,7 +259,7 @@ async def test_accept_allowed_when_check_fails_with_warnings(monkeypatch):
         findings=[FakeFinding("numeric_grounding", "S1")],
     )
     closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
-    result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
+    await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
     assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
     assert service._fake_orchestration_row.status == "completed_with_warnings"
 
@@ -274,7 +274,7 @@ async def test_accept_allowed_when_critical_issue_with_warnings(monkeypatch):
         issues=[FakeIssue("evidence_mismatch", "critical")],
     )
     closure = _bind_closure(service, monkeypatch, decision=BACKFLOW_DECISION_ACCEPT)
-    result = await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
+    await service.act_on_backflow_review(uuid.uuid4(), BACKFLOW_DECISION_ACCEPT)
     assert closure.resolved == [(closure.request_id, BACKFLOW_DECISION_ACCEPT, None)]
     assert service._fake_orchestration_row.status == "completed_with_warnings"
 

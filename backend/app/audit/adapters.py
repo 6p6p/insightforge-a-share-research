@@ -25,8 +25,8 @@ from app.audit.errors import (
 from app.audit.packs import AuditPack
 from app.audit.prompt import build_audit_messages
 from app.core.config import Settings
-from app.llm.components import COMPONENT_AUDIT
 from app.llm.base import get_active_llm
+from app.llm.components import COMPONENT_AUDIT
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 
 

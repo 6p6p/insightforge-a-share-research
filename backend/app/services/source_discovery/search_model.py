@@ -19,9 +19,9 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import Settings
+from app.llm.base import get_active_llm
 from app.llm.components import COMPONENT_SEARCH_DISCOVERY
 from app.llm.errors import UnsupportedLLMProviderError
-from app.llm.base import get_active_llm
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.services.source_discovery.contracts import SourceDiscoveryRequest
 

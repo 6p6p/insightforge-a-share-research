@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import importlib
 import sys
 from types import ModuleType
 from typing import Any
@@ -19,7 +18,6 @@ import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
-from app.llm import active_config
 from app.llm.base import get_active_llm, get_active_llm_info, has_llm_credentials
 from app.llm.errors import MissingLLMCredentialsError, UnsupportedLLMProviderError
 

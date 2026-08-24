@@ -13,7 +13,6 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.llm.errors import UnsupportedLLMProviderError
 from app.research_planning.contracts import CompanyIdentitySnapshot
 from app.research_planning.intent import (
     MAX_GENERATED_QUESTION_LENGTH,

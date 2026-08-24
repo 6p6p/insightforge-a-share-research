@@ -22,7 +22,7 @@ from uuid import uuid4
 import pytest
 
 from app.core.config import Settings
-from app.llm.errors import MissingLLMCredentialsError, UnsupportedLLMProviderError
+from app.llm.errors import MissingLLMCredentialsError
 from app.llm.factory import has_llm_credentials, require_llm_credentials
 from app.research_planning.contracts import (
     CompanyIdentitySnapshot,

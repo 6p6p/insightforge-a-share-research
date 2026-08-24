@@ -334,6 +334,7 @@ def make_rewrite_sections_node(deps: Stage5WorkflowDependencies):
             raise Stage5InvalidState("rewrite_sections 需要 target_section_ids")
         trigger_type = state.get("revision_trigger_type")
         artifact_id = state.get("revision_trigger_artifact_id")
+        outline_id = state.get("outline_id")
         if trigger_type not in (TRIGGER_TYPE_AUDIT_REWRITE, TRIGGER_TYPE_HUMAN_REWRITE):
             raise Stage5InvalidState("rewrite_sections 需要有效的 trigger_type")
         if not isinstance(artifact_id, str) or not artifact_id:
@@ -383,7 +384,7 @@ def make_rewrite_sections_node(deps: Stage5WorkflowDependencies):
                     else "draft_quality_guard"
                 )
                 if not outline_id:
-                    raise Stage5InvalidState("rewrite_sections 降级需要 outline_id")
+                    raise Stage5InvalidState("rewrite_sections 降级需要 outline_id") from None
                 degraded_section = await deps.draft_section_service.create_or_get_degraded_section(
                     DraftSectionRequest(outline_id=UUID(outline_id), section_id=section_id),
                     reason=degraded_reason,

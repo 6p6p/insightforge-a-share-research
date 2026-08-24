@@ -25,8 +25,8 @@ from app.draft_section.errors import (
 )
 from app.draft_section.packs import SectionInputPack
 from app.draft_section.prompt import build_writer_messages
-from app.llm.components import COMPONENT_DRAFT_SECTION_WRITER
 from app.llm.base import get_active_llm
+from app.llm.components import COMPONENT_DRAFT_SECTION_WRITER
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 
 

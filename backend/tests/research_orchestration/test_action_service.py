@@ -248,7 +248,9 @@ async def test_act_approve_requires_pass_check_projections_failed(monkeypatch) -
     async def fake_resume(self, run_id, decision, comment=None):
         raise Stage5ApproveRequiresPassCheck()
 
-    async def fake_mark_failed(self, orchestration_id, completed_at, *, error_code, error_message=None):
+    async def fake_mark_failed(
+        self, orchestration_id, completed_at, *, error_code, error_message=None
+    ):
         assert error_code == "stage5_approval_rejected"
         assert error_message and "阻断" in error_message
         return make_orchestration(
@@ -281,7 +283,9 @@ async def test_act_approve_child_already_finished_also_projections_failed(
     async def fake_resume(self, run_id, decision, comment=None):
         raise WorkflowRunAlreadyFinished()
 
-    async def fake_mark_failed(self, orchestration_id, completed_at, *, error_code, error_message=None):
+    async def fake_mark_failed(
+        self, orchestration_id, completed_at, *, error_code, error_message=None
+    ):
         assert error_code == "stage5_approval_rejected"
         return make_orchestration(
             orchestration_id=_OID,

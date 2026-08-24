@@ -30,8 +30,8 @@ from app.evidence.extractor.errors import (
     EvidenceExtractorUnavailable,
 )
 from app.evidence.extractor.prompt import ExtractionContext, build_extraction_messages
-from app.llm.components import COMPONENT_EVIDENCE_EXTRACTION
 from app.llm.base import get_active_llm
+from app.llm.components import COMPONENT_EVIDENCE_EXTRACTION
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.rag.retrieval.contracts import RetrievalHit
 

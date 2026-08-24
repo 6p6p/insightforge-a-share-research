@@ -10,7 +10,6 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.llm.errors import UnsupportedLLMProviderError
 from app.services.source_discovery.contracts import SourceDiscoveryRequest
 from app.services.source_discovery.providers.search import match_provider_domain
 from app.services.source_discovery.search_model import (

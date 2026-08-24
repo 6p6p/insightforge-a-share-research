@@ -32,9 +32,9 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.core.config import Settings
+from app.llm.base import get_active_llm
 from app.llm.components import COMPONENT_INTENT_ENHANCEMENT
 from app.llm.errors import UnsupportedLLMProviderError
-from app.llm.base import get_active_llm
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.research_planning.contracts import CompanyIdentitySnapshot
 

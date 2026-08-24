@@ -27,8 +27,8 @@ from app.analysis.macro.errors import (
 from app.analysis.macro.packs import CompanyEvidencePack, MacroDriverPack
 from app.analysis.macro.prompt import build_analysis_messages
 from app.core.config import Settings
-from app.llm.components import COMPONENT_MACRO_ANALYSIS
 from app.llm.base import get_active_llm
+from app.llm.components import COMPONENT_MACRO_ANALYSIS
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 
 

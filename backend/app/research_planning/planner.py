@@ -20,9 +20,9 @@ from typing import Protocol, runtime_checkable
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.llm.base import get_active_llm
 from app.llm.components import COMPONENT_RESEARCH_PLANNER
 from app.llm.errors import UnsupportedLLMProviderError
-from app.llm.base import get_active_llm
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.research_planning.contracts import (
     ResearchPlannerRequest,

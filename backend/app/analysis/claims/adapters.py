@@ -27,8 +27,8 @@ from app.analysis.claims.errors import (
 )
 from app.analysis.claims.prompt import build_analysis_messages
 from app.core.config import Settings
-from app.llm.components import COMPONENT_CLAIM_ANALYSIS
 from app.llm.base import get_active_llm
+from app.llm.components import COMPONENT_CLAIM_ANALYSIS
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 
 

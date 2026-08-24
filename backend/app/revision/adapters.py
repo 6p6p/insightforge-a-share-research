@@ -16,8 +16,8 @@
 
 from app.core.config import Settings
 from app.draft_section.contracts import WriterDecision
-from app.llm.components import COMPONENT_REVISION_WRITER
 from app.llm.base import get_active_llm
+from app.llm.components import COMPONENT_REVISION_WRITER
 from app.llm.instrumentation import LlmUsageObserver, invoke_structured_with_usage
 from app.revision.errors import (
     RevisionWriterMalformedOutput,
