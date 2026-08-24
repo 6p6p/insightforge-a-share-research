@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.core.errors import IdempotencyConflict, TaskHasDependentData, TaskNotFound
+from app.core.errors import IdempotencyConflict, TaskNotFound
 from app.db.models.research_task import ResearchTaskModel
 from app.domain.tasks import TaskStatus
 from app.schemas.task import TaskCreateRequest
@@ -37,11 +37,6 @@ class _FakeUniqueViolation(Exception):
         self.diag = _FakeDiag("23505", "uq_research_tasks_idempotency_key")
 
 
-class _FakeFkViolation(Exception):
-    def __init__(self) -> None:
-        self.diag = _FakeDiag("23503", "some_fk_constraint")
-
-
 class FakeResearchTaskRepository:
     """In-memory repository; can simulate a late idempotency-key conflict."""
 
@@ -49,13 +44,11 @@ class FakeResearchTaskRepository:
         self,
         *,
         simulate_late_conflict: bool = False,
-        simulate_fk_conflict: bool = False,
     ) -> None:
         self.session = _FakeSession()
         self.by_id: dict[UUID, ResearchTaskModel] = {}
         self.by_key: dict[str, ResearchTaskModel] = {}
         self.simulate_late_conflict = simulate_late_conflict
-        self.simulate_fk_conflict = simulate_fk_conflict
         self.late_existing: ResearchTaskModel | None = None
         self.query_count = 0
         self.last_list: tuple[TaskStatus | None, int, int] | None = None
@@ -89,16 +82,17 @@ class FakeResearchTaskRepository:
         offset: int,
     ) -> tuple[list[ResearchTaskModel], int]:
         self.last_list = (status, limit, offset)
-        rows = [t for t in self.by_id.values() if status is None or t.status == status.value]
+        rows = [
+            t
+            for t in self.by_id.values()
+            if (status is None or t.status == status.value) and t.archived_at is None
+        ]
         rows.sort(key=lambda t: (t.created_at, t.task_id), reverse=True)
         return rows[offset : offset + limit], len(rows)
 
-    async def delete(self, task: ResearchTaskModel) -> None:
-        if self.simulate_fk_conflict:
-            raise IntegrityError("stmt", {}, _FakeFkViolation())
-        self.by_id.pop(task.task_id, None)
-        if task.idempotency_key:
-            self.by_key.pop(task.idempotency_key, None)
+    async def archive(self, task: ResearchTaskModel, archived_at=None) -> None:
+        # v1.2.7-C：软归档——保留数据，仅打时间戳。
+        task.archived_at = archived_at or datetime.now(UTC)
 
 
 def _request(**overrides: object) -> TaskCreateRequest:
@@ -226,31 +220,69 @@ async def test_late_conflict_conflicts_on_different_fingerprint() -> None:
         await service.create_task(_request(), key)
 
 
-async def test_delete_missing_task_raises_not_found() -> None:
+async def test_archive_missing_task_raises_not_found() -> None:
     repo = FakeResearchTaskRepository()
     service = TaskService(repo)
 
     with pytest.raises(TaskNotFound):
-        await service.delete_task(uuid4())
+        await service.archive_task(uuid4())
 
 
-async def test_delete_existing_task_removes_row() -> None:
+async def test_archive_pending_task_marks_archived() -> None:
+    repo = FakeResearchTaskRepository()
+    service = TaskService(repo)
+    task = _model()  # status pending
+    repo.by_id[task.task_id] = task
+
+    await service.archive_task(task.task_id)
+
+    assert task.archived_at is not None
+    # 数据仍在（软归档）；列表不可见
+    assert task.task_id in repo.by_id
+    items, total = await repo.list_tasks(status=None, limit=50, offset=0)
+    assert total == 0
+    assert items == []
+
+
+async def test_archive_completed_task_marks_archived() -> None:
+    repo = FakeResearchTaskRepository()
+    service = TaskService(repo)
+    task = _model(status="completed")
+    repo.by_id[task.task_id] = task
+
+    await service.archive_task(task.task_id)
+
+    assert task.archived_at is not None
+    assert task.status == "completed"  # 状态与下游数据保留
+    items, total = await repo.list_tasks(status=None, limit=50, offset=0)
+    assert total == 0
+
+
+async def test_archive_task_with_downstream_data_succeeds() -> None:
+    # 有 workflow/report/evidence 数据（模拟为 task 仍存在且非空）时归档成功，
+    # 不再抛 FK 冲突：归档是软删除，不触碰下游表。
+    repo = FakeResearchTaskRepository()
+    service = TaskService(repo)
+    task = _model(status="completed")
+    repo.by_id[task.task_id] = task
+
+    await service.archive_task(task.task_id)
+
+    assert task.archived_at is not None
+    assert repo.by_id[task.task_id] is task  # 行保留
+
+
+async def test_archived_task_hidden_from_list_and_detail() -> None:
     repo = FakeResearchTaskRepository()
     service = TaskService(repo)
     task = _model()
     repo.by_id[task.task_id] = task
 
-    await service.delete_task(task.task_id)
+    await service.archive_task(task.task_id)
 
-    assert task.task_id not in repo.by_id
-    assert len(repo.by_id) == 0
-
-
-async def test_delete_with_dependent_data_raises_conflict() -> None:
-    repo = FakeResearchTaskRepository(simulate_fk_conflict=True)
-    service = TaskService(repo)
-    task = _model()
-    repo.by_id[task.task_id] = task
-
-    with pytest.raises(TaskHasDependentData):
-        await service.delete_task(task.task_id)
+    # 列表不可见
+    items, total = await repo.list_tasks(status=None, limit=50, offset=0)
+    assert total == 0 and items == []
+    # 详情 404
+    with pytest.raises(TaskNotFound):
+        await service.get_task(task.task_id)

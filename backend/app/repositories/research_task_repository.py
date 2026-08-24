@@ -1,5 +1,6 @@
 """Data access for research tasks."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -43,8 +44,9 @@ class ResearchTaskRepository:
         limit: int,
         offset: int,
     ) -> tuple[list[ResearchTaskModel], int]:
-        query = select(ResearchTaskModel)
-        count_query = select(func.count()).select_from(ResearchTaskModel)
+        where = [ResearchTaskModel.archived_at.is_(None)]
+        query = select(ResearchTaskModel).where(*where)
+        count_query = select(func.count()).select_from(ResearchTaskModel).where(*where)
         if status is not None:
             query = query.where(ResearchTaskModel.status == status.value)
             count_query = count_query.where(ResearchTaskModel.status == status.value)
@@ -60,8 +62,8 @@ class ResearchTaskRepository:
         rows = (await self._session.execute(query)).scalars().all()
         return list(rows), total
 
-    async def delete(self, task: ResearchTaskModel) -> None:
-        # Delete a research task within the caller-coordinated transaction.
-        # FK violations (downstream rows referencing task.task_id) surface here.
-        await self._session.delete(task)
+    async def archive(self, task: ResearchTaskModel, archived_at: datetime | None = None) -> None:
+        # v1.2.7-C：归档（软删除）。保留全部下游数据，仅设置归档时间戳；
+        # 归档后的任务从用户查询中隐藏（list_tasks 过滤 archived_at IS NULL）。
+        task.archived_at = archived_at or datetime.now(UTC)
         await self._session.flush()

@@ -66,7 +66,11 @@ export async function getTask(taskId: string): Promise<TaskResponse> {
   return apiRequest<TaskResponse>(`/tasks/${taskId}`);
 }
 
-export async function deleteTask(taskId: string): Promise<void> {
+/**
+ * v1.2.7-C: archive (soft delete). DELETE path stays compatible;
+ * backend semantics changed to archive: downstream data is kept.
+ */
+export async function archiveTask(taskId: string): Promise<void> {
   await apiRequest<void>(`/tasks/${taskId}`, { method: 'DELETE' });
 }
 

@@ -7,7 +7,7 @@ import { TaskListPage } from './TaskListPage';
 
 const mocks = vi.hoisted(() => ({
   listTasks: vi.fn(),
-  deleteTask: vi.fn(),
+  archiveTask: vi.fn(),
 }));
 
 vi.mock('../api/tasks', () => ({
@@ -18,7 +18,7 @@ vi.mock('../api/tasks', () => ({
     workspace: (id: string) => ['tasks', 'workspace', id],
   },
   listTasks: mocks.listTasks,
-  deleteTask: mocks.deleteTask,
+  archiveTask: mocks.archiveTask,
 }));
 
 const task = (overrides: Partial<TaskResponse> = {}): TaskResponse => ({
@@ -41,38 +41,38 @@ const task = (overrides: Partial<TaskResponse> = {}): TaskResponse => ({
 
 beforeEach(() => {
   mocks.listTasks.mockReset();
-  mocks.deleteTask.mockReset();
+  mocks.archiveTask.mockReset();
   mocks.listTasks.mockResolvedValue({ items: [task()], total: 1, limit: 20, offset: 0 });
-  mocks.deleteTask.mockResolvedValue(undefined);
+  mocks.archiveTask.mockResolvedValue(undefined);
 });
 
-describe('TaskListPage（v1.2.7-A：研究任务删除）', () => {
-  it('渲染任务列表并显示删除按钮', async () => {
+describe('TaskListPage（v1.2.7-C：研究任务归档）', () => {
+  it('渲染任务列表并显示归档按钮', async () => {
     renderWithProviders(<TaskListPage />);
 
     expect(await screen.findByText('三一重工')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '归档' })).toBeInTheDocument();
   });
 
-  it('点击删除弹出确认弹窗（标题/文案/按钮）', async () => {
+  it('点击归档弹出确认弹窗（标题/文案/按钮）', async () => {
     renderWithProviders(<TaskListPage />);
     await screen.findByText('三一重工');
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '归档' }));
 
-    expect(await screen.findByText('删除研究任务')).toBeInTheDocument();
-    expect(screen.getByText('确认删除该研究任务？删除后无法恢复。')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '确认删除' })).toBeInTheDocument();
+    expect(await screen.findByText('归档研究任务')).toBeInTheDocument();
+    expect(screen.getByText('确认归档该研究任务？归档后任务将从任务列表隐藏，但研究数据会保留。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认归档' })).toBeInTheDocument();
   });
 
-  it('确认删除调用 deleteTask 并刷新列表', async () => {
+  it('确认归档调用 archiveTask 并刷新列表', async () => {
     renderWithProviders(<TaskListPage />);
     await screen.findByText('三一重工');
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }));
-    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    fireEvent.click(screen.getByRole('button', { name: '归档' }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认归档' }));
 
-    await waitFor(() => expect(mocks.deleteTask).toHaveBeenCalledWith('task-1'));
+    await waitFor(() => expect(mocks.archiveTask).toHaveBeenCalledWith('task-1'));
     // 刷新触发 listTasks 再次调用
     await waitFor(() => expect(mocks.listTasks.mock.calls.length).toBeGreaterThanOrEqual(2));
   });

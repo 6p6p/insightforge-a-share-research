@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Layout, message, Popconfirm, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
-import { deleteTask, listTasks, taskKeys } from '../api/tasks';
+import { archiveTask, listTasks, taskKeys } from '../api/tasks';
 import { PageTitle } from '../components/PageTitle';
 import { StatusTag } from '../components/StatusTag';
 import type { TaskResponse } from '../types/task';
@@ -18,15 +18,15 @@ export function TaskListPage(): React.JSX.Element {
     queryFn: () => listTasks({ limit: 20, offset: 0 }),
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: (taskId: string) => deleteTask(taskId),
+  const archiveMutation = useMutation({
+    mutationFn: (taskId: string) => archiveTask(taskId),
     onSuccess: () => {
-      message.success('研究任务已删除');
+      message.success('任务已归档');
       void queryClient.invalidateQueries({ queryKey: taskKeys.all });
     },
     onError: (error: unknown) => {
       message.error(
-        error instanceof Error ? error.message : '删除研究任务失败，请稍后重试',
+        error instanceof Error ? error.message : '归档研究任务失败，请稍后重试',
       );
     },
   });
@@ -70,15 +70,15 @@ export function TaskListPage(): React.JSX.Element {
       width: 90,
       render: (_, record) => (
         <Popconfirm
-          title="删除研究任务"
-          description="确认删除该研究任务？删除后无法恢复。"
-          okText="确认删除"
+          title="归档研究任务"
+          description="确认归档该研究任务？归档后任务将从任务列表隐藏，但研究数据会保留。"
+          okText="确认归档"
           cancelText="取消"
-          okButtonProps={{ danger: true, loading: deleteMutation.isPending }}
-          onConfirm={() => deleteMutation.mutate(record.task_id)}
+          okButtonProps={{ loading: archiveMutation.isPending }}
+          onConfirm={() => archiveMutation.mutate(record.task_id)}
         >
-          <Button type="link" danger size="small">
-            删除
+          <Button type="link" size="small">
+            归档
           </Button>
         </Popconfirm>
       ),

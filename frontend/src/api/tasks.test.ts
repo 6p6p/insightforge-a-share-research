@@ -8,7 +8,7 @@ vi.mock('./client', async (importOriginal) => {
 import { apiRequest } from './client';
 import {
   createExport,
-  deleteTask,
+  archiveTask,
   downloadExportContent,
   getClaimCitation,
   getEvidenceCitation,
@@ -140,14 +140,14 @@ describe('citation API（Stage 6B.2 spec K/L）', () => {
   });
 });
 
-describe('deleteTask API（v1.2.7-A：研究任务删除）', () => {
+describe('archiveTask API（v1.2.7-C：研究任务归档）', () => {
   beforeEach(() => {
     mockedApiRequest.mockReset();
   });
 
-  it('deleteTask → DELETE /tasks/{taskId}', async () => {
+  it('archiveTask → DELETE /tasks/{taskId}（路径兼容）', async () => {
     mockedApiRequest.mockResolvedValue(undefined);
-    await deleteTask('t1');
+    await archiveTask('t1');
     expect(mockedApiRequest).toHaveBeenCalledWith('/tasks/t1', { method: 'DELETE' });
   });
 });

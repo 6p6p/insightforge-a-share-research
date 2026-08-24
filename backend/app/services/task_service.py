@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.core.errors import IdempotencyConflict, TaskHasDependentData, TaskNotFound
+from app.core.errors import IdempotencyConflict, TaskNotFound
 from app.db.models.research_task import ResearchTaskModel
 from app.domain.tasks import TaskStage, TaskStatus
 from app.repositories.research_task_repository import ResearchTaskRepository
@@ -22,7 +22,6 @@ from app.services.task_status_projection import (
 
 _UNIQUE_VIOLATION = "23505"
 _IDEMPOTENCY_CONSTRAINT = "uq_research_tasks_idempotency_key"
-_FK_VIOLATION = "23503"  # foreign_key_violation (RESTRICT)
 
 
 @dataclass
@@ -72,7 +71,8 @@ class TaskService:
 
     async def get_task(self, task_id: UUID) -> TaskResponse:
         task = await self._repository.get_by_id(task_id)
-        if task is None:
+        if task is None or task.archived_at is not None:
+            # v1.2.7-C：归档任务从用户视角隐藏（详情同列表一致返回 404）。
             raise TaskNotFound()
         public_status, with_warnings = await self._project_public_status(task)
         return self._to_response(
@@ -101,24 +101,14 @@ class TaskService:
         ]
         return TaskListResponse(items=items, total=total, limit=limit, offset=offset)
 
-    async def delete_task(self, task_id: UUID) -> None:
-        # 硬删除（不引入软删除）。任务已产生下游数据（workflow_run / plan /
-        # orchestration / export 引用 task_id）时抛 TaskHasDependentData（409）。
+    async def archive_task(self, task_id: UUID) -> None:
+        # v1.2.7-C：软归档。保留全部下游研究数据（workflow_runs / reports /
+        # evidence 等仍可被内部流程引用），仅置 archived_at；归档后任务从
+        # 用户列表/详情隐藏。不存在 → 404。
         task = await self._repository.get_by_id(task_id)
         if task is None:
             raise TaskNotFound()
-        try:
-            await self._repository.delete(task)
-        except IntegrityError as exc:
-            if not self._is_fk_violation(exc):
-                raise
-            raise TaskHasDependentData() from None
-
-    @staticmethod
-    def _is_fk_violation(exc: IntegrityError) -> bool:
-        # SQLSTATE 23503 = foreign_key_violation（RESTRICT 阻断删除）。
-        diag = getattr(exc.orig, "diag", None)
-        return getattr(diag, "sqlstate", None) == _FK_VIOLATION
+        await self._repository.archive(task)
 
     @staticmethod
     def _fingerprint(request: TaskCreateRequest) -> str:

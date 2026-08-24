@@ -85,3 +85,9 @@ class ResearchTaskModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
+    # v1.2.7-C：归档时间戳（NULL=未归档）。归档后任务不出现在用户列表，
+    # 但数据库数据全部保留（软归档，不物理删除）。
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+

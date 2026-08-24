@@ -98,11 +98,12 @@ async def get_task(
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(
+async def archive_task(
     task_id: UUID,
     service: Annotated[TaskService, Depends(get_task_service)],
 ) -> None:
-    await service.delete_task(task_id)
+    # v1.2.7-C：DELETE 语义从物理删除改为归档（软删除）。路径保持兼容。
+    await service.archive_task(task_id)
 
 
 @router.get("", response_model=TaskListResponse)
