@@ -252,7 +252,7 @@ async def test_act_approve_requires_pass_check_projections_failed(monkeypatch) -
         self, orchestration_id, completed_at, *, error_code, error_message=None
     ):
         assert error_code == "stage5_approval_rejected"
-        assert error_message and "阻断" in error_message
+        assert error_message and "系统级审核故障" in error_message
         return make_orchestration(
             orchestration_id=_OID,
             task_id=_TASK_ID,
