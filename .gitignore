@@ -1,4 +1,4 @@
-﻿# --- 本地环境文件（保留 .env.example） ---
+# --- 本地环境文件（保留 .env.example） ---
 .env
 .env.*
 !.env.example
@@ -51,6 +51,9 @@ data/
 exports/
 *.tmp
 *.temp
+cache/
+tmp/
+tmp-test/
 
 # --- Windows / macOS 系统文件 ---
 Thumbs.db
@@ -70,3 +73,7 @@ backend/_r.py
 backend/_tb.py
 docker/overlay.Dockerfile
 frontend/*.txt
+
+#--docs 记录
+docs/decisions/
+docs/internal/
